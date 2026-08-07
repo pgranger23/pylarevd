@@ -175,7 +175,9 @@ def _files_store(paths: list[str], geometry: str | None) -> dict[str, EventFile]
             # One unreadable file must not take the whole browser down with it.
             skipped.append((p, str(exc)))
             print(f"skipping {p}: {exc}", file=sys.stderr)
-    if not out:
+    if paths and not out:
+        # Given files and none of them worked: that is an error worth stopping
+        # for. Given none at all is a deliberate empty start.
         detail = "\n".join(f"  {p}: {e}" for p, e in skipped)
         raise SystemExit(f"no readable files\n{detail}")
     return out
@@ -274,7 +276,8 @@ def render(files: dict[str, EventFile], path, entry, tag, colour, scale, mode,
     blank = go.Figure().update_layout(paper_bgcolor=FIG_BG, plot_bgcolor=AXES_BG,
                                       font_color=FG_MUTED)
     if path is None or entry is None:
-        return blank, ""
+        return blank, ("no file open — paste a path into the box above "
+                       "and press Enter" if not files else "")
     if path not in files:
         return blank, f"ERROR - file not open: {path}"
     want_truth = bool(truth)
@@ -312,7 +315,8 @@ def render(files: dict[str, EventFile], path, entry, tag, colour, scale, mode,
 def build_app(paths: list[str], geometry: str | None = None,
               allow_open: bool = True) -> Dash:
     files = _files_store(paths, geometry)
-    geom = next(iter(files.values())).geometry
+    geom = next(iter(files.values())).geometry if files else (
+        Geometry(geometry) if geometry else None)
     app = Dash(__name__, title="pylarevd")
     # Dash gives a disabled checkbox no colour of its own, so the browser
     # default (dark grey) applies -- unreadable on this panel. State both the
@@ -338,7 +342,7 @@ def build_app(paths: list[str], geometry: str | None = None,
                               dcc.Dropdown(
                                   id="file",
                                   options=file_options(files),
-                                  value=next(iter(files)), clearable=False,
+                                  value=next(iter(files), None), clearable=False,
                                   style={"width": "340px", **_CTL})]),
                     html.Div([html.Label("event", style=_LABEL),
                               dcc.Dropdown(id="entry", clearable=False,
@@ -491,7 +495,11 @@ def build_app(paths: list[str], geometry: str | None = None,
             open_file(files, path, geom)
         except ValueError as exc:
             return no_update, no_update, f"✗ {exc}"
-        full = os.path.expanduser(path.strip())
+        # normalise_path, not expanduser: open_file stores under the
+        # normalised key, so a bare /eos/... path is filed as its root:// URL.
+        # Guessing the key here instead meant the box crashed on exactly the
+        # paths the rewriting exists to support.
+        full = normalise_path(path)
         n = len(files[full])
         return (file_options(files), full,
                 f"✓ {os.path.basename(full)} — {n} event{'s' * (n != 1)}")
@@ -503,6 +511,8 @@ def build_app(paths: list[str], geometry: str | None = None,
                   State("entry", "value"), State("tag", "value"),
                   State("last-event", "data"))
     def _on_file(path, entry, tag, last):
+        if path is None or path not in files:
+            return [], None, [], None, no_update, no_update
         f = files[path]
         # Entry numbers are an artefact of how a file was written. When the user
         # switches files mid-session, follow the *physics* event they were on --
@@ -596,7 +606,7 @@ def build_app(paths: list[str], geometry: str | None = None,
                   prevent_initial_call=True)
     def _jump(value, path):
         from dash import no_update
-        if value is None:
+        if value is None or path not in files:
             return no_update
         return max(0, min(int(value), len(files[path]) - 1))
 
@@ -606,6 +616,8 @@ def build_app(paths: list[str], geometry: str | None = None,
                   prevent_initial_call=True)
     def _step(_p, _n, current, path):
         from dash import ctx
+        if path not in files:
+            return no_update
         n = len(files[path])
         cur = int(current or 0)
         if ctx.triggered_id == "prev":
@@ -739,7 +751,9 @@ def build_app(paths: list[str], geometry: str | None = None,
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("files", nargs="+", help="art-ROOT file(s)")
+    ap.add_argument("files", nargs="*",
+                    help="art-ROOT file(s); optional -- with none, start empty "
+                         "and use the 'open by path' box in the browser")
     ap.add_argument("-g", "--geometry", default=None, help="geometry .npz")
     ap.add_argument("--port", type=int, default=8050)
     ap.add_argument("--host", default="127.0.0.1",

@@ -1709,3 +1709,47 @@ def test_requirements_txt_covers_the_dependencies():
     for dep in _deps.DEPENDENCIES:
         if dep.pip != "xrootd":
             assert dep.pip in text, f"{dep.pip} missing from requirements.txt"
+
+
+# ---------------------------------------------------------------------------
+# Starting with no files, and opening one by path
+# ---------------------------------------------------------------------------
+
+def test_app_starts_with_no_files():
+    """Files must be optional: the browser can start empty and open by path."""
+    from pylarevd.app import build_app, _files_store, render
+    files = _files_store([], None)
+    assert files == {}
+    app = build_app([])
+    assert app.server.test_client().get("/").status_code == 200
+    # and it says what to do rather than showing a blank panel
+    _fig, summary = render(files, None, None, "hitfd", "integral", "auto",
+                           "2d", False)
+    assert "paste a path" in summary
+
+
+def test_unreadable_files_given_explicitly_still_fail():
+    """An empty start is deliberate; files that were given and failed are not."""
+    from pylarevd.app import _files_store
+    with pytest.raises(SystemExit):
+        _files_store(["/nope/definitely-not-here.root"], None)
+
+
+@needs_data
+def test_open_by_path_files_under_the_normalised_key():
+    """The box must look a file up the way open_file stored it.
+
+    A bare /eos/... path is stored as its root:// URL, so looking it up by the
+    typed string crashed with a KeyError -- on exactly the paths the rewriting
+    exists to make convenient.
+    """
+    from pylarevd.app import open_file, normalise_path
+    files = {}
+    opened = open_file(files, ROCKMU)
+    assert normalise_path(ROCKMU) in files
+    assert files[normalise_path(ROCKMU)] is opened
+
+    # the EOS form resolves to the same key the opener would use
+    eos = "/eos/user/x/xyz/sample.root"
+    assert normalise_path(eos).startswith("root://")
+    assert normalise_path(normalise_path(eos)) == normalise_path(eos)

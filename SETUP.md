@@ -143,6 +143,9 @@ tunnel command for you.
 
 ```bash
 python -m pylarevd.app reco.root [more.root ...] --port 8050
+
+# or start with nothing and open files from the browser:
+python -m pylarevd.app --port 8050
 ```
 
 **Step 2 — on your laptop, in a second terminal.** This prints nothing and does
@@ -170,8 +173,16 @@ you are looking at. The link carries `rse=run:subrun:event`, which outranks the
 entry number — so it still lands correctly when opened against a different
 reconstruction pass of the same data.
 
-You can also open a file that was not on the command line by pasting its path
-into the **open by path** box.
+Files on the command line are **optional**. With none, the app starts empty and
+you open files from the **open by path** box — paste a full path and press
+Enter. It joins the dropdown, so you can flip between several. A bare CERN EOS
+path works too:
+
+```
+/eos/user/<u>/<user>/reco.root
+```
+
+which is rewritten to the right xrootd redirector when `/eos` is not mounted.
 
 > Opening files by path lets the browser read anything your account can read.
 > That is fine on localhost, which is why it is enabled there. If you bind

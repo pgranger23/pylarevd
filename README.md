@@ -35,6 +35,9 @@ export PYTHONPATH=/path/to/pylarevd:$PYTHONPATH
 # elsewhere:  pip install -e ".[all]"
 
 python -m pylarevd.app reco.root [more.root ...] --port 8050
+
+# or start with nothing and open files from the browser:
+python -m pylarevd.app --port 8050
 ```
 
 Leave it running. It prints the tunnel command for you.
