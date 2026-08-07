@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build the geometry shim inside the SL7 container: ../../inlar.sh pylarevd/shim/build_shim.sh
+# Build the geometry shim inside the SL7 container, from the repo root:
+#   ./inlar.sh "bash shim/build_shim.sh"
 set -u
 set -e
 cd "$(dirname "$0")"

@@ -98,19 +98,38 @@ Views: `display()` (2-D physical), `display(space="readout")` (channel/tick),
 
 ---
 
-## 4. The interactive browser
+## 4. The interactive browser — the main way to use this
+
+It is a small web app. You run it **on the machine that holds the files**, and
+view it **in the browser on your laptop** through an SSH tunnel. No data is
+copied to your laptop and nothing renders there.
+
+**Step 1 — on the machine with the files.** Leave this running; it prints the
+tunnel command for you.
 
 ```bash
 python -m pylarevd.app reco.root [more.root ...] --port 8050
 ```
 
-It binds to **localhost only**. From your laptop:
+**Step 2 — on your laptop, in a second terminal.** This prints nothing and does
+not return: it is holding the tunnel open. Leave it running too.
 
 ```bash
 ssh -N -L 8050:localhost:8050 <your-host>
 ```
 
-then open <http://localhost:8050>.
+**Step 3 — open <http://localhost:8050>.**
+
+Use `localhost`, not the remote hostname — the tunnel makes the remote port look
+like a local one. The server **binds to loopback only**, so it is not reachable
+over the network; that is why the tunnel is required rather than a convenience.
+
+If the port is taken, pass `--port 8051` and change *both* numbers in the tunnel
+command to match.
+
+Once it is up: step through events with ◀ ▶ or the **left/right arrow keys**,
+switch between the five views, colour hits by charge or by owning object, toggle
+truth/reco/radiological overlays, and change theme and colormap.
 
 Every control is mirrored into the URL, so you can paste a link to exactly what
 you are looking at. The link carries `rse=run:subrun:event`, which outranks the
@@ -160,7 +179,7 @@ naming it, rather than a display full of NaN.
 To export one you need LArSoft, inside the SL7 container:
 
 ```bash
-./inlar.sh "bash pylarevd/shim/build_shim.sh"
+./inlar.sh "bash shim/build_shim.sh"
 ./inlar.sh "python -m pylarevd.export_geometry \
     --fcl geom_dune10kt_1x2x6.fcl --out pylarevd/geom/<name>.npz"
 ```
@@ -201,7 +220,9 @@ with no neutrino.
 | Static export of a 2-D interactive figure comes out empty | `write_image` on the plotly 2-D figures needs WebGL, which a headless machine may not have. Use `.save()` (matplotlib) for static output; the interactive HTML is fine in a real browser. |
 | `no such file` for a `/eos/...` path | `/eos` is not mounted and you have no Kerberos ticket — run `kinit`. See section 5. |
 | Browser shows `ERROR — ...` in the summary band | The message is the actual exception; a stale entry number after switching files is the usual cause. |
-| Port 8050 already in use | `--port 8051`, and change the tunnel to match. |
+| Port 8050 already in use | `--port 8051`, and change **both** numbers in the `ssh -L` command to match. |
+| Browser says "unable to connect" | The tunnel is not up, or you opened the remote hostname instead of `localhost:8050`. The `ssh -N -L` terminal must stay open. |
+| Tunnel opens but the page is blank/spinning | The server is not running on the remote side any more — check the terminal from step 1. |
 
 ---
 

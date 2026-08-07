@@ -13,10 +13,55 @@ compiled extension — just `uproot` + `numpy` + `plotly`/`matplotlib`.
                             (pure python, no LArSoft)
 ```
 
-## Quick start
+> **Installing?** See **[SETUP.md](SETUP.md)** — install, first run, geometry,
+> reading files over xrootd/EOS, running the tests, and a troubleshooting table.
 
-**New here? Read [SETUP.md](SETUP.md)** — install, first run, geometry,
-remote files and troubleshooting.
+## The interactive browser (start here)
+
+This is how most people use pylarevd. It is a small web app: you run it **on the
+machine that has the files**, and view it **in the browser on your laptop**
+through an SSH tunnel. Nothing is rendered on your laptop and no data is copied
+to it.
+
+**Step 1 — on the machine with the files:**
+
+```bash
+source /cvmfs/sft.cern.ch/lcg/views/LCG_110/x86_64-el9-gcc13-opt/setup.sh
+export PYTHONPATH=/path/to/pylarevd:$PYTHONPATH
+
+python -m pylarevd.app reco.root [more.root ...] --port 8050
+```
+
+Leave it running. It prints the tunnel command for you.
+
+**Step 2 — on your laptop, in a second terminal:**
+
+```bash
+ssh -N -L 8050:localhost:8050 <your-host>
+```
+
+This command produces no output and does not return — that is correct, it is
+holding the tunnel open. Leave it running too.
+
+**Step 3 — open <http://localhost:8050> in your browser.**
+
+Note `localhost`, not the remote hostname: the tunnel makes the remote port
+appear as a local one. The server **binds to loopback only**, so it is not
+reachable from the network and there is nothing to expose — which is also why
+the tunnel is required rather than optional.
+
+If port 8050 is taken (a colleague on a shared machine, or your own earlier
+session), use `--port 8051` and change both numbers in the tunnel to match.
+
+Once it is up: step through events with the ◀ ▶ buttons or the **left/right
+arrow keys**, switch between 2-D physical, 2-D readout, 3-D, optical and 3-D
+flash views, colour hits by charge or by the object that owns them, toggle truth
+and reco overlays, and switch theme and colormap. Every control is mirrored into
+the URL, so you can paste a link to exactly what you are looking at — see
+[Browser reference](#browser-reference) for the details, including opening files
+that were not on the command line.
+
+## Command line and python API
 
 ```bash
 source /cvmfs/sft.cern.ch/lcg/views/LCG_110/x86_64-el9-gcc13-opt/setup.sh
@@ -99,7 +144,7 @@ angles or pitches. `shim/geom_shim.cc` is a ~150-line flat-C wrapper around
 Export once per geometry (inside the SL7 container), then never again:
 
 ```bash
-./inlar.sh "bash pylarevd/shim/build_shim.sh"
+./inlar.sh "bash shim/build_shim.sh"
 ./inlar.sh "python -m pylarevd.export_geometry \
     --fcl geom_dune10kt_1x2x6.fcl --out pylarevd/geom/dune10kt_v6_1x2x6.npz"
 ```
@@ -323,15 +368,10 @@ pinned per route rather than guessed. Assns carrying data (`recob::TrackHitMeta`
 have a third vector this reader does not model, so the plain `void` variants are
 preferred.
 
-## Interactive browser
+### Browser reference
 
-```bash
-python -m pylarevd.app reco.root [more.root ...] --port 8050
-# from your laptop:
-ssh -N -L 8050:localhost:8050 <host>
-```
-
-Steps through events without regenerating anything: file/event selection with
+[Running it](#the-interactive-browser-start-here) is at the top of this file.
+It steps through events without regenerating anything: file/event selection with
 prev/next, hit product, colour-by (including by owning object) and scale,
 2D physical / 2D readout / 3D / optical, panel grouping, and truth and
 reco overlays. Controls a view ignores are greyed out — including the truth and
