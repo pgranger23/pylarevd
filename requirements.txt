@@ -1,0 +1,27 @@
+# Everything pylarevd can use. Equivalent to: pip install -e ".[all]"
+#
+# On a CERN/DUNE machine you do not need any of this -- the CVMFS LCG view
+# already has it all:
+#   source /cvmfs/sft.cern.ch/lcg/views/LCG_110/x86_64-el9-gcc13-opt/setup.sh
+#
+# Check what you have with:  python -m pylarevd --check
+
+# required
+numpy>=1.24
+uproot>=5.0
+
+# figures
+matplotlib>=3.6          # static PNG/PDF/SVG
+plotly>=5.15             # interactive figures and self-contained HTML
+
+# the interactive browser (python -m pylarevd.app)
+dash>=2.14
+
+# reading root:// and /eos files. The XRootD client itself is not pip-installed
+# here: it needs the C++ libraries and a compiler. Use the LCG view, or install
+# `xrootd` separately if you have the build dependencies.
+fsspec-xrootd>=0.2
+
+# tests
+pytest>=7
+pillow>=9

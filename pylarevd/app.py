@@ -22,6 +22,10 @@ import sys
 
 from urllib.parse import parse_qsl, urlencode
 
+from ._deps import require
+
+require("dash", "the interactive browser")
+
 from dash import Dash, Input, Output, State, dcc, html, no_update
 
 from .artio import ArtReadError

@@ -70,7 +70,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="pylarevd",
         description="Event display for LArSoft art-ROOT files, in pure python.")
-    ap.add_argument("file", help="art-ROOT file")
+    ap.add_argument("file", nargs="?", help="art-ROOT file")
     ap.add_argument("-e", "--events", default="0",
                     help="entries to draw: '0', '0,3,7', '2-5' or 'all' (default 0)")
     ap.add_argument("-g", "--geometry", default=None,
@@ -116,11 +116,19 @@ def main(argv=None) -> int:
     ap.add_argument("--dpi", type=int, default=None,
                     help="output resolution in dots per inch "
                          "(default: from --preset)")
+    ap.add_argument("--check", action="store_true",
+                    help="report which dependencies and geometries are "
+                         "available, and how to install what is missing")
     ap.add_argument("--list-colormaps", action="store_true",
                     help="describe the available colour ramps and exit")
     ap.add_argument("--list", action="store_true",
                     help="list events and hit products, then exit")
     a = ap.parse_args(argv)
+
+    if a.check:
+        from ._deps import report
+        print(report())
+        return 0
 
     if a.list_colormaps:
         for name, cm in sorted(COLORMAPS.items()):
@@ -129,6 +137,9 @@ def main(argv=None) -> int:
         print("\n  * lightness is not monotonic: fine on screen, but charge "
               "ordering flattens in greyscale")
         return 0
+
+    if a.file is None:
+        ap.error("a file is required (or use --check / --list-colormaps)")
 
     try:
         f = EventFile(a.file, geometry=a.geometry)

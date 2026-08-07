@@ -25,6 +25,17 @@ Python 3.10+, and:
 Nothing else. LArSoft is needed **only** to export a new detector geometry
 (section 6), which most people never have to do.
 
+**At any point, ask pylarevd what it has:**
+
+```bash
+python -m pylarevd --check
+```
+
+It lists every dependency, whether it is installed and at what version, what
+each one buys you, the bundled geometries, and the exact command to install
+anything that is absent. It is also the single most useful thing to paste into
+a bug report.
+
 ---
 
 ## 2. Install
@@ -48,17 +59,40 @@ view's own site-packages and nothing will import.
 git clone https://github.com/pgranger23/pylarevd.git
 cd pylarevd
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[app,test]"
+pip install -e ".[all]"
 ```
 
 That gives you a `pylarevd` command as well as the importable package.
 
+Pick a narrower set if you prefer — the extras are:
+
+| Install | Adds |
+|---|---|
+| `pip install -e .` | the display: `numpy`, `uproot`, `matplotlib`, `plotly` |
+| `pip install -e ".[app]"` | **`dash`** — the interactive browser |
+| `pip install -e ".[xrootd]"` | `fsspec-xrootd`, for `root://` and `/eos` files |
+| `pip install -e ".[test]"` | `pytest`, `pillow` |
+| `pip install -e ".[all]"` | all of the above |
+
+Or, if you prefer a plain requirements file:
+
+```bash
+pip install -r requirements.txt
+```
+
+> The **`XRootD`** client itself is not pip-installed by any of these: it needs
+> the XRootD C++ libraries and a compiler. The CVMFS LCG view already has it
+> (Option A). Without it you can still read local files normally — only
+> `root://` and `/eos` paths are affected.
+
 ### Check it works
 
 ```bash
-python -c "import pylarevd; print(pylarevd.__version__)"
-python -m pylarevd --help
+python -m pylarevd --check
 ```
+
+which should end with `everything pylarevd can use is installed.` — or tell you
+exactly what to install and how.
 
 ---
 
@@ -220,6 +254,7 @@ with no neutrino.
 | Static export of a 2-D interactive figure comes out empty | `write_image` on the plotly 2-D figures needs WebGL, which a headless machine may not have. Use `.save()` (matplotlib) for static output; the interactive HTML is fine in a real browser. |
 | `no such file` for a `/eos/...` path | `/eos` is not mounted and you have no Kerberos ticket — run `kinit`. See section 5. |
 | Browser shows `ERROR — ...` in the summary band | The message is the actual exception; a stale entry number after switching files is the usual cause. |
+| `pylarevd: the interactive browser needs the 'dash' package` | `pip install "pylarevd[app]"`, or source the LCG view. Run `python -m pylarevd --check` to see everything at once. |
 | Port 8050 already in use | `--port 8051`, and change **both** numbers in the `ssh -L` command to match. |
 | Browser says "unable to connect" | The tunnel is not up, or you opened the remote hostname instead of `localhost:8050`. The `ssh -N -L` terminal must stay open. |
 | Tunnel opens but the page is blank/spinning | The server is not running on the remote side any more — check the terminal from step 1. |

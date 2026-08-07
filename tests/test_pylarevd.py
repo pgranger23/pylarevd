@@ -1652,3 +1652,60 @@ def test_no_neutrino_means_nothing_to_separate():
     kept = ev.display_3d(truth=True, radiologicals=False)
     both = ev.display_3d(truth=True, radiologicals=True)
     assert len(kept.mc or []) == len(both.mc or [])
+
+
+# ---------------------------------------------------------------------------
+# Dependency reporting
+# ---------------------------------------------------------------------------
+
+def test_check_report_names_what_is_missing_and_how_to_fix_it():
+    from pylarevd import _deps
+    text = _deps.report()
+    assert "python" in text and "bundled geometries" in text
+    for dep, _ok, _v in _deps.status():
+        assert dep.module in text
+        assert dep.purpose in text
+
+
+def test_require_raises_something_actionable():
+    """A missing optional package must name itself and the fix, not traceback."""
+    from pylarevd import _deps
+    with pytest.raises(SystemExit) as exc:
+        _deps.require("a_package_that_does_not_exist", "some feature")
+    message = str(exc.value)
+    assert "some feature" in message
+    assert "pip install" in message and "--check" in message
+    # and it must not fire for something that is present
+    _deps.require("numpy", "everything")
+
+
+def test_declared_extras_exist_in_pyproject():
+    """_deps.py and pyproject.toml must not drift apart.
+
+    An install hint pointing at an extra that does not exist is worse than no
+    hint at all: it fails with a pip error instead of installing anything.
+    """
+    import tomllib
+    from pylarevd import _deps
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "pyproject.toml"), "rb") as fh:
+        pyproject = tomllib.load(fh)
+    declared = set(pyproject["project"]["optional-dependencies"])
+    used = {d.extra for d in _deps.DEPENDENCIES if d.extra}
+    assert used <= declared, f"extras used but not declared: {used - declared}"
+    # every optional dependency must be reachable from the 'all' extra
+    every = " ".join(pyproject["project"]["optional-dependencies"]["all"])
+    for dep in _deps.DEPENDENCIES:
+        if dep.extra and dep.pip != "xrootd":     # xrootd needs a compiler
+            assert dep.pip in every, f"{dep.pip} missing from the 'all' extra"
+
+
+def test_requirements_txt_covers_the_dependencies():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, "requirements.txt")
+    assert os.path.exists(path)
+    text = open(path).read()
+    from pylarevd import _deps
+    for dep in _deps.DEPENDENCIES:
+        if dep.pip != "xrootd":
+            assert dep.pip in text, f"{dep.pip} missing from requirements.txt"

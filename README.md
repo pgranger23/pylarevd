@@ -15,6 +15,9 @@ compiled extension — just `uproot` + `numpy` + `plotly`/`matplotlib`.
 
 > **Installing?** See **[SETUP.md](SETUP.md)** — install, first run, geometry,
 > reading files over xrootd/EOS, running the tests, and a troubleshooting table.
+>
+> Already have it? `python -m pylarevd --check` reports what is installed, what
+> is missing and how to install it.
 
 ## The interactive browser (start here)
 
@@ -26,8 +29,10 @@ to it.
 **Step 1 — on the machine with the files:**
 
 ```bash
+# on a CERN/DUNE machine everything is already available:
 source /cvmfs/sft.cern.ch/lcg/views/LCG_110/x86_64-el9-gcc13-opt/setup.sh
 export PYTHONPATH=/path/to/pylarevd:$PYTHONPATH
+# elsewhere:  pip install -e ".[all]"
 
 python -m pylarevd.app reco.root [more.root ...] --port 8050
 ```
