@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+demo/
+evd_out/
+shim/*.so
+
+# editor / OS noise
+*.swp
+.DS_Store
+.venv/
+*.egg-info/
+build/
+dist/

@@ -1,0 +1,21 @@
+#include "geometry_dune.fcl"
+#include "detectorproperties_dune.fcl"
+#include "larproperties_dune.fcl"
+#include "detectorclocks_dune.fcl"
+
+# Full DUNE FD-HD 10kt module, matching the atmospheric-nu tau_CC sample:
+#   Geometry: { GDML: "dune10kt_v6_refactored.gdml"  Name: "dune10kt_v6"
+#               SortingParameters: { tool_type: "GeoObjectSorterAPA" }
+#               SurfaceY: 147828 }
+#   WireReadout: { ChannelsPerOpDet: 1  service_provider: "DUNEWireReadout" }
+# read back out of the file's own RootFileDB parameter sets, not guessed.
+Geometry:           @local::dune10kt_v6_geo
+WireReadout:        { ChannelsPerOpDet: 1 }
+DetectorProperties: @local::dunefd_detproperties
+LArProperties:      @local::dunefd_properties
+DetectorClocks:     @local::dunefd_detectorclocks
+
+# Same 4492-tick readout window as the 1x2x6 sample (confirmed in this file's
+# stored NumberTimeSamples / ReadOutWindowSize).
+DetectorProperties.NumberTimeSamples: 4492
+DetectorProperties.ReadOutWindowSize: 4492

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pylarevd"
+version = "0.1.0"
+description = "A LArSoft event display in pure python: reads art-ROOT files with uproot, no ROOT/art/LArSoft needed at display time"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "uproot>=5.0", "matplotlib>=3.6", "plotly>=5.15"]
+
+[project.optional-dependencies]
+app = ["dash>=2.14"]
+test = ["pytest>=7"]
+
+[project.scripts]
+pylarevd = "pylarevd.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pylarevd*"]
+
+[tool.setuptools.package-data]
+pylarevd = ["geom/*.npz"]

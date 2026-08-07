@@ -1,0 +1,17 @@
+#include "geometry_dune.fcl"
+#include "detectorproperties_dune.fcl"
+#include "larproperties_dune.fcl"
+#include "detectorclocks_dune.fcl"
+
+# Geometry / detector configuration matching the reco1 sample
+# (dune10kt_v6_1x2x6, GDML dune10kt_v6_refactored_1x2x6.gdml, SurfaceY 147828)
+Geometry:           @local::dune10kt_1x2x6_v6_refactored_geo
+# matches the WireReadout service block of the reco1 job (service_provider DUNEWireReadout)
+WireReadout:        { ChannelsPerOpDet: 1 }
+DetectorProperties: @local::dunefd_detproperties
+LArProperties:      @local::dunefd_properties
+DetectorClocks:     @local::dunefd_detectorclocks
+
+# The reco1 job ran with a 4492-tick readout window (see config_dumper output)
+DetectorProperties.NumberTimeSamples: 4492
+DetectorProperties.ReadOutWindowSize: 4492
