@@ -312,7 +312,12 @@ def _native(a: np.ndarray) -> np.ndarray:
 class ArtFile:
     """An art-ROOT file, read without ROOT, art or LArSoft."""
 
-    _BASKET_CACHE = 8         # branches in flight during a render, roughly
+    #: Decompressed baskets kept warm. art writes one basket per entry by
+    #: default (AutoFlush=1), so this can NOT save a re-read when stepping
+    #: events -- it only helps when the same (branch, entry) is read twice, and
+    #: on files whose baskets span several entries. Sized for the number of
+    #: products a full render touches rather than the 8 it used to hold.
+    _BASKET_CACHE = 48
 
     def __init__(self, path: str):
         self.path = str(path)
@@ -573,11 +578,12 @@ class ArtFile:
         a handful of slots also covers prev/next browsing.
         """
         key = (id(branch), basket_i)
-        hit = self._baskets.get(key)
+        hit = self._baskets.pop(key, None)
         if hit is None:
             if len(self._baskets) >= self._BASKET_CACHE:
-                self._baskets.pop(next(iter(self._baskets)))
-            hit = self._baskets[key] = branch.basket(basket_i)
+                self._baskets.pop(next(iter(self._baskets)))   # least recent
+            hit = branch.basket(basket_i)
+        self._baskets[key] = hit             # reinsert: true LRU, not FIFO
         return hit
 
     def _entry_bytes(self, branch, entry: int) -> bytes:

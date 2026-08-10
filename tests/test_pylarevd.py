@@ -580,9 +580,9 @@ def test_assns_agree_with_track_trajectories():
     """
     f = EventFile(ATMNU, geometry=GEOM)
     ev = f[0]
-    groups = ev.hit_group("track")
+    # Both sides raw: the association was built against the full collection.
+    groups = ev.hit_group("track", best_match=False)
     per_track = np.bincount(groups[groups >= 0])
-    # hit_group indices refer to the full collection, so compare against it
     traj_total = [len(t) for t in ev.tracks(best_match=False).points]
     # trajectories drop masked (-999) points, so they are a subset
     assert len(per_track) == len(traj_total)
@@ -1292,7 +1292,9 @@ def test_readout_view_has_no_true_vertex():
 def test_uncontained_events_are_flagged_and_explained():
     if not os.path.exists(ATMNU):
         pytest.skip("atmnu sample absent")
-    d = EventFile(ATMNU)[0].display()
+    # truth=True: the visible-energy line is only computed when the deposits
+    # were actually loaded, since deriving it costs a full MCParticle decode.
+    d = EventFile(ATMNU)[0].display(truth=True)
     block = d._truth_block()
     assert "visible energy" in block
     assert d.containment is not None
@@ -2081,3 +2083,107 @@ def test_partial_decodes_are_reported_not_silent():
     text = ev.display("hitfd", truth=True).summary()
     assert any(name in text for name in partial), \
         "a partial decode happened but the summary never says so"
+
+
+@needs_data
+@needs_geom
+def test_hit_group_and_tracks_agree_by_default():
+    """The two defaults used to disagree silently.
+
+    hit_group() indexed the raw collection while tracks() returned the filtered
+    one, so 781 hits pointed at the wrong track and 40 indexed past the end.
+    """
+    ev = EventFile(ATMNU, geometry=GEOM)[0]
+    tracks, groups = ev.tracks(), ev.hit_group("track")
+    assert groups.max() < len(tracks), "group index is out of range for tracks()"
+    # and the relabelling is faithful: each filtered group holds exactly the
+    # hits its raw counterpart held
+    raw_groups = ev.hit_group("track", best_match=False)
+    keep = np.flatnonzero(ev.pandora_best_match()["tracks"])
+    for filtered, original in enumerate(keep):
+        assert set(np.flatnonzero(groups == filtered)) == \
+            set(np.flatnonzero(raw_groups == original))
+
+
+@needs_data
+def test_cached_products_cannot_be_mutated():
+    """The cache returns the same object; mutation used to poison it silently."""
+    ev = EventFile(ROCKMU)[0]
+    hits = ev.hits()
+    with pytest.raises(ValueError):
+        hits.integral[0] = -999.0
+    assert hits.integral.copy().flags.writeable      # a copy is yours to change
+    geom = ev.geometry
+    with pytest.raises(ValueError):
+        geom.wire_coord[0] = -1.0
+
+
+@needs_data
+@needs_geom
+def test_subsetting_does_not_alias_the_source():
+    """Ragged fields were handed out by reference, so a subset reached back."""
+    ev = EventFile(ATMNU, geometry=GEOM)[0]
+    tracks = ev.tracks()
+    if not len(tracks):
+        pytest.skip("no tracks")
+    before = float(tracks.points[0][0, 0])
+    subset = tracks[np.array([0])]
+    subset.points[0][0, 0] = 123456.0          # must be allowed, and isolated
+    assert float(tracks.points[0][0, 0]) == before
+
+
+@needs_data
+@needs_geom
+def test_plain_render_does_not_decode_truth():
+    """Deriving the visible-energy line cost a hidden 34k-particle decode.
+
+    A display built with truth=False took 8.85 s instead of ~0.4 s because
+    _truth_block() computed it unconditionally.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    ev = EventFile(ATMNU, geometry=GEOM)[0]
+    fig = ev.display("hitfd").figure()
+    plt.close(fig)
+    assert not any(k[0] in ("mc_particles", "_mc_raw") for k in ev._memo), \
+        "a truth-free render decoded MCParticles anyway"
+    # and the headline is still there -- only the derived line is skipped
+    assert ev.display("hitfd")._truth_headline()
+
+
+@needs_data
+def test_one_mcparticle_decode_serves_both_min_points():
+    """min_points=1 after min_points=2 re-walked the whole byte stream."""
+    import time
+    ev = EventFile(ATMNU)[0] if os.path.exists(ATMNU) else EventFile(ROCKMU)[0]
+    start = time.perf_counter()
+    ev.mc_particles(min_points=2)
+    first = time.perf_counter() - start
+    start = time.perf_counter()
+    ev.mc_particles(min_points=1)
+    second = time.perf_counter() - start
+    assert second < max(first * 0.3, 0.05), \
+        f"second view cost {second:.2f}s against {first:.2f}s -- decode not shared"
+
+
+@needs_data
+def test_event_cache_is_lru_not_fifo():
+    """Re-touching an event used to leave it first in line for eviction."""
+    f = EventFile(ROCKMU)
+    if len(f) < 6:
+        pytest.skip("need a few events")
+    for i in range(f._EVENT_CACHE):
+        f[i]
+    f[0]                                   # re-touch the oldest
+    f[f._EVENT_CACHE]                      # force one eviction
+    assert 0 in f._events, "the most recently used event was evicted"
+
+
+@needs_data
+def test_eventfile_can_be_closed():
+    with EventFile(ROCKMU) as f:
+        assert len(f) > 0
+    f2 = EventFile(ROCKMU)
+    f2.close()
+    assert not f2._events

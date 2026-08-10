@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 import struct
 import weakref
+from functools import lru_cache
 from dataclasses import dataclass
 
 import numpy as np
@@ -112,6 +113,25 @@ class Cursor:
         self.pos += 4
         return v
 
+    #: numpy big-endian dtype -> struct format, for the one-value fast path.
+    _STRUCT = {">?": "?", ">i1": "b", ">u1": "B", ">i2": "h", ">u2": "H",
+               ">i4": "i", ">u4": "I", ">i8": "q", ">u8": "Q",
+               ">f4": "f", ">f8": "d"}
+
+    def scalar(self, dtype: str, size: int):
+        """One value, without building a length-1 ndarray.
+
+        The sequential reader does this 720k times for a single MCParticle
+        product; np.frombuffer + astype + newbyteorder costs 1.9 us against
+        0.2 us for struct.unpack_from.
+        """
+        fmt = self._STRUCT.get(dtype)
+        if fmt is None:                      # e.g. float16, no struct code
+            return self.array(dtype, 1, size)[0]
+        v = struct.unpack_from(">" + fmt, self.buf, self.pos)[0]
+        self.pos += size
+        return v
+
     def array(self, dtype: str, count: int, size: int) -> np.ndarray:
         a = np.frombuffer(self.buf, dtype, count, self.pos)
         self.pos += count * size
@@ -164,13 +184,18 @@ def _split_template(arg: str) -> list[str]:
     return out
 
 
+@lru_cache(maxsize=512)
 def parse_type(typename: str) -> tuple[str, list[str]]:
-    """``vector<pair<int,float> >`` -> ``("vector", ["pair<int,float>"])``."""
+    """``vector<pair<int,float> >`` -> ``("vector", ["pair<int,float>"])``.
+
+    Cached: pure, and called ~104k times per event for about six distinct
+    type names, which cost ~2.4 s of an 8.2 s MCParticle decode.
+    """
     t = typename.strip().rstrip("*").strip()
     m = re.match(r"^([A-Za-z_][\w:]*)\s*<(.*)>$", t, re.S)
     if not m:
-        return t, []
-    return m.group(1), _split_template(m.group(2))
+        return t, ()
+    return m.group(1), tuple(_split_template(m.group(2)))
 
 
 _SEQUENCES = {"vector", "list", "deque", "set", "multiset", "unordered_set"}
@@ -192,7 +217,7 @@ def read_value(file, typename: str, cur: Cursor, *, as_element: bool = False):
     base = typename.strip()
     if base in _PRIMITIVES:
         dt, size = _PRIMITIVES[base]
-        return cur.array(dt, 1, size)[0]
+        return cur.scalar(dt, size)
     if base in ("string", "std::string", "TString"):
         return _read_string(cur)
 
@@ -236,7 +261,7 @@ def read_bare(file, typename: str, cur: Cursor):
     base = typename.strip()
     if base in _PRIMITIVES:
         dt, size = _PRIMITIVES[base]
-        return cur.array(dt, 1, size)[0]
+        return cur.scalar(dt, size)
     if base in ("string", "std::string", "TString"):
         return cur.string()
     kind, _args = parse_type(base)
@@ -617,7 +642,7 @@ def _read_element(file, el, cur: Cursor, out: dict, budget_end: int = -1,
     dt, size = _ROOT_TYPES[ftype]
     length = el.array_length
     if length <= 1:
-        out[name] = cur.array(dt, 1, size)[0]
+        out[name] = cur.scalar(dt, size)
     else:
         out[name] = cur.array(dt, length, size)
 

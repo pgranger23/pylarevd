@@ -219,7 +219,7 @@ The display is checked against MC truth, not just eyeballed:
 a whole population metres off the track.
 
 ```bash
-python -m pytest tests/ -q     # 163 tests, ~6 min
+python -m pytest tests/ -q     # 170 tests, ~3.5 min
 ```
 
 ## Themes, colormaps and output targets
@@ -616,6 +616,26 @@ Rather than fail quietly, the views state what they know:
   particle the event is about.
 * **`run R / subrun S / event E is not in <file>`** when following an event
   across files fails, instead of silently showing a different one.
+
+## Working with the arrays
+
+Product accessors are memoised and hand back the **same object** each time, so
+the arrays they expose are read-only. Copy before modifying:
+
+```python
+h = ev.hits()
+h.integral[:] = 0          # ValueError: assignment destination is read-only
+q = h.integral.copy()      # yours to change
+sub = h[h.integral > 200]  # selections own their data
+```
+
+Mutating them used to corrupt the cached product for the rest of the event's
+life, silently. The same applies to `Geometry`, which is shared by every
+`EventFile` opened against the same `.npz`.
+
+`hit_group()` and `tracks()`/`showers()` agree by default: indices from the
+former index the collection the latter returns. Pass `best_match=False` to
+both if you want the raw Pandora collections instead.
 
 ## Known limits
 

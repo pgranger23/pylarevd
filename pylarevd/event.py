@@ -75,7 +75,12 @@ class _Selectable:
         for field in self.__dataclass_fields__:
             current = getattr(self, field)
             if field in self._RAGGED:
-                values[field] = [current[i] for i in idx]
+                # copy: fancy indexing copies ndarray fields, but a list of
+                # arrays would otherwise hand out the SOURCE's arrays, so
+                # mutating a subset reached back into the cached original.
+                values[field] = [np.array(current[i], copy=True)
+                                 if isinstance(current[i], np.ndarray)
+                                 else current[i] for i in idx]
             elif isinstance(current, np.ndarray):
                 values[field] = current[idx]
             else:
@@ -422,6 +427,29 @@ class OpticalActivity(_Selectable):
         return f"<OpticalActivity {self.label!r} flashes={nf} hits={len(self) - nf}>"
 
 
+def _freeze(value):
+    """Make a cached result read-only, in place.
+
+    The cache hands back the same object every time, so ``ev.hits().integral[:]
+    = x`` -- an ordinary numpy idiom -- silently corrupted the cached product
+    for the rest of the Event's life. Freezing turns that into an immediate
+    error instead of wrong physics later. Copy first if you need to modify:
+    ``h.integral.copy()``.
+    """
+    if isinstance(value, np.ndarray):
+        value.setflags(write=False)
+    elif hasattr(value, "__dataclass_fields__"):
+        for field in value.__dataclass_fields__:
+            attr = getattr(value, field, None)
+            if isinstance(attr, np.ndarray):
+                attr.setflags(write=False)
+            elif isinstance(attr, list):
+                for item in attr:
+                    if isinstance(item, np.ndarray):
+                        item.setflags(write=False)
+    return value
+
+
 def _memoised(method):
     """Cache an accessor's result per (name, args) on the Event.
 
@@ -433,7 +461,7 @@ def _memoised(method):
     def wrapper(self, *args, **kwargs):
         key = (method.__name__, args, tuple(sorted(kwargs.items())))
         if key not in self._memo:
-            self._memo[key] = method(self, *args, **kwargs)
+            self._memo[key] = _freeze(method(self, *args, **kwargs))
         return self._memo[key]
     return wrapper
 
@@ -808,6 +836,17 @@ class Event:
         return np.asarray(mc.track_id)[d < tol]
 
     @_memoised
+    def _mc_raw(self, tag: str | None = None):
+        """The decoded MCParticle product, shared across min_points views.
+
+        mc_particles() is memoised per (tag, min_points), so asking for
+        min_points=1 after min_points=2 re-walked the whole byte stream --
+        7 s for 34k particles, paid twice on any path that wants both.
+        """
+        product = self._pick(_MCPART_CLASS, tag, prefer=("largeant",))
+        return product, self._src.art.read(product, _MCPART_CLASS, self.entry)
+
+    @_memoised
     def mc_particles(self, tag: str | None = None, *,
                      min_points: int = 2) -> MCParticles:
         """True trajectories, one polyline per simulated particle.
@@ -816,8 +855,7 @@ class Event:
         them single-step; ``min_points`` drops those so the overlay stays
         readable.
         """
-        product = self._pick(_MCPART_CLASS, tag, prefer=("largeant",))
-        raw = self._src.art.read(product, _MCPART_CLASS, self.entry)
+        product, raw = self._mc_raw(tag)
         pts, pdg, tid, mom, proc = [], [], [], [], []
         for i, traj in enumerate(raw["ftrajectory"]):
             steps = traj.get("ftrajectory") or []
@@ -954,7 +992,8 @@ class Event:
     }
 
     @_memoised
-    def hit_group(self, colour_by: str = "track", tag: str | None = None) -> np.ndarray:
+    def hit_group(self, colour_by: str = "track", tag: str | None = None,
+                  *, best_match: bool = True) -> np.ndarray:
         """For every hit, the index of the reconstructed object it belongs to.
 
         Returns -1 where a hit is not associated with anything -- which is most
@@ -962,6 +1001,17 @@ class Event:
 
         ``colour_by`` is one of ``track``, ``shower``, ``slice``, ``cluster``
         or ``pfparticle`` -- the same vocabulary ``EventDisplay`` uses.
+
+        **Indices refer to the collection the matching accessor returns.** With
+        ``best_match=True`` (the default, matching :meth:`tracks` and
+        :meth:`showers`) they index the filtered collection, so
+        ``ev.tracks().points[g]`` is correct for any ``g >= 0``. The two used to
+        disagree while both defaulted to their own convention: 781 hits pointed
+        at the wrong track and 40 indexed past the end. Objects dropped by the
+        filter become -1, since the display no longer shows them.
+
+        Pass ``best_match=False`` to index the raw collection, which is what
+        the association itself was built against.
         """
         if colour_by not in self._ASSN_ROUTES:
             raise ValueError(f"colour_by={colour_by!r} is not one of "
@@ -992,6 +1042,18 @@ class Event:
             ok = (mapping >= 0) & (mapping < len(lookup))
             out[ok] = lookup[mapping[ok]]
             mapping = out
+
+        # Re-express in the filtered collection's index space so the default
+        # here and the default of tracks()/showers() mean the same thing.
+        if best_match and colour_by in ("track", "shower"):
+            keep = self.pandora_best_match().get(colour_by + "s")
+            if keep is not None:
+                renumber = np.full(len(keep) + 1, -1, np.int64)
+                renumber[:len(keep)][keep] = np.arange(int(keep.sum()))
+                ok = (mapping >= 0) & (mapping < len(keep))
+                out = np.full(len(mapping), -1, np.int64)
+                out[ok] = renumber[mapping[ok]]
+                mapping = out
         return mapping
 
     def _assns_for(self, left: str, right: str, prefer: tuple[str, ...] = ()):
@@ -1105,6 +1167,7 @@ class Event:
 
     # ---- display -------------------------------------------------------
 
+    @_memoised
     def capabilities(self) -> dict:
         """What this file can actually show, probed once per event.
 
@@ -1331,6 +1394,26 @@ class EventFile:
                 + "\n  ".join(os.path.basename(f) for f in found))
         return found[0]
 
+    def close(self) -> None:
+        """Release the underlying file handle and drop cached events.
+
+        Nothing released these before, so every file opened in a long-running
+        browser session -- including remote ones holding an XRootD connection
+        -- stayed open for the life of the process.
+        """
+        self._events.clear()
+        self._scan_cache.clear()
+        try:
+            self.art.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "EventFile":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
     def __repr__(self) -> str:
         return (f"<EventFile {os.path.basename(self.path)} "
                 f"events={len(self)} geometry={self.geometry.detector!r}>")
@@ -1346,11 +1429,12 @@ class EventFile:
             raise IndexError(f"event {i} out of range (0..{n - 1})")
         # Hand back the same Event object so its decoded products stay cached
         # across repeated access (the browser re-indexes on every callback).
-        cached = self._events.get(i)
+        cached = self._events.pop(i, None)
         if cached is None:
             if len(self._events) >= self._EVENT_CACHE:
-                self._events.pop(next(iter(self._events)))
-            cached = self._events[i] = Event(self, i)
+                self._events.pop(next(iter(self._events)))   # least recent
+            cached = Event(self, i)
+        self._events[i] = cached            # reinsert: re-access protects it
         return cached
 
     def __iter__(self):

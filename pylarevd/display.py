@@ -597,10 +597,15 @@ class _TruthInfo:
             lines.append(f"  {con.description}")
         # Visible energy explains a sparse event far better than the hit count
         # does: an interaction at the wall can bring in 10 GeV and leave 300 MeV.
-        try:
-            vis = self.event.neutrino_visible_energy()
-        except Exception:
-            vis = None
+        # Only when truth was actually requested. Computing it unconditionally
+        # decoded 34k MCParticles behind the scenes, so a plain render with
+        # truth=False took 8.85 s instead of ~0.2 s.
+        vis = None
+        if getattr(self, "truth", None) is not None:
+            try:
+                vis = self.event.neutrino_visible_energy()
+            except Exception:
+                vis = None
         if vis is not None and nu.energy > 0:
             lines.append(f"  visible energy {vis:.0f} MeV of {nu.energy * 1000:.0f} "
                          f"MeV true ({100 * vis / (nu.energy * 1000):.1f}%)")

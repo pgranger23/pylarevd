@@ -35,6 +35,18 @@ class GeometryError(RuntimeError):
     pass
 
 
+def _ro(a: np.ndarray) -> np.ndarray:
+    """Mark a derived array read-only.
+
+    Geometry instances are shared process-wide by ``load_geometry``'s cache, so
+    a caller mutating one of these would corrupt every EventFile on that path,
+    including ones opened later. cached_property results need this explicitly:
+    they are built after __init__ has run.
+    """
+    a.setflags(write=False)
+    return a
+
+
 @dataclass(frozen=True)
 class Containment:
     """Where a point sits relative to the TPC active volume."""
@@ -110,6 +122,15 @@ class Geometry:
         self.p_nx = self._z["p_nx"]
 
         self._build_index()
+        # One Geometry is shared by every EventFile on this path (load_geometry
+        # caches it), so a mutation here would corrupt every file in the
+        # process, including ones opened later.
+        for name, value in list(vars(self).items()):
+            if isinstance(value, np.ndarray):
+                value.setflags(write=False)
+        for value in self._z.values():
+            if isinstance(value, np.ndarray):
+                value.setflags(write=False)
 
     def __repr__(self) -> str:
         return (f"<Geometry {self.detector!r} wires={len(self.w_wire)} "
@@ -160,8 +181,7 @@ class Geometry:
         cz = 0.5 * (self._z["w_z0"] + self._z["w_z1"])
         w = py * cy + pz * cz
         w[bad] = np.nan
-        return w
-
+        return _ro(w)
     @cached_property
     def plane_measure_dir(self) -> np.ndarray:
         """(nplanes, 2) measurement direction ``p = (py, pz)`` per readout plane.
@@ -173,22 +193,23 @@ class Geometry:
         uy = self._z["w_y1"] - self._z["w_y0"]
         uz = self._z["w_z1"] - self._z["w_z0"]
         norm = np.hypot(uy, uz)
-        norm[norm == 0] = 1.0
-        uy, uz = uy / norm, uz / norm
+        safe = np.where(norm == 0, 1.0, norm)
+        uy, uz = uy / safe, uz / safe
         flip = uy < 0
         uy = np.where(flip, -uy, uy)
         uz = np.where(flip, -uz, uz)
 
         out = np.full((len(self.p_plane), 2), np.nan)
         rows = self.plane_rows(self.w_cryo, self.w_tpc, self.w_plane)
-        # every wire of a plane is parallel, so the first one fixes the direction
-        seen = np.zeros(len(self.p_plane), bool)
-        for i, r in enumerate(rows):
-            if r >= 0 and not seen[r]:
-                out[r] = (-uz[i], uy[i])
-                seen[r] = True
-        return out
-
+        # Every wire of a plane is parallel, so the first VALID one fixes the
+        # direction. Vectorised: the python loop over all 833k wires of the
+        # full 10kt map cost 0.33 s of the first display call.
+        usable = np.flatnonzero((rows >= 0) & (norm > 0))
+        if len(usable):
+            _uniq, first = np.unique(rows[usable], return_index=True)
+            sel = usable[first]
+            out[rows[sel]] = np.column_stack([-uz[sel], uy[sel]])
+        return _ro(out)
     @cached_property
     def plane_wire_angle(self) -> np.ndarray:
         """Wire angle from vertical, in degrees, per readout plane.
@@ -199,8 +220,7 @@ class Geometry:
         """
         p = self.plane_measure_dir
         # wire direction u = (p_z, -p_y); angle measured from the y axis
-        return np.degrees(np.arctan2(-p[:, 0], p[:, 1]))
-
+        return _ro(np.degrees(np.arctan2(-p[:, 0], p[:, 1])))
     @cached_property
     def orientation_key(self) -> np.ndarray:
         """Integer per readout plane; equal iff the wires are parallel.
@@ -210,8 +230,7 @@ class Geometry:
         """
         ang = self.plane_wire_angle.copy()
         ang[~np.isfinite(ang)] = 999.0
-        return np.round(ang * 10).astype(np.int64)
-
+        return _ro(np.round(ang * 10).astype(np.int64))
     @property
     def has_optical(self) -> bool:
         """Whether photon-detector positions were exported with this geometry."""
@@ -242,8 +261,7 @@ class Geometry:
         ok = (ch >= 0) & (ch < len(table))
         if ok.any():
             out[ok] = table[ch[ok]]
-        return out
-
+        return _ro(out)
     @cached_property
     def channel_view(self) -> np.ndarray:
         """View of every readout channel, indexed by channel number.
@@ -255,8 +273,7 @@ class Geometry:
         """
         out = np.full(self.nchannels, -1, np.int32)
         out[self.w_chan] = self.w_view
-        return out
-
+        return _ro(out)
     @cached_property
     def drift_sign(self) -> np.ndarray:
         """+1/-1 per readout plane: which way the drift field points.
@@ -266,8 +283,7 @@ class Geometry:
         s = np.sign(self.p_slope)
         s[s == 0] = np.sign(self.p_nx[s == 0])
         s[s == 0] = 1.0
-        return s.astype(np.int32)
-
+        return _ro(s.astype(np.int32))
     @cached_property
     def tpcs(self) -> list[TPCBox]:
         z = self._z
@@ -280,8 +296,8 @@ class Geometry:
     def active_boxes(self) -> np.ndarray:
         """(N, 6) array of TPC active volumes as ``[xmin, ymin, zmin, xmax, ymax, zmax]``."""
         z = self._z
-        return np.stack([z["t_xmin"], z["t_ymin"], z["t_zmin"],
-                         z["t_xmax"], z["t_ymax"], z["t_zmax"]], axis=1)
+        return _ro(np.stack([z["t_xmin"], z["t_ymin"], z["t_zmin"],
+                             z["t_xmax"], z["t_ymax"], z["t_zmax"]], axis=1))
 
     @cached_property
     def wrapped_channels(self) -> int:
@@ -293,8 +309,15 @@ class Geometry:
         """
         key = ((self.w_tpc.astype(np.int64) << 40)
                | (self.w_plane.astype(np.int64) << 20) | self.w_wire)
-        pairs = np.unique(np.stack([self.w_chan.astype(np.int64), key]), axis=1)
-        _, counts = np.unique(pairs[0], return_counts=True)
+        chan = self.w_chan.astype(np.int64)
+        # lexsort + adjacent-difference instead of np.unique(axis=1), which
+        # cost 0.93 s on the full 10kt map for the same answer.
+        order = np.lexsort((key, chan))
+        c, k = chan[order], key[order]
+        new = np.empty(len(c), bool)
+        new[0] = True
+        new[1:] = (c[1:] != c[:-1]) | (k[1:] != k[:-1])
+        _uniq, counts = np.unique(c[new], return_counts=True)
         return int((counts > 1).sum())
 
     def in_active(self, points) -> np.ndarray:
