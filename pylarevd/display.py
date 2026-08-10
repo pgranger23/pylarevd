@@ -212,13 +212,20 @@ def _vector_text() -> None:
     matplotlib.rcParams["ps.fonttype"] = 42
 
 
-def _data_ylim(values, pad: float = 0.08):
-    """(lo, hi) framing the data with a margin, or (None, None) if degenerate."""
+def _data_ylim(values, pad: float = 0.08, trim: float = 1.0):
+    """(lo, hi) framing the data with a margin, or (None, None) if degenerate.
+
+    Robust percentiles rather than min/max: on a radiological sample a few
+    out-of-time hits sit far outside the active volume (there is no t0
+    correction), and letting them set the range squeezed the real cluster into
+    the bottom fifth of the panel.
+    """
     v = np.asarray(values, float)
     v = v[np.isfinite(v)]
     if not len(v):
         return None, None
-    lo, hi = float(v.min()), float(v.max())
+    lo, hi = (float(np.percentile(v, trim)), float(np.percentile(v, 100 - trim))) \
+        if len(v) > 50 else (float(v.min()), float(v.max()))
     if hi <= lo:
         return lo - 1.0, hi + 1.0
     m = pad * (hi - lo)
@@ -909,6 +916,12 @@ class EventDisplay(_TruthInfo):
             return None            # readout axes are channel/tick, not position
         v = np.asarray(nu.vertex, float)
         if not np.isfinite(v).all():
+            return None
+        # A panel showing one drift volume must not display a vertex from the
+        # other: with clip=False the first face claims the point regardless, so
+        # it appeared on every merge="none" panel at a drift coordinate that
+        # volume cannot hold. drift_sign == 0 means the panel spans both.
+        if panel.drift_sign and np.sign(v[0]) != np.sign(panel.drift_sign):
             return None
         pr = self.project_points(panel, v[0:1], v[1:2], v[2:3], clip=False)
         if pr is None:
@@ -1952,7 +1965,7 @@ class FlashDisplay3D(_TruthInfo):
                     # x unmeasured: the flash is a line across the drift
                     ax.plot([f.z[j], f.z[j]], [lo, hi], [f.y[j], f.y[j]],
                             "-", color=colour, linewidth=widths[j], alpha=0.8,
-                            label="flashes" if j == 0 else None)
+                            label="flashes (width ~ PE)" if j == 0 else None)
             sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
             sm.set_array([])
             cb = fig.colorbar(sm, ax=ax, shrink=0.55, pad=0.10)
@@ -2221,11 +2234,21 @@ class OpticalDisplay(_TruthInfo):
             # reconstructed position.
             ylo, yhi = self._flash_y_range()
             fsc = ax.scatter(o.time[fl], o.z[fl], s=_pe_size(o.pe[fl]),
-                             c=o.y[fl], cmap="coolwarm", vmin=ylo, vmax=yhi,
+                             c=o.y[fl], cmap=charge_cmap(t, self.colormap),
+                             vmin=ylo, vmax=yhi,
                              alpha=0.85, linewidths=0,
                              label="flashes (size ~ PE)")
             cb2 = fig.colorbar(fsc, ax=ax, pad=0.01, fraction=0.03)
             _style_colorbar(cb2, "flash y [cm]", t, fonts)
+            _style_legend(ax, t, fontsize=fonts["legend"], loc="upper right",
+                          markerscale=1)
+        nu = self.neutrino
+        if nu is not None and np.isfinite(nu.vertex).all():
+            # The whole point of the PDS is timing the interaction; without
+            # this the panel never says where the interaction actually was.
+            ax.axhline(nu.vertex[2], color=t.mctrack, linewidth=1.0,
+                       linestyle="--", alpha=0.9, zorder=4,
+                       label="true vertex z")
             _style_legend(ax, t, fontsize=fonts["legend"], loc="upper right",
                           markerscale=1)
         ax.set_xlabel("time [us]", fontsize=fonts["label"])

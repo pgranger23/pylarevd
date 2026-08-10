@@ -139,7 +139,8 @@ def report() -> str:
     # the geometries decide whether a file can be displayed at all
     try:
         import glob
-        import numpy as np
+
+        import numpy as np      # only for reading the geometry headers
         here = os.path.dirname(os.path.abspath(__file__))
         found = sorted(glob.glob(os.path.join(here, "geom", "*.npz")))
         lines.append("")
@@ -153,6 +154,13 @@ def report() -> str:
         else:
             lines.append("  no geometries found in pylarevd/geom/ -- "
                          "nothing can be displayed until one is exported")
+    except ImportError:
+        import glob
+        here = os.path.dirname(os.path.abspath(__file__))
+        found = sorted(glob.glob(os.path.join(here, "geom", "*.npz")))
+        lines.append("")
+        lines.append(f"  {len(found)} geometry file(s) present "
+                     f"(install numpy to read their detector names)")
     except Exception as exc:
         lines.append(f"  could not list geometries: {exc}")
     return "\n".join(lines)

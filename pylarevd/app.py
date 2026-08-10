@@ -647,6 +647,12 @@ def build_app(paths: list[str], geometry: str | None = None,
             return (cur - 1) % n
         return (cur + 1) % n
 
+    @app.callback(Output("prev", "disabled"), Output("next", "disabled"),
+                  Output("jump", "disabled"), Input("file", "value"))
+    def _enable_stepping(path):
+        """Stepping does nothing with no file open; say so rather than no-op."""
+        return (path is None,) * 3
+
     @app.callback(Output("tag", "disabled"), Output("colour", "disabled"),
                   Output("scale", "disabled"), Output("merge", "disabled"),
                   Input("mode", "value"))

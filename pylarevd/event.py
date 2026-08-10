@@ -346,7 +346,7 @@ class Neutrino:
                               else f"{name} ({e:.2f} GeV)"
                               for name, n, e in fs[:8])
             more = "" if len(fs) <= 8 else f", +{len(fs) - 8} more"
-            lines.append(f"  final state: {shown}{more}")
+            lines.append(f"  final state (kinetic): {shown}{more}")
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -716,8 +716,13 @@ class Event:
                         np.array([mom["fP.fX"], mom["fP.fY"], mom["fP.fZ"],
                                   mom["fE"]]))
 
-            energy = np.array([(four(p)[1][3] if four(p)[1] is not None else 0.0)
-                               for p in plist])
+            # Kinetic, not total: rest mass is not something the interaction
+            # supplied, and totals made the final state sum to 18.66 GeV
+            # against a 7.36 GeV neutrino, which reads as a broken display.
+            energy = np.array([
+                max((four(p)[1][3] - float(p.get("fmass", 0.0)))
+                    if four(p)[1] is not None else 0.0, 0.0)
+                for p in plist])
             # The incoming neutrino is the initial-state lepton; its trajectory
             # point carries both the vertex and the beam energy.
             nu_i = next((j for j in range(len(pdg))

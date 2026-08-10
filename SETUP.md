@@ -56,11 +56,17 @@ view's own site-packages and nothing will import.
 ### Option B — your own machine
 
 ```bash
+python3 --version          # must be 3.10 or newer -- see the note below
 git clone https://github.com/pgranger23/pylarevd.git
 cd pylarevd
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[all]"
 ```
+
+> **Check the version first.** AlmaLinux/RHEL 9 ships `python3` as 3.9, and
+> pip does not fail fast on it — it backtracks through years of old releases
+> for minutes before giving up, which reads as a hang. Use `python3.10 -m venv`
+> or newer.
 
 That gives you a `pylarevd` command as well as the importable package.
 
@@ -245,8 +251,8 @@ export PYLAREVD_ATMNU=/path/to/a/neutrino_reco.root
 python -m pytest tests/ -q
 ```
 
-Without them the suite still runs and passes — the data-dependent tests skip
-(33 pass, 103 skip, ~2 s). With both, expect 136 passing in ~3 min.
+Without them the suite still runs and passes — the data-dependent tests skip.
+With both, expect 156 passing in ~5 min.
 
 `PYLAREVD_ATMNU` should be a sample with neutrino truth, reconstruction
 (Pandora tracks/showers) and optical data; `PYLAREVD_ROCKMU` a cosmic sample
@@ -266,6 +272,7 @@ with no neutrino.
 | `no such file` for a `/eos/...` path | `/eos` is not mounted and you have no Kerberos ticket — run `kinit`. See section 5. |
 | Browser shows `ERROR — ...` in the summary band | The message is the actual exception; a stale entry number after switching files is the usual cause. |
 | `pylarevd: the interactive browser needs the 'dash' package` | `pip install "pylarevd[app]"`, or source the LCG view. Run `python -m pylarevd --check` to see everything at once. |
+| `--html` output is enormous | Each event embeds plotly.js (~18 MB). Pass `--html-cdn` to link it instead (~1 MB), at the cost of needing internet to view. |
 | Port 8050 already in use | `--port 8051`, and change **both** numbers in the `ssh -L` command to match. |
 | Browser says "unable to connect" | The tunnel is not up, or you opened the remote hostname instead of `localhost:8050`. The `ssh -N -L` terminal must stay open. |
 | Tunnel opens but the page is blank/spinning | The server is not running on the remote side any more — check the terminal from step 1. |

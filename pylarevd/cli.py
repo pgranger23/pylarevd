@@ -46,6 +46,61 @@ def _parse_events(spec: str, n: int) -> list[int]:
     return out
 
 
+_MANIFEST_FIELDS = ("entry", "run", "subrun", "event", "hits", "headline",
+                    "png", "html", "status", "error")
+
+
+def _write_manifest(outdir: str, rows: list[dict]) -> None:
+    """A CSV and a linked index for a batch run.
+
+    Without one, working out which of 120 output files was the interesting one
+    means re-reading the terminal log and matching filenames by hand, and a
+    failed event leaves no record at all.
+    """
+    import csv
+    import html as _html
+
+    with open(os.path.join(outdir, "manifest.csv"), "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_MANIFEST_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in _MANIFEST_FIELDS})
+
+    def cell(row, key):
+        value = row.get(key, "")
+        if key in ("png", "html") and value:
+            return f'<a href="{_html.escape(value)}">{key}</a>'
+        return _html.escape(str(value))
+
+    body = "\n".join(
+        "<tr class='{}'>{}</tr>".format(
+            row.get("status", "ok"),
+            "".join(f"<td>{cell(row, k)}</td>" for k in _MANIFEST_FIELDS))
+        for row in rows)
+    with open(os.path.join(outdir, "index.html"), "w") as fh:
+        fh.write(f"""<!doctype html><meta charset=utf-8>
+<title>pylarevd batch</title>
+<style>
+ body{{font:13px system-ui;background:#0f172a;color:#e2e8f0;padding:16px}}
+ table{{border-collapse:collapse}} th,td{{padding:4px 9px;text-align:left;
+ border-bottom:1px solid #334155}} th{{cursor:pointer}}
+ a{{color:#7dd3fc}} tr.failed{{color:#fca5a5}}
+</style>
+<h2>pylarevd — {len(rows)} events</h2>
+<p>Click a column heading to sort.</p>
+<table><thead><tr>{''.join(f'<th>{k}</th>' for k in _MANIFEST_FIELDS)}</tr></thead>
+<tbody>{body}</tbody></table>
+<script>
+document.querySelectorAll('th').forEach((th,i)=>th.onclick=()=>{{
+  const tb=th.closest('table').tBodies[0];
+  const rows=[...tb.rows], dir=th.dataset.d=th.dataset.d==='1'?'':'1';
+  rows.sort((a,b)=>{{const x=a.cells[i].innerText,y=b.cells[i].innerText;
+    const n=parseFloat(x)-parseFloat(y);
+    return (dir?1:-1)*(isNaN(n)?x.localeCompare(y):n);}});
+  rows.forEach(r=>tb.appendChild(r));}});
+</script>""")
+
+
 def _unique_path(path: str, taken: set[str]) -> str:
     """Avoid clobbering an existing render.
 
@@ -79,6 +134,10 @@ def main(argv=None) -> int:
                     help="hit producer module label (default: prefer 'hitfd')")
     ap.add_argument("-o", "--outdir", default="evd_out", help="output directory")
     ap.add_argument("--html", action="store_true", help="also write interactive HTML")
+    ap.add_argument("--html-cdn", action="store_true",
+                    help="with --html, link plotly.js from a CDN instead of "
+                         "embedding it: ~20x smaller (17.8 MB -> 1.1 MB per "
+                         "event here), but viewing then needs internet")
     ap.add_argument("--only-html", action="store_true", help="write only HTML")
     ap.add_argument("--no-radiologicals", action="store_true",
                     help="with --truth, keep only truth descending from the "
@@ -166,6 +225,7 @@ def main(argv=None) -> int:
     os.makedirs(a.outdir, exist_ok=True)
     failures = 0
     taken: set[str] = set()
+    rows: list[dict] = []
     for n_done, i in enumerate(entries, 1):
         if len(entries) > 1:
             print(f"[{n_done}/{len(entries)}] event {i}", flush=True)
@@ -190,14 +250,33 @@ def main(argv=None) -> int:
             print(disp.summary())
             run, sub, evno = ev.id
             stem = os.path.join(a.outdir, f"r{run}_s{sub}_e{evno}")
+            row = {"entry": i, "run": run, "subrun": sub, "event": evno,
+                   "hits": len(getattr(disp, "hits", []) or []),
+                   "headline": (disp.neutrino.headline() if disp.neutrino else ""),
+                   "png": "", "html": "", "status": "ok", "error": ""}
             if not a.only_html:
-                print("  ->", disp.save(_unique_path(f"{stem}.png", taken),
-                                        dpi=a.dpi))
+                row["png"] = os.path.basename(
+                    disp.save(_unique_path(f"{stem}.png", taken), dpi=a.dpi))
+                print("  ->", os.path.join(a.outdir, row["png"]))
             if a.html or a.only_html:
-                print("  ->", disp.save_html(_unique_path(f"{stem}.html", taken)))
+                row["html"] = os.path.basename(
+                    disp.save_html(_unique_path(f"{stem}.html", taken),
+                                   bundle_plotlyjs=not a.html_cdn))
+                print("  ->", os.path.join(a.outdir, row["html"]))
+            rows.append(row)
         except (ArtReadError, GeometryError, IndexError, ValueError) as exc:
             print(f"  event {i}: {exc}", file=sys.stderr)
+            # Failures belong in the manifest too: a partly-failed batch left
+            # no record at all of which events failed or why.
+            rows.append({"entry": i, "run": "", "subrun": "", "event": "",
+                         "hits": "", "headline": "", "png": "", "html": "",
+                         "status": "failed", "error": str(exc)})
             failures += 1
+
+    if rows:
+        _write_manifest(a.outdir, rows)
+        print(f"  -> {os.path.join(a.outdir, 'manifest.csv')}")
+        print(f"  -> {os.path.join(a.outdir, 'index.html')}")
     return 1 if failures else 0
 
 

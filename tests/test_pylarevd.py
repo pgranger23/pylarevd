@@ -1866,3 +1866,92 @@ def test_ophit_colour_scale_is_window_independent():
     src = inspect.getsource(display.OpticalDisplay.figure)
     assert "PE_SIZE_RANGE" in src
     assert "vmax=pe.max()" not in src
+
+
+@needs_data
+@needs_geom
+def test_true_vertex_only_on_its_own_drift_side():
+    """A panel showing one drift volume must not display the other's vertex."""
+    ev = EventFile(ATMNU, geometry=GEOM)[0]
+    nu = ev.neutrino()
+    if nu is None:
+        pytest.skip("no neutrino")
+    d = ev.display("hitfd", merge="none")
+    sign = np.sign(nu.vertex[0])
+    for panel in d.panels:
+        drawn = d._true_vertex_wx(panel) is not None
+        if panel.drift_sign:
+            assert drawn == (np.sign(panel.drift_sign) == sign), \
+                f"{panel.title}: marker drawn on the wrong drift side"
+
+
+@needs_data
+def test_final_state_energies_are_kinetic_not_total():
+    """Rest mass is not something the interaction supplied.
+
+    Listing total energies made the final state sum to 18.66 GeV against a
+    7.36 GeV neutrino -- a reader checking the arithmetic concludes the display
+    is broken. The tolerance here is deliberately loose: on a bound nucleon the
+    initial state carries Fermi motion, so a MEC or QE final state legitimately
+    exceeds the beam energy by a few percent (entry 2 of this sample does, by
+    9%). What it must not do is exceed it several times over.
+    """
+    f = EventFile(ATMNU)
+    checked = 0
+    for i in range(len(f)):
+        nu = f[i].neutrino()
+        if nu is None:
+            continue
+        checked += 1
+        total = sum(e for _name, _n, e in nu.final_state_counts())
+        assert total <= nu.energy * 1.25, \
+            f"entry {i}: final state {total:.2f} GeV vs beam {nu.energy:.2f} GeV"
+    assert checked
+
+
+def test_data_ylim_ignores_a_few_outliers():
+    from pylarevd.display import _data_ylim
+    bulk = np.random.default_rng(0).normal(0, 1, 500)
+    with_outliers = np.concatenate([bulk, [500.0, -500.0]])
+    lo, hi = _data_ylim(with_outliers)
+    assert hi - lo < 20, "a couple of stray hits still dictate the frame"
+
+
+def test_batch_writes_a_manifest(tmp_path):
+    from pylarevd.cli import _write_manifest
+    rows = [{"entry": 0, "run": 1, "subrun": 0, "event": 4, "hits": 12,
+             "headline": "nu_mu CC QE", "png": "a.png", "html": "a.html",
+             "status": "ok", "error": ""},
+            {"entry": 1, "status": "failed", "error": "boom"}]
+    _write_manifest(str(tmp_path), rows)
+    csv_text = (tmp_path / "manifest.csv").read_text()
+    assert "nu_mu CC QE" in csv_text and "failed" in csv_text
+    index = (tmp_path / "index.html").read_text()
+    assert 'href="a.png"' in index and "boom" in index
+
+
+def test_html_cdn_flag_exists():
+    """--html embedded ~17.8 MB per event with no way to opt out."""
+    import inspect
+    from pylarevd import cli
+    src = inspect.getsource(cli.main)
+    assert "--html-cdn" in src
+    assert "bundle_plotlyjs=not a.html_cdn" in inspect.getsource(cli.main)
+
+
+def test_package_imports_without_numpy():
+    """--check must run in the situation it exists to diagnose."""
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    blocker = os.path.join(root, "tests", "_noblock")
+    os.makedirs(blocker, exist_ok=True)
+    for mod in ("numpy", "uproot"):
+        with open(os.path.join(blocker, f"{mod}.py"), "w") as fh:
+            fh.write("raise ImportError('absent')\n")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([blocker, root]))
+    out = subprocess.run([sys.executable, "-m", "pylarevd", "--check"],
+                         capture_output=True, text=True, env=env, timeout=120)
+    assert out.returncode == 0, out.stderr[-500:]
+    assert "REQUIRED packages are missing" in out.stdout
+    assert "numpy" in out.stdout
