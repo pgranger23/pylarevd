@@ -126,10 +126,19 @@ class Cursor:
         return -1, version          # no byte count available
 
     def string(self) -> str:
-        """ROOT's length-prefixed string: one byte, or 255 then four."""
+        """ROOT's length-prefixed string: one byte, or 255 then four.
+
+        A length longer than the buffer is a misread of a wrong framing, not a
+        string. Slicing tolerates it silently and still advances the cursor by
+        the bogus length, which is how a mis-framed string desynchronised every
+        member after it instead of raising and letting the caller retry.
+        """
         n = self.u1()
         if n == 255:
             n = self.u4()
+        if n > len(self.buf) - self.pos:
+            raise StreamerError(
+                f"string of {n} bytes with only {len(self.buf) - self.pos} left")
         s = self.buf[self.pos:self.pos + n]
         self.pos += n
         return s.decode("utf-8", "replace")
@@ -169,24 +178,57 @@ _SEQUENCES = {"vector", "list", "deque", "set", "multiset", "unordered_set"}
 
 # ---- readers ---------------------------------------------------------------
 
-def read_value(file, typename: str, cur: Cursor):
-    """Read one value of *typename* at the cursor."""
+def read_value(file, typename: str, cur: Cursor, *, as_element: bool = False):
+    """Read one value of *typename* at the cursor.
+
+    ``as_element`` says this value is an ELEMENT of an enclosing container
+    rather than a member of a class. The distinction matters for nested STL:
+    ``vector<double>`` written as a class member carries its own (byte count,
+    version) header, but the same type as an element of
+    ``vector<vector<double>>`` carries only a count. Assuming a header in the
+    element case broke recob::PCAxis; assuming none in the member case wiped
+    out every MCParticle trajectory.
+    """
     base = typename.strip()
     if base in _PRIMITIVES:
         dt, size = _PRIMITIVES[base]
         return cur.array(dt, 1, size)[0]
     if base in ("string", "std::string", "TString"):
-        return cur.string()
+        return _read_string(cur)
 
     kind, args = parse_type(base)
     kind = kind.replace("std::", "")
     if kind in _SEQUENCES:
-        return read_sequence(file, args[0], cur, headered=True)
+        return read_sequence(file, args[0], cur, headered=not as_element)
     if kind == "pair":
         return (read_bare(file, args[0], cur), read_bare(file, args[1], cur))
     if kind == "map":
         return read_sequence(file, f"pair<{args[0]},{args[1]}>", cur, headered=True)
     return read_object(file, base, cur)
+
+
+def _read_string(cur: Cursor) -> str:
+    """A std::string that may or may not carry a (byte count, version) header.
+
+    Read object-wise, a std::string member is wrapped like any other class;
+    inside a member-wise column it is bare. Nothing in the streamer info says
+    which, so try the header first and fall back -- the same trial the reader
+    already applies to every other class.
+    """
+    save = cur.pos
+    try:
+        end, _version = cur.header()
+        out = _read_string_bare(cur)
+        if cur.pos == end:
+            return out
+    except (StreamerError, struct.error, ValueError, IndexError):
+        pass
+    cur.pos = save
+    return _read_string_bare(cur)
+
+
+def _read_string_bare(cur: Cursor) -> str:
+    return cur.string()
 
 
 def read_bare(file, typename: str, cur: Cursor):
@@ -303,7 +345,8 @@ def read_sequence(file, elem_type: str, cur: Cursor, *, headered: bool):
             if how == "mw":
                 out = read_memberwise_elements(file, et, cur, n)
             elif how == "ew":
-                out = [read_value(file, et, cur) for _ in range(n)]
+                out = [read_value(file, et, cur, as_element=True)
+                       for _ in range(n)]
             else:
                 out = [read_object(file, et, cur, headered=how) for _ in range(n)]
         except (StreamerError, struct.error, ValueError, IndexError) as exc:
@@ -427,11 +470,18 @@ def read_object(file, classname: str, cur: Cursor, *, headered: bool = True) -> 
     # This object genuinely does not parse. Fall back to reading the leading
     # members and resynchronising on the byte count. How many are readable is a
     # property of the class, so that much is worth remembering.
-    limit = memo["partial"].get(classname)
+    # Keyed by (class, object size), NOT by class alone. How far a class can be
+    # read depends on the context it was written in, not just on the class: the
+    # same simb::MCParticle recovered 6 members inside one MCTruth product and
+    # 11 inside another, so a class-only memo let whichever was decoded first
+    # truncate the other. Object size distinguishes the contexts cheaply and
+    # cannot collide across them.
+    key = (classname, end - body)
+    limit = memo["partial"].get(key)
     if limit is None:
         limit = _probe_limit(file, classname, elements, cur.buf, body, end)
-        memo["partial"][classname] = limit
-        memo["why"][classname] = str(last_error)
+        memo["partial"][key] = limit
+        memo["why"][key] = str(last_error)
 
     out = {}
     cur.pos = body
@@ -441,7 +491,7 @@ def read_object(file, classname: str, cur: Cursor, *, headered: bool = True) -> 
     except (StreamerError, struct.error, ValueError, IndexError):
         out = {}
     cur.pos = end
-    out[UNPARSED] = memo["why"].get(classname, "unmodelled member")
+    out[UNPARSED] = memo["why"].get(key, "unmodelled member")
     return out
 
 

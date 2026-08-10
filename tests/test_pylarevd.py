@@ -1955,3 +1955,129 @@ def test_package_imports_without_numpy():
     assert out.returncode == 0, out.stderr[-500:]
     assert "REQUIRED packages are missing" in out.stdout
     assert "numpy" in out.stdout
+
+
+# ---------------------------------------------------------------------------
+# Tier 0: silently wrong output
+# ---------------------------------------------------------------------------
+
+@needs_data
+@needs_geom
+def test_explicit_geometry_must_match_the_file():
+    """A mismatched geometry resolved every hit and put it ~793 cm wrong.
+
+    n_bad_geometry stayed 0, so nothing downstream could notice.
+    """
+    from pylarevd.geometry import Geometry
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    other = os.path.join(root, "pylarevd", "geom", "dune10kt_v6_full.npz")
+    if not os.path.exists(other) or EventFile(ATMNU).geometry.detector == "dune10kt_v6":
+        pytest.skip("need a second, different geometry")
+    with pytest.raises(GeometryError, match="was produced with"):
+        EventFile(ATMNU, geometry=Geometry(other))
+    # the escape hatch still works, and auto-detect is unaffected
+    assert EventFile(ATMNU, geometry=Geometry(other),
+                     allow_geometry_mismatch=True).geometry.detector == "dune10kt_v6"
+    assert EventFile(ATMNU).geometry.detector != "dune10kt_v6"
+
+
+@needs_data
+def test_unreadable_event_id_cannot_answer_a_lookup():
+    """(0, 0, entry) is a plausible triple index_of would happily match."""
+    from pylarevd.artio import UNKNOWN_EVENT_ID
+    assert UNKNOWN_EVENT_ID == (-1, -1, -1)
+    f = EventFile(ROCKMU)
+    assert f.index_of(*UNKNOWN_EVENT_ID) is None
+    assert f.index_of(*f[0].id) == 0            # real lookups still work
+
+
+def test_string_length_past_the_buffer_raises():
+    """Slicing tolerated it and advanced the cursor by the bogus length."""
+    import pylarevd.streamers as st
+    cur = st.Cursor(b"\x05hi", 0)
+    with pytest.raises(st.StreamerError, match="string of 5 bytes"):
+        cur.string()
+
+
+@needs_data
+def test_headered_strings_do_not_desync_the_object():
+    """A std::string member read object-wise carries a 6-byte header.
+
+    Reading it bare took the header's first byte as a length of 64 and
+    desynchronised every member after it, costing simb::MCNeutrino's fNu and
+    fLepton their trajectory, mass and polarisation.
+    """
+    f = EventFile(ATMNU) if os.path.exists(ATMNU) else None
+    if f is None:
+        pytest.skip("atmnu sample absent")
+    products = f.art.find_product("simb::MCTruth")
+    generator = next((p for p in products if "_generator_" in p), None)
+    if generator is None:
+        pytest.skip("no generator MCTruth")
+    raw = f.art.read(generator, "simb::MCTruth", 0)
+    fnu = [k for k in raw["fMCNeutrino"][0] if k.startswith("fNu.")]
+    # the bare-string bug capped this at 6 real members; the header-aware read
+    # recovers the kinematic ones too
+    assert len(fnu) > 10, f"only recovered {fnu}"
+    assert any("fmass" in k for k in fnu)
+    assert any("fpolarization" in k for k in fnu)
+
+
+@needs_data
+def test_nested_primitive_vectors_decode():
+    """recob::PCAxis crashed: vector<vector<double>> read as if headered."""
+    f = EventFile(ATMNU) if os.path.exists(ATMNU) else None
+    if f is None:
+        pytest.skip("atmnu sample absent")
+    products = [p for p in f.art.products()
+                if "PCAxis" in p and "Assns" not in p]
+    if not products:
+        pytest.skip("no PCAxis product")
+    raw = f.art.read(products[0], "recob::PCAxis", 0)
+    assert raw, "PCAxis decoded to nothing"
+    # and a class member that IS a headered STL still reads (the fix must not
+    # trade one context for the other)
+    assert sum(len(p) for p in EventFile(ATMNU)[0].mc_particles().points) > 0
+
+
+@needs_data
+def test_partial_parse_limit_is_not_shared_across_contexts():
+    """The same class can be readable to different depths in different products.
+
+    Keying the limit on the class alone let whichever product was decoded
+    first truncate the other: fNu kept 7 members or 1, purely by read order.
+    """
+    if not os.path.exists(ATMNU):
+        pytest.skip("atmnu sample absent")
+    generator = "simb::MCTruths_generator__GenieGen."
+    others = [p for p in EventFile(ATMNU).art.find_product("simb::MCTruth")
+              if p != generator]
+    if not others:
+        pytest.skip("only one MCTruth product")
+
+    def members(preload):
+        f = EventFile(ATMNU)
+        for product in preload:
+            try:
+                f.art.read(product, "simb::MCTruth", 0)
+            except Exception:
+                pass
+        raw = f.art.read(generator, "simb::MCTruth", 0)
+        return len([k for k in raw["fMCNeutrino"][0] if k.startswith("fNu.")])
+
+    assert members([]) == members([others[0]])
+
+
+@needs_data
+def test_partial_decodes_are_reported_not_silent():
+    """A member skipped by a decode shortfall looked like a member that is absent."""
+    if not os.path.exists(ATMNU):
+        pytest.skip("atmnu sample absent")
+    ev = EventFile(ATMNU)[0]
+    ev.neutrino()
+    partial = ev.partial_decodes()
+    if not partial:
+        pytest.skip("nothing decoded partially in this sample")
+    text = ev.display("hitfd", truth=True).summary()
+    assert any(name in text for name in partial), \
+        "a partial decode happened but the summary never says so"

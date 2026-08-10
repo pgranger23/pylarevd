@@ -105,6 +105,11 @@ _MEMBERWISE_BIT = 0x4000
 _VEC_HEADER = 12          # bytecount 4 + version 2 + class version 2 + count 4
 
 
+#: What ``event_ids()`` reports for an entry whose identity could not be read.
+#: Deliberately not a plausible triple -- it must never match a real lookup.
+UNKNOWN_EVENT_ID = (-1, -1, -1)
+
+
 class ArtReadError(RuntimeError):
     """Raised when an art product cannot be decoded."""
 
@@ -345,6 +350,27 @@ class ArtFile:
     def num_events(self) -> int:
         return self.events.num_entries
 
+    def partial_decodes(self) -> dict[str, str]:
+        """Classes that could not be read in full, and why.
+
+        The reader flags a shortfall with :data:`streamers.UNPARSED` and
+        resynchronises on the byte count, which is the right recovery -- but
+        nothing read the flag, so a member it had to skip looked exactly like a
+        member the file does not have. A particle whose trajectory was dropped
+        by a decode shortfall was indistinguishable from one that never moved.
+        """
+        from . import streamers as st
+        try:
+            why = st._caches(self._file.file)["why"]
+        except Exception:
+            return {}
+        # keys are (classname, object size); report per class
+        out: dict[str, str] = {}
+        for key, reason in why.items():
+            name = key[0] if isinstance(key, tuple) else key
+            out.setdefault(str(name), str(reason))
+        return out
+
     def geometry_config(self) -> dict[str, str]:
         """The ``Geometry`` service settings the file was produced with.
 
@@ -424,8 +450,10 @@ class ArtFile:
             EventAuxiliary  hdr | Hash<2> hdr+string | EventID hdr
               -> SubRunID hdr -> RunID hdr | run (4) | subRun (4) | event (4)
 
-        Returns zeros for any entry that cannot be parsed rather than failing:
-        event identity is display metadata, not something to lose hits over.
+        An entry that cannot be parsed returns ``UNKNOWN_EVENT_ID``
+        ``(-1, -1, -1)`` rather than ``(0, 0, entry)``: the latter is a
+        perfectly plausible triple that :meth:`EventFile.index_of` would match,
+        so a corrupted entry could silently answer a cross-file lookup.
         """
         branch = self.events["EventAuxiliary"]
         n = branch.num_entries
@@ -434,7 +462,7 @@ class ArtFile:
             try:
                 out[i] = _parse_event_auxiliary(self._entry_bytes(branch, i))
             except Exception:
-                out[i] = (0, 0, i)
+                out[i] = UNKNOWN_EVENT_ID
         return out
 
     # ---- decoding ------------------------------------------------------

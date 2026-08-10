@@ -984,6 +984,8 @@ class EventDisplay(_TruthInfo):
         warn = self.disambiguation_warning
         if warn:
             lines.append(f"  ! {warn}")
+        for name, reason in sorted(self.event.partial_decodes().items()):
+            lines.append(f"  ! {name} only partially decoded ({reason[:70]})")
         if self.tracks is not None or self.showers is not None:
             note = self.event.pandora_selection_note()
             if note:

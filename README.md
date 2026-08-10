@@ -219,7 +219,7 @@ The display is checked against MC truth, not just eyeballed:
 a whole population metres off the track.
 
 ```bash
-python -m pytest tests/ -q     # 156 tests, ~5 min
+python -m pytest tests/ -q     # 163 tests, ~6 min
 ```
 
 ## Themes, colormaps and output targets

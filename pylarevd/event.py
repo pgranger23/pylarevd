@@ -15,7 +15,7 @@ from functools import cached_property, lru_cache, wraps
 
 import numpy as np
 
-from .artio import ArtFile, ArtReadError
+from .artio import ArtFile, ArtReadError, UNKNOWN_EVENT_ID
 from . import physics
 from .geometry import Geometry, GeometryError
 
@@ -1124,6 +1124,13 @@ class Event:
                 art.assns_products(left, right) for left, right, _d, _p in route)
         return caps
 
+    def partial_decodes(self) -> dict:
+        """Classes this file could not read in full (see ArtFile.partial_decodes)."""
+        try:
+            return self._src.art.partial_decodes()
+        except Exception:
+            return {}
+
     def _drop_radiologicals(self, deposits, mc):
         """Keep only what descends from the neutrino interaction."""
         ids = self.neutrino_track_ids()
@@ -1260,15 +1267,38 @@ class EventFile:
 
     _EVENT_CACHE = 4          # keep a few events warm for prev/next browsing
 
-    def __init__(self, path: str, geometry: str | Geometry | None = None):
+    def __init__(self, path: str, geometry: str | Geometry | None = None,
+                 allow_geometry_mismatch: bool = False):
         self.path = str(path)
         self.art = ArtFile(self.path)
         self._events: dict[int, Event] = {}
         self._scan_cache: dict = {}
+        explicit = geometry is not None
         if isinstance(geometry, Geometry):
             self.geometry = geometry
         else:
             self.geometry = load_geometry(geometry or self._default_geometry())
+        if explicit and not allow_geometry_mismatch:
+            self._check_geometry_matches()
+
+    def _check_geometry_matches(self) -> None:
+        """Refuse a geometry the file says it was not produced with.
+
+        The auto-detect path has always matched on the recorded name, but an
+        explicitly passed geometry bypassed it entirely -- and the failure is
+        invisible: loading a 1x2x6 sample against the full 10kt map resolved
+        every hit, left n_bad_geometry at 0, and put the coordinates a median
+        793 cm out. Wrong physics that looks healthy is worse than an error.
+        """
+        recorded = self.art.geometry_config().get("Name")
+        if not recorded or recorded == self.geometry.detector:
+            return
+        raise GeometryError(
+            f"{os.path.basename(self.path)} was produced with the "
+            f"{recorded!r} geometry, but {self.geometry.detector!r} was given. "
+            f"Hits would be placed on the wrong wires without any error.\n"
+            f"  drop the geometry argument to let the file choose, or pass "
+            f"allow_geometry_mismatch=True if you mean it.")
 
     def _default_geometry(self) -> str:
         here = os.path.dirname(os.path.abspath(__file__))
@@ -1374,6 +1404,8 @@ class EventFile:
         events up by identity is what lets a link survive being pointed at
         another file -- e.g. comparing two reconstruction passes.
         """
+        if (run, subrun, event) == UNKNOWN_EVENT_ID:
+            return None          # never match an entry whose id could not be read
         ids = self.event_ids
         match = ((ids["run"] == run) & (ids["subrun"] == subrun)
                  & (ids["event"] == event)).nonzero()[0]
