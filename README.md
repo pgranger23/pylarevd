@@ -219,7 +219,7 @@ The display is checked against MC truth, not just eyeballed:
 a whole population metres off the track.
 
 ```bash
-python -m pytest tests/ -q     # 136 tests, ~3 min
+python -m pytest tests/ -q     # 150 tests, ~5 min
 ```
 
 ## Themes, colormaps and output targets
@@ -597,6 +597,25 @@ from, and the filter keeps everything rather than guessing.
 Note that the 3-D view frames the *reconstructed* data by default, which
 already crops most radiologicals out of shot; `focus="detector"` frames the
 whole cryostat if you want to see them in context.
+
+## What the display will tell you
+
+Rather than fail quietly, the views state what they know:
+
+* **`visible energy N MeV of M MeV true (P%)`** — the ionisation from the
+  *interaction*, not the event total. Counting every radiological deposit
+  against the neutrino's energy gave fractions over 100% on 9 of 10 events.
+* **`[vertex OUTSIDE active volume]`** plus the distance and the face missed.
+* **`... looks NOT disambiguated`** — judged over the whole collection, not one
+  event. A cosmic track that stays on a single drift face splits no channel,
+  which made a per-event test flag correct data half the time.
+* **`radiologicals hidden`** when the filter is on, so a shared figure cannot
+  be mistaken for an unfiltered one.
+* **`outgoing lepton: tau- (5.09 GeV)`** — a tau decays and so never appears in
+  the GENIE final state, which for a tau-appearance sample omitted the one
+  particle the event is about.
+* **`run R / subrun S / event E is not in <file>`** when following an event
+  across files fails, instead of silently showing a different one.
 
 ## Known limits
 

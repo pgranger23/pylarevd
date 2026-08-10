@@ -315,8 +315,11 @@ def render(files: dict[str, EventFile], path, entry, tag, colour, scale, mode,
 def build_app(paths: list[str], geometry: str | None = None,
               allow_open: bool = True) -> Dash:
     files = _files_store(paths, geometry)
-    geom = next(iter(files.values())).geometry if files else (
-        Geometry(geometry) if geometry else None)
+    # ONLY an explicit --geometry. Reusing the first file's resolved geometry
+    # forced it onto every later one: opening a full-10kt file from a server
+    # started on the 1x2x6 sample put 99% of its hits outside the channel map,
+    # silently. open_file(geometry=None) lets each file name its own.
+    geom = Geometry(geometry) if geometry else None
     app = Dash(__name__, title="pylarevd")
     # Dash gives a disabled checkbox no colour of its own, so the browser
     # default (dark grey) applies -- unreadable on this panel. State both the
@@ -433,7 +436,7 @@ def build_app(paths: list[str], geometry: str | None = None,
                         dcc.Checklist(
                             id="radio",
                             options=[{"label": " radiologicals", "value": "on"}],
-                            value=["on"], className="evd-check",
+                            value=[], className="evd-check",
                             style=_CHECK, labelStyle=_CHECK_LABEL,
                             inputStyle=_CHECK_INPUT)]),
                   ]),
@@ -468,10 +471,11 @@ def build_app(paths: list[str], geometry: str | None = None,
                             style={**_CTL, "padding": "6px 14px",
                                    "cursor": "pointer" if allow_open else "default",
                                    "borderRadius": "4px"}),
-                html.Div(id="path-msg",
+                dcc.Loading(html.Div(id="path-msg",
                          style={"color": FG_MUTED, "fontSize": "11px",
                                 "alignSelf": "center", "minWidth": "200px",
                                 "fontFamily": "ui-monospace, monospace"}),
+                            type="dot", color=FG_MUTED),
             ]),
             html.Pre(id="summary",
                      style={"color": FG_MUTED, "fontSize": "11px", "margin": "0 0 8px 0",
@@ -507,22 +511,32 @@ def build_app(paths: list[str], geometry: str | None = None,
     @app.callback(Output("entry", "options"), Output("entry", "value"),
                   Output("tag", "options"), Output("tag", "value"),
                   Output("colour", "options"), Output("mode", "options"),
+                  Output("path-msg", "children", allow_duplicate=True),
                   Input("file", "value"),
                   State("entry", "value"), State("tag", "value"),
-                  State("last-event", "data"))
+                  State("last-event", "data"), prevent_initial_call="initial_duplicate")
     def _on_file(path, entry, tag, last):
         if path is None or path not in files:
-            return [], None, [], None, no_update, no_update
+            return [], None, [], None, no_update, no_update, no_update
         f = files[path]
         # Entry numbers are an artefact of how a file was written. When the user
         # switches files mid-session, follow the *physics* event they were on --
         # otherwise "compare this event across two reco passes" silently lands
         # on a different event, which is what the rse= URL parameter exists to
         # prevent and what this path used to ignore.
+        followed = None
         if last and last.get("path") != path:
             found = f.index_of(*last["id"])
             if found is not None:
                 entry = found
+            else:
+                # Do NOT silently keep the old index: it names a different
+                # physics event here, and the result was indistinguishable
+                # from the feature working.
+                entry = 0
+                r, sr, ev = last["id"]
+                followed = (f"run {r} / subrun {sr} / event {ev} is not in "
+                            f"{os.path.basename(path)} — showing entry 0")
         opts = [{"label": f"[{i}]  run {r} / sub {s} / ev {e}", "value": i}
                 for i, (r, s, e) in enumerate(f.event_ids)]
         tags = [p.split("_")[1] for p in f.hit_products()]
@@ -552,7 +566,8 @@ def build_app(paths: list[str], geometry: str | None = None,
              "disabled": not caps["optical"]},
             {"label": mark("Flashes 3D (PDS)", caps["optical"]), "value": "flash3d",
              "disabled": not caps["optical"]}]
-        return opts, entry, tags, tag, colour_opts, mode_opts
+        return (opts, entry, tags, tag, colour_opts, mode_opts,
+                followed if followed else no_update)
 
     @app.callback(Output("truth", "options"), Output("reco", "options"),
                   Output("radio", "options"),
@@ -566,7 +581,10 @@ def build_app(paths: list[str], geometry: str | None = None,
         ``disabled`` prop -- it is per option -- so this is where both are said.
         """
         if path is None or entry is None:
-            return no_update, no_update, no_update
+            off = lambda lab: [{"label": f" {lab} (no file open)",
+                                "value": "on", "disabled": True}]
+            return (off("truth overlay"), off("tracks + vertices"),
+                    off("radiologicals"))
         try:
             ev = files[path][int(entry)]
             caps = ev.capabilities()
@@ -590,10 +608,15 @@ def build_app(paths: list[str], geometry: str | None = None,
             separable = ev.neutrino_track_ids() is not None
         except Exception:
             separable = False
-        if not separable:
+        if not drawn:
+            # Name the actual blocker. Saying "needs truth overlay" in a view
+            # where truth is ITSELF disabled sends the user to a dead end.
+            radio = [{"label": " radiologicals (not in this view)",
+                      "value": "on", "disabled": True}]
+        elif not separable:
             radio = [{"label": " radiologicals (no neutrino to separate from)",
                       "value": "on", "disabled": True}]
-        elif not (drawn and truth_on):
+        elif not truth_on:
             radio = [{"label": " radiologicals (needs truth overlay)",
                       "value": "on", "disabled": True}]
         else:
@@ -656,7 +679,7 @@ def build_app(paths: list[str], geometry: str | None = None,
             if path is not None and entry is not None:
                 seen = {"path": path, "id": list(files[path][int(entry)].id)}
         except Exception:
-            seen = None
+            seen = no_update      # keep the last good event; do not erase it
         failed = summary.startswith("ERROR")
         style = {**base,
                  "color": "#fca5a5" if failed else FG_MUTED,

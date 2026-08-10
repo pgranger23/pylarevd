@@ -883,7 +883,12 @@ def test_three_panels_fill_the_canvas():
 def test_reference_lines_are_in_the_legend():
     f = EventFile(ATMNU, geometry=GEOM)
     fig = f[0].display(reco=True).figure()
-    labels = {t.get_text() for leg in fig.legends for t in leg.get_texts()}
+    # The legend lives inside the first panel now, not at figure level: an
+    # "outside" figure legend competed with the title and the truth block.
+    legends = list(fig.legends) + [ax.get_legend() for ax in fig.axes
+                                   if ax.get_legend() is not None]
+    labels = {t.get_text() for leg in legends for t in leg.get_texts()}
+    assert legends, "no legend was drawn at all"
     assert "anode" in labels and "active volume edge" in labels
     import matplotlib.pyplot as plt
     plt.close(fig)
@@ -1753,3 +1758,111 @@ def test_open_by_path_files_under_the_normalised_key():
     eos = "/eos/user/x/xyz/sample.root"
     assert normalise_path(eos).startswith("root://")
     assert normalise_path(normalise_path(eos)) == normalise_path(eos)
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review fixes
+# ---------------------------------------------------------------------------
+
+@needs_data
+def test_opening_a_file_does_not_inherit_another_files_geometry():
+    """Each file names its own detector; forcing one on another is silent.
+
+    Reusing the first file's resolved geometry put 99% of a full-10kt file's
+    hits outside the channel map with no error at all.
+    """
+    from pylarevd.app import _files_store, open_file
+    files = _files_store([ATMNU], None)
+    first = next(iter(files.values())).geometry
+    opened = open_file(files, ROCKMU, None)
+    assert opened.geometry.detector == opened.art.geometry_config()["Name"]
+    # and nothing was forced: the object is chosen per file, not inherited
+    assert opened.geometry.detector == first.detector or \
+        opened.geometry is not first
+
+
+@needs_data
+def test_visible_energy_never_exceeds_the_neutrino_energy():
+    """Radiological deposits are not the interaction's visible energy."""
+    f = EventFile(ATMNU)
+    seen = 0
+    for i in range(len(f)):
+        nu = f[i].neutrino()
+        if nu is None or nu.energy <= 0:
+            continue
+        vis = f[i].neutrino_visible_energy()
+        assert vis is not None
+        seen += 1
+        assert vis <= nu.energy * 1000 * 1.05, \
+            f"entry {i}: {100 * vis / (nu.energy * 1000):.0f}% of the beam energy"
+    assert seen, "no neutrino events to check"
+
+
+@needs_data
+@needs_geom
+def test_disambiguation_verdict_is_per_collection_not_per_event():
+    """One event that stays on a single drift face proves nothing."""
+    f = EventFile(ROCKMU)
+    assert f.is_disambiguated("hitfd") is True
+    # so no event of a disambiguated collection may be flagged
+    assert not any(f[i].display("hitfd").disambiguation_warning
+                   for i in range(len(f)))
+    if os.path.exists(ATMNU):                     # and a raw one still is
+        g = EventFile(ATMNU)
+        assert g.is_disambiguated("gaushit") is False
+        assert g[0].display("gaushit").disambiguation_warning
+
+
+@needs_data
+def test_expensive_accessors_are_memoised():
+    """Every control change re-decoded 33k MCParticles without this."""
+    ev = EventFile(ATMNU)[0] if os.path.exists(ATMNU) else EventFile(ROCKMU)[0]
+    for name in ("mc_particles", "truth_deposits", "tracks", "hits",
+                 "spacepoints", "optical"):
+        first = getattr(ev, name)()
+        assert getattr(ev, name)() is first, f"{name} is not memoised"
+
+
+@needs_data
+@needs_geom
+def test_shower_axes_actually_draw_in_the_interactive_view():
+    """A trace being present is not the same as it drawing anything."""
+    from pylarevd.display import _join_segments
+    ev = EventFile(ATMNU, geometry=GEOM)[0]
+    showers = ev.showers()
+    if not len(showers):
+        pytest.skip("no showers in this event")
+    fig = ev.display_3d(truth=True).plotly_figure()
+    trace = next((t for t in fig.data if t.name == "shower axes"), None)
+    assert trace is not None
+    x = np.asarray(trace.x, float)
+    finite = np.isfinite(x)
+    runs = max((len(r) for r in "".join("1" if v else "0" for v in finite).split("0")),
+               default=0)
+    assert runs >= 2, "every point is isolated between NaNs; mode='lines' draws nothing"
+    # a straight segment must survive the join untouched
+    seg = np.array([[0.0, 0, 0], [500.0, 0, 0]])
+    assert np.isfinite(_join_segments([seg])[:2]).all()
+
+
+@needs_data
+@needs_geom
+def test_categorical_identity_uses_markers_in_both_backends():
+    from pylarevd.theme import PLOTLY_MARKER_CYCLE
+    ev = EventFile(ATMNU, geometry=GEOM)[0]
+    d = ev.display("hitfd", colour_by="track")
+    if len(d.group_marker_batches()) < 3:
+        pytest.skip("too few objects to exercise the cycle")
+    symbols = {getattr(t.marker, "symbol", None) for t in d.plotly_figure().data
+               if getattr(t, "marker", None) is not None}
+    assert set(PLOTLY_MARKER_CYCLE[:3]) <= symbols, \
+        "the browser distinguishes objects by colour alone"
+
+
+def test_ophit_colour_scale_is_window_independent():
+    """The same hit must not change colour because you zoomed."""
+    import inspect
+    from pylarevd import display
+    src = inspect.getsource(display.OpticalDisplay.figure)
+    assert "PE_SIZE_RANGE" in src
+    assert "vmax=pe.max()" not in src

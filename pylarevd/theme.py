@@ -12,8 +12,16 @@ Two rules this module exists to enforce:
   cone drawn over it.
 * **Identity does not rest on colour alone.** ``categorical`` is paired with a
   marker cycle, giving 8 x 5 = 40 distinguishable combinations before anything
-  repeats -- which also survives greyscale printing and colour-vision
-  deficiency, where hue alone does not.
+  repeats. Colour and marker advance independently, so consecutive objects
+  differ in both; ranks 5 apart share a marker and are therefore kept apart in
+  greyscale luminance as well.
+
+What this module does NOT claim: that the overlay colours are separable from
+the charge colormaps by hue. Six ramps between them cover most of colour space,
+and a joint solve that also satisfies contrast and colour-vision constraints
+only returns neon. Overlays are told apart from hits by *shape and casing*
+instead -- dashed vs solid, star vs cross, and a contrasting outline drawn
+under every overlay marker and line (see ``_CASING`` in :mod:`pylarevd.display`).
 """
 
 from __future__ import annotations
@@ -77,8 +85,11 @@ LIGHT = Theme(
     fg="#0f172a", fg_muted="#475569", grid="#8394ac",
     track="#111827", vertex="#be185d", shower="#7c3aed",
     mctrack="#0369a1", truth="#6b7280", unassociated="#8993a3",
+    # Ranks 5 apart share a marker (the cycle is 5 long), so those pairs must
+    # also separate in greyscale: #00838f and #b03a5b were within 1.5 and 4.2
+    # luma of their partners, i.e. the same ink in print.
     categorical=("#1f6fb2", "#c0392b", "#2e7d32", "#7b4397",
-                 "#d2691e", "#00838f", "#9a7d0a", "#b03a5b"),
+                 "#d2691e", "#006670", "#9a7d0a", "#c34a6c"),
     # On white the *pale* end of a colormap disappears instead, so trim the top.
     cmap_floor=0.0, cmap_ceiling=0.92,
 )

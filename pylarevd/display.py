@@ -54,9 +54,18 @@ _BASE_FONTS = dict(tick=7.0, label=8.0, title=9.0, suptitle=10.0, legend=7.0,
                    note=8.0)
 
 
+#: Chrome that is read up close rather than from across the room. Scaling the
+#: truth block and legend by the full preset multiplier put a 20.8 pt note on a
+#: poster, where the text bands then claimed more of the canvas than the panels
+#: and constrained_layout gave up. A poster viewer reads the title from 2 m and
+#: the kinematics from arm's length, so these grow with the square root.
+_REFERENCE_FONTS = ("note", "legend")
+
+
 def _fonts(preset: str) -> dict:
     scale = PRESETS[preset]["fonts"]
-    return {k: v * scale for k, v in _BASE_FONTS.items()}
+    return {k: v * (scale ** 0.5 if k in _REFERENCE_FONTS else scale)
+            for k, v in _BASE_FONTS.items()}
 
 
 def charge_cmap(theme: Theme, name: str = DEFAULT_COLORMAP):
@@ -110,6 +119,20 @@ def _join(polylines):
         ws.append(np.append(w, np.nan))
         xs.append(np.append(x, np.nan))
     return np.concatenate(ws), np.concatenate(xs)
+
+
+def _join_segments(segments) -> np.ndarray:
+    """NaN-separate polylines WITHOUT gap-breaking inside them.
+
+    For lines that are straight by construction (a shower axis), the gap test
+    is not just unnecessary -- it splits the segment's own two endpoints and
+    nothing is drawn.
+    """
+    usable = [np.asarray(p) for p in segments if len(p) >= 2]
+    if not usable:
+        return np.zeros((0, 3))
+    sep = np.full((1, 3), np.nan)
+    return np.vstack([np.vstack([p, sep]) for p in usable])
 
 
 def _join3d(polylines, max_step: float = MAX_STEP_CM) -> np.ndarray:
@@ -291,6 +314,43 @@ def _style_axes(ax, t: Theme, fonts: dict, *, three_d: bool = False) -> None:
 
 #: The 3-D legend scales markers up because space points are drawn 1-2 px.
 _LEGEND_MARKERSCALE_3D = 8
+
+#: Smallest share of the canvas height the panels are allowed to keep.
+_MIN_AXES_FRACTION = 0.45
+
+
+def _fit_bands(bottom: float, top: float) -> tuple[float, float]:
+    """Shrink the reserved text bands so the panels keep enough room."""
+    total = bottom + top
+    budget = 1.0 - _MIN_AXES_FRACTION
+    if total <= budget or total <= 0:
+        return bottom, top
+    k = budget / total
+    return bottom * k, top * k
+
+
+def _preset_figsize(preset: str, w: float, h: float) -> tuple[float, float]:
+    """Scale a figure's nominal size by the preset, keeping its aspect.
+
+    The 3-D, optical and flash figures hardcoded their canvas, so --preset only
+    changed their fonts -- large type on a canvas that never grew.
+    """
+    spec = PRESETS[preset]
+    scale = spec["panel_width"] / PRESETS["screen"]["panel_width"]
+    return (w * scale, h * scale)
+
+
+def _casing(t: Theme, width: float = 2.0):
+    """Path effect drawing a contrasting outline under an overlay.
+
+    Hue cannot separate the overlays from the charge ramps -- six colormaps
+    cover most of colour space, and a palette satisfying that plus contrast
+    plus colour-vision constraints comes out neon. A casing separates them
+    structurally instead, whatever colormap is in use.
+    """
+    from matplotlib import patheffects
+    return [patheffects.withStroke(linewidth=width, foreground=t.axes_bg)]
+
 
 def _style_legend(ax, t: Theme, **kwargs):
     return ax.legend(facecolor=t.legend_bg, edgecolor=t.legend_edge,
@@ -494,6 +554,14 @@ class _TruthInfo:
         if not self.geometry.wrapped_channels or len(self.hits) < 100:
             return ""
         if self.hits.channels_split_across_wires:
+            return ""       # this event settles it on its own
+        # Otherwise ask the whole collection: one event that happens to stay on
+        # a single drift face proves nothing.
+        try:
+            tag = self.hits.product.split("_")[1]
+            if self.event._src.is_disambiguated(tag) is not False:
+                return ""
+        except Exception:
             return ""
         return (f"{self.hits.product.rstrip('.')} looks NOT disambiguated "
                 f"(no channel split across wires, in a detector with "
@@ -523,12 +591,17 @@ class _TruthInfo:
         # Visible energy explains a sparse event far better than the hit count
         # does: an interaction at the wall can bring in 10 GeV and leave 300 MeV.
         try:
-            vis = self.event.deposited_energy()
+            vis = self.event.neutrino_visible_energy()
         except Exception:
             vis = None
         if vis is not None and nu.energy > 0:
             lines.append(f"  visible energy {vis:.0f} MeV of {nu.energy * 1000:.0f} "
                          f"MeV true ({100 * vis / (nu.energy * 1000):.1f}%)")
+        # A filtered picture must say so: a shared PNG was indistinguishable
+        # from an unfiltered one.
+        if getattr(self, "radiologicals", True) is False:
+            lines.append("  radiologicals hidden: showing only truth "
+                         "descending from the interaction")
         return "\n".join(lines)
 
     def _truth_headline(self) -> str:
@@ -563,6 +636,7 @@ class EventDisplay(_TruthInfo):
                  showers=None, mc=None, colour_by: str = "integral",
                  colour_scale: str = "auto", min_hits_per_panel: int = 1,
                  merge: str = "orientation", space: str = "physical",
+                 radiologicals: bool = True,
                  theme: str = "dark", colormap: str = DEFAULT_COLORMAP,
                  preset: str = DEFAULT_PRESET):
         for name, value, allowed in (("merge", merge, self.MERGES),
@@ -573,6 +647,7 @@ class EventDisplay(_TruthInfo):
                 raise ValueError(
                     f"{name}={value!r} is not one of {', '.join(allowed)}")
         self.event = event
+        self.radiologicals = radiologicals
         self.hits = hits if hits is not None else event.hits()
         self.truth = truth
         self.tracks = tracks
@@ -951,6 +1026,10 @@ class EventDisplay(_TruthInfo):
         hx, hy, xlabel, ylabel = self._axes
         readout = self.space == "readout"
         wall = hx[np.isfinite(hx)]
+        # Shared only across panels that actually overlap in w: pooling every
+        # panel's hits gave a sparse panel a range 10x its own content, so 90%
+        # of it was empty. Panels whose own span is a small fraction of the
+        # pooled one get framed on their own data instead.
         wlim = (wall.min(), wall.max()) if share_w and wall.size and not readout else None
 
         # Everything measured in points has to follow the canvas, or a preset
@@ -958,6 +1037,7 @@ class EventDisplay(_TruthInfo):
         mscale = float(np.clip(spec["panel_width"] / 7.0, 0.45, 1.6))
         marker_size = marker_size * mscale ** 1.5
         sc = None
+        _legend_rows = 0
         drew_truth = False
         for i, (ax, p) in enumerate(zip(axes.flat, self.panels)):
             m = p.mask
@@ -1001,6 +1081,7 @@ class EventDisplay(_TruthInfo):
                     ax.fill(sw_, sx_, color=t.shower, alpha=0.22, zorder=2,
                             label="shower cones" if j == 0 else None)
                     ax.plot(sw_, sx_, "-", color=t.shower, linewidth=1.2,
+                            path_effects=_casing(t, 2.6),
                             alpha=0.8, zorder=3.6)
                 trk_w, trk_x = _join(self._track_wx(p))
                 if len(trk_w):
@@ -1045,7 +1126,14 @@ class EventDisplay(_TruthInfo):
             ax.set_ylabel(ylabel, fontsize=8)
             _style_axes(ax, t, fonts)
             if wlim:
-                ax.set_xlim(*wlim)
+                own = hx[p.mask]
+                own = own[np.isfinite(own)]
+                pooled = wlim[1] - wlim[0]
+                if len(own) and pooled > 0 and np.ptp(own) < 0.35 * pooled:
+                    lo, hi = _data_ylim(own)          # same padding rule as y
+                    ax.set_xlim(lo, hi)
+                else:
+                    ax.set_xlim(*wlim)
         for ax in axes.flat[n:]:
             ax.set_visible(False)
         if (drew_truth or self.tracks or self.vertices is not None
@@ -1068,13 +1156,21 @@ class EventDisplay(_TruthInfo):
                 per_entry = 1.6 * (fonts["legend"] / _BASE_FONTS["legend"])
                 fig_w = spec["panel_width"] * ncols
                 max_cols = max(1, int(fig_w / max(per_entry, 0.1)))
-                leg = fig.legend(handles, labels, loc="lower center",
-                                 bbox_to_anchor=(0.5, 1.0),
-                                 ncols=max(1, min(len(handles), max_cols)),
+                n_cols = max(1, min(len(handles), max_cols))
+                _legend_rows = int(np.ceil(len(handles) / n_cols))
+                # Inside the first panel, not a figure-level legend: an
+                # "outside" location competes with the suptitle for the top
+                # band and the truth block for the bottom one, and every
+                # arrangement collided on some preset. Axes legends are laid
+                # out by matplotlib with no figure-level interaction at all.
+                leg = axes.flat[0].legend(
+                                 handles, labels, loc="upper left",
+                                 ncols=n_cols,
                                  fontsize=fonts["legend"], markerscale=1.6,
                                  framealpha=0.9, facecolor=t.legend_bg,
                                  edgecolor=t.legend_edge, labelcolor=t.fg,
-                                 handlelength=1.8, columnspacing=1.2)
+                                 handlelength=1.8, columnspacing=1.2,
+                                 borderpad=0.4, labelspacing=0.3)
                 leg.set_zorder(10)
         if sc is not None:
             cb = fig.colorbar(sc, ax=axes.ravel().tolist(), pad=0.01, fraction=0.03)
@@ -1082,36 +1178,32 @@ class EventDisplay(_TruthInfo):
         elif self.is_categorical:
             n_obj = int(self.groups.max()) + 1 if (self.groups >= 0).any() else 0
             n_orphan = int((self.groups < 0).sum())
-            fig.text(0.99, 0.005,
-                     f"coloured by {self.colour_by}: {n_obj} objects "
-                     f"(colour x marker), {n_orphan} unassociated hits",
-                     color=t.fg_muted, fontsize=fonts["note"], va="bottom",
-                     ha="right")
+            # Appended to the truth block below rather than drawn at the
+            # opposite corner: anchored independently, the two texts printed
+            # over each other whenever both were present.
+            self._extra_note = (f"coloured by {self.colour_by}: {n_obj} objects "
+                                f"(colour x marker), {n_orphan} unassociated hits")
         fig_w = spec["panel_width"] * ncols
         truth = self._truth_block()
-        if truth:
-            head, *rest = truth.splitlines()
-            # The interaction goes in the title itself -- it is the first thing
-            # you want to know about the event -- with the kinematics beneath.
-            fig.suptitle(_wrap_for(f"{self._title()}\n{head}", fig_w,
-                                   fonts["suptitle"]),
-                         fontsize=fonts["suptitle"], color=t.fg)
-            if rest:
-                # constrained_layout does not reserve room for figure text, so
-                # ask the engine for a band at the bottom; otherwise the block
-                # is drawn straight over the last panel's axis labels.
-                pad = 1.7 * fonts["note"] * len(rest) / (fig.get_figheight() * 72)
-                engine = fig.get_layout_engine()
-                if engine is not None:
-                    engine.set(rect=(0, pad, 1, 1 - pad))
-                block = _wrap_for("\n".join(rest), fig_w, fonts["note"],
-                                  char_factor=0.62)
-                fig.text(0.01, pad / 2, block, color=t.fg_muted,
-                         fontsize=fonts["note"], va="center", ha="left",
-                         family="monospace", linespacing=1.5)
-        else:
-            fig.suptitle(_wrap_for(self._title(), fig_w, fonts["suptitle"]),
-                         fontsize=fonts["suptitle"], color=t.fg)
+        note = getattr(self, "_extra_note", "")
+        head = truth.splitlines()[0] if truth else ""
+        rest = truth.splitlines()[1:] if truth else []
+        if note:
+            rest = rest + ["  " + note]
+
+        # Two engine-managed slots only: the suptitle at the top and a
+        # supxlabel underneath the panels. constrained_layout reserves room for
+        # both, so neither can land on the data. Every scheme that positioned a
+        # block itself eventually overlapped something on some preset.
+        fig.suptitle(_wrap_for(self._title() + (f"\n{head}" if head else ""),
+                               fig_w, fonts["suptitle"]),
+                     fontsize=fonts["suptitle"], color=t.fg)
+        if rest:
+            fig.supxlabel(_wrap_for("\n".join(rest), fig_w, fonts["note"],
+                                    char_factor=0.62),
+                          color=t.fg_muted, fontsize=fonts["note"],
+                          ha="left", x=0.01, family="monospace",
+                          linespacing=1.4)
         return fig
 
     def save(self, path: str, *, dpi: int | None = None, **kwargs) -> str:
@@ -1233,21 +1325,41 @@ class EventDisplay(_TruthInfo):
                 h.channel[m], h.tick[m], h.integral[m], h.amplitude[m],
                 h.tpc[m], h.wire[m], h.multiplicity[m],
             ])
-            fig.add_trace(
-                go.Scattergl(
-                    x=hx[m], y=hy[m], mode="markers",
-                    marker=(dict(size=marker_size,
-                                 color=list(self.group_colours()[m]),
-                                 opacity=_ALPHA)
-                            if self.is_categorical else
-                            dict(size=marker_size, color=cvals[m],
-                                 colorscale=charge_colorscale(t, self.colormap),
-                                 cmin=vmin, cmax=vmax, opacity=_ALPHA,
-                                 showscale=(i == 0), colorbar=cbar)),
-                    customdata=custom,
-                    hovertemplate=_hover_template(readout, xlabel, ylabel),
-                    name=p.title, showlegend=False),
-                row=r + 1, col=c + 1)
+            if self.is_categorical:
+                # One trace per colour x marker batch, as the static backend
+                # does. Colouring a single trace instead left identity resting
+                # on hue alone -- in the browser, which is where events are
+                # actually scanned -- and that is exactly what pairing colour
+                # with a marker exists to prevent.
+                for sel, colour, marker, obj in self.group_marker_batches(plotly=True):
+                    sel = sel & m
+                    if not sel.any():
+                        continue
+                    label = "unassociated" if obj is None else f"{self.colour_by} {obj}"
+                    fig.add_trace(go.Scattergl(
+                        x=hx[sel], y=hy[sel], mode="markers",
+                        marker=dict(size=marker_size, color=colour,
+                                    symbol=marker, opacity=_ALPHA),
+                        customdata=np.column_stack([
+                            h.channel[sel], h.tick[sel], h.integral[sel],
+                            h.amplitude[sel], h.tpc[sel], h.wire[sel],
+                            h.multiplicity[sel]]),
+                        hovertemplate=_hover_template(readout, xlabel, ylabel),
+                        name=label, legendgroup=label,
+                        showlegend=(i == 0)),
+                        row=r + 1, col=c + 1)
+            else:
+                fig.add_trace(
+                    go.Scattergl(
+                        x=hx[m], y=hy[m], mode="markers",
+                        marker=dict(size=marker_size, color=cvals[m],
+                                    colorscale=charge_colorscale(t, self.colormap),
+                                    cmin=vmin, cmax=vmax, opacity=_ALPHA,
+                                    showscale=(i == 0), colorbar=cbar),
+                        customdata=custom,
+                        hovertemplate=_hover_template(readout, xlabel, ylabel),
+                        name=p.title, showlegend=False),
+                    row=r + 1, col=c + 1)
             if not readout:
                 for xa in _anode_positions(h, self.geometry, p):
                     fig.add_hline(y=xa,
@@ -1285,7 +1397,11 @@ class EventDisplay(_TruthInfo):
             # Keep the user's zoom/pan when they step to the next event: the
             # panel layout is what the view depends on, not which event is in
             # it. Without this, scanning a sample re-zooms on every keypress.
-            uirevision=f"{self.space}|{self.merge}|{len(self.panels)}",
+            # File identity belongs in the key: a camera set on one file must
+            # not persist onto another with a different extent. Event id stays
+            # OUT, so stepping events still keeps the view.
+            uirevision=f"{self.geometry.detector}|{self.space}|"
+                       f"{self.merge}|{len(self.panels)}",
             dragmode="pan",
         )
         fig.update_xaxes(gridcolor=t.grid, zerolinecolor=t.grid)
@@ -1351,7 +1467,9 @@ class Display3D(_TruthInfo):
                  vertices=None, showers=None, mc=None,
                  colour_by: str = "y", draw_tpcs: bool = True,
                  focus: str = "data", theme: str = "dark",
+                 radiologicals: bool = True,
                  colormap: str = DEFAULT_COLORMAP, preset: str = DEFAULT_PRESET):
+        self.radiologicals = radiologicals
         if focus not in self.FOCUS:
             raise ValueError(f"focus={focus!r} is not one of {', '.join(self.FOCUS)}")
         if colour_by not in self.COLOUR_BY:
@@ -1478,9 +1596,12 @@ class Display3D(_TruthInfo):
                     hoverinfo="skip"))
 
         if self.showers is not None and len(self.showers):
-            axes = _join3d([np.vstack([st, st + di * ln]) for st, di, ln in
-                            zip(self.showers.start, self.showers.direction,
-                                self.showers.length)])
+            # NOT _join3d: a shower axis is one straight segment whose length
+            # exceeds MAX_STEP_CM by construction, so the gap-break inserted a
+            # NaN between its own two endpoints and the line drew nothing.
+            axes = _join_segments([np.vstack([st, st + di * ln]) for st, di, ln in
+                                   zip(self.showers.start, self.showers.direction,
+                                       self.showers.length)])
             if len(axes):
                 fig.add_trace(go.Scatter3d(
                     x=axes[:, 2], y=axes[:, 0], z=axes[:, 1], mode="lines",
@@ -1537,7 +1658,7 @@ class Display3D(_TruthInfo):
                        aspectmode="data"),
             # Framing is what the camera depends on; stepping events must not
             # throw away a viewpoint the user set up.
-            uirevision=f"3d|{self.focus}",
+            uirevision=f"3d|{self.geometry.detector}|{self.focus}",
             margin=dict(l=0, r=0, t=50, b=0))
         return fig
 
@@ -1558,11 +1679,11 @@ class Display3D(_TruthInfo):
     # so static 3-D images go through matplotlib instead.
 
     def figure(self, *, marker_size: float = 0.6, elev: float = 18.0,
-               azim: float = -60.0, figsize: tuple[float, float] = (11.0, 7.0)):
+               azim: float = -60.0, figsize: tuple[float, float] | None = None):
         plt = _pyplot()
 
         t, fonts = self.theme, _fonts(self.preset)
-        fig = plt.figure(figsize=figsize)
+        fig = plt.figure(figsize=figsize or _preset_figsize(self.preset, 11.0, 7.0))
         fig.patch.set_facecolor(t.fig_bg)
         ax = fig.add_subplot(111, projection="3d")
 
@@ -1661,8 +1782,11 @@ class Display3D(_TruthInfo):
             leg.set_zorder(10)
         return fig
 
-    def save(self, path: str, *, dpi: int = SAVE_DPI, **kwargs) -> str:
+    def save(self, path: str, *, dpi: int | None = None, **kwargs) -> str:
         _vector_text()
+        # None must fall back to the preset, not to matplotlib's 100 dpi: the
+        # CLI always passes dpi=a.dpi, which defaults to None.
+        dpi = PRESETS[self.preset]["dpi"] if dpi is None else dpi
         fig = self.figure(**kwargs)
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
         fig.savefig(path, dpi=dpi, bbox_inches="tight",
@@ -1792,7 +1916,7 @@ class FlashDisplay3D(_TruthInfo):
     def figure(self, *, elev: float = 22.0, azim: float = -60.0):
         plt = _pyplot()
         t, fonts = self.theme, _fonts(self.preset)
-        fig = plt.figure(figsize=(11.0, 8.0))
+        fig = plt.figure(figsize=_preset_figsize(self.preset, 11.0, 8.0))
         ax = fig.add_subplot(111, projection="3d")
         fig.patch.set_facecolor(t.fig_bg)
         ax.set_facecolor(t.axes_bg)
@@ -1860,8 +1984,11 @@ class FlashDisplay3D(_TruthInfo):
             leg.set_zorder(10)
         return fig
 
-    def save(self, path: str, *, dpi: int = SAVE_DPI, **kwargs) -> str:
+    def save(self, path: str, *, dpi: int | None = None, **kwargs) -> str:
         _vector_text()
+        # None must fall back to the preset, not to matplotlib's 100 dpi: the
+        # CLI always passes dpi=a.dpi, which defaults to None.
+        dpi = PRESETS[self.preset]["dpi"] if dpi is None else dpi
         fig = self.figure(**kwargs)
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
         fig.savefig(path, dpi=dpi, bbox_inches="tight",
@@ -2050,11 +2177,13 @@ class OpticalDisplay(_TruthInfo):
                          "- pass time_range=(lo, hi) to change, or (-inf, inf) for all")
         return "\n".join(lines)
 
-    def figure(self, *, figsize: tuple[float, float] = (12.0, 6.0)):
+    def figure(self, *, figsize: tuple[float, float] | None = None):
         plt = _pyplot()
         t, fonts = self.theme, _fonts(self.preset)
         o = self.op
-        fig, axes = plt.subplots(2, 1, figsize=figsize, constrained_layout=True,
+        fig, axes = plt.subplots(
+            2, 1, figsize=figsize or _preset_figsize(self.preset, 12.0, 6.0),
+            constrained_layout=True,
                                  sharex=True)
         fig.patch.set_facecolor(t.fig_bg)
         hits, fl = self._mask(~o.is_flash), self._mask(o.is_flash)
@@ -2070,10 +2199,14 @@ class OpticalDisplay(_TruthInfo):
         ax = axes[0]
         if hits.any():
             pe = np.clip(o.pe[hits], 1e-3, None)
+            # Fixed range, not the window's own min/max: the same OpHit changed
+            # colour by 7.6x purely from zooming, and no two renders could be
+            # compared. Same reasoning as PE_SIZE_RANGE for flash size.
+            plo, phi = PE_SIZE_RANGE
             sc = ax.scatter(o.time[hits], hit_y[hits], c=pe, s=3,
                             cmap=charge_cmap(t, self.colormap),
                             norm=__import__("matplotlib.colors", fromlist=["LogNorm"])
-                            .LogNorm(vmin=max(pe.min(), 1e-2), vmax=pe.max()),
+                            .LogNorm(vmin=plo, vmax=phi, clip=True),
                             linewidths=0, rasterized=True)
             cb = fig.colorbar(sc, ax=ax, pad=0.01, fraction=0.03)
             _style_colorbar(cb, "photoelectrons", t, fonts)
@@ -2105,8 +2238,11 @@ class OpticalDisplay(_TruthInfo):
                      fontsize=fonts["suptitle"], color=t.fg)
         return fig
 
-    def save(self, path: str, *, dpi: int = SAVE_DPI, **kwargs) -> str:
+    def save(self, path: str, *, dpi: int | None = None, **kwargs) -> str:
         _vector_text()
+        # None must fall back to the preset, not to matplotlib's 100 dpi: the
+        # CLI always passes dpi=a.dpi, which defaults to None.
+        dpi = PRESETS[self.preset]["dpi"] if dpi is None else dpi
         fig = self.figure(**kwargs)
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
         fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())

@@ -333,6 +333,13 @@ class Neutrino:
                      f"y = {self.y:.3f}   Q2 = {self.q2:.2f} GeV2")
         lines.append(f"  vertex ({self.vertex[0]:.1f}, {self.vertex[1]:.1f}, "
                      f"{self.vertex[2]:.1f}) cm")
+        if self.lepton_pdg and np.isfinite(self.lepton_energy):
+            # A tau decays (GENIE status 3) and so never appears in the final
+            # state, which for a tau-appearance sample omits the one particle
+            # the event is about.
+            lines.append(f"  outgoing lepton: "
+                         f"{physics.particle_name(self.lepton_pdg)} "
+                         f"({self.lepton_energy:.2f} GeV)")
         fs = self.final_state_counts()
         if fs:
             shown = ", ".join(f"{n}x {name} ({e:.2f} GeV)" if n > 1
@@ -609,6 +616,7 @@ class Event:
         return (f"Pandora best match: kept {kept}; dropped {dropped} duplicate "
                 f"track/shower fits of the same PFParticles")
 
+    @_memoised
     def tracks(self, tag: str | None = None, *, best_match: bool = True) -> Tracks:
         """Reconstructed tracks as 3-D polylines.
 
@@ -775,7 +783,7 @@ class Event:
             return None
         # min_points=1: a particle that never moved still parents ones that do,
         # and deposits reference it by track id.
-        mc = self.mc_particles(min_points=1)
+        mc = self.mc_particles(min_points=1)   # memoised; display() reuses it
         if not len(mc):
             return None
         index = {int(t): i for i, t in enumerate(mc.track_id)}
@@ -794,6 +802,7 @@ class Event:
         d = np.linalg.norm(start[roots] - nu.vertex, axis=1)
         return np.asarray(mc.track_id)[d < tol]
 
+    @_memoised
     def mc_particles(self, tag: str | None = None, *,
                      min_points: int = 2) -> MCParticles:
         """True trajectories, one polyline per simulated particle.
@@ -1035,6 +1044,28 @@ class Event:
             return None
         return float(np.sum(dep.edep))
 
+    @_memoised
+    def neutrino_visible_energy(self) -> "float | None":
+        """True ionisation from the INTERACTION alone [MeV].
+
+        Not the event total: a radiological sample lays down ~3 GeV of
+        unrelated decays, which against a sub-GeV neutrino made the "visible
+        energy" fraction exceed 100% on 9 of 10 events here (peak 1283%).
+        Falls back to the total when there is no neutrino to attribute to.
+        """
+        try:
+            dep = self.truth_deposits()
+        except Exception:
+            return None
+        if dep is None or not len(dep):
+            return None
+        ids = self.neutrino_track_ids()
+        if ids is None:
+            return float(np.sum(dep.edep))
+        # EM shower daughters carry a negated TrackID
+        return float(np.sum(dep.edep[np.isin(np.abs(dep.track_id), ids)]))
+
+    @_memoised
     def truth_deposits(self, tag: str | None = None) -> "TruthDeposits":
         """True energy depositions (``sim::SimEnergyDeposit``), if simulated.
 
@@ -1138,6 +1169,7 @@ class Event:
         if truth and not radiologicals:
             deposits, got["mc"] = self._drop_radiologicals(deposits, got.get("mc"))
         return EventDisplay(self, hits=self.hits(tag), truth=deposits,
+                            radiologicals=radiologicals,
                             tracks=got.get("tracks"), vertices=got.get("vertices"),
                             showers=got.get("showers"), mc=got.get("mc"), **kwargs)
 
@@ -1200,7 +1232,8 @@ class Event:
         if truth and not radiologicals:
             deposits, mc = self._drop_radiologicals(deposits, mc)
         return Display3D(self, spacepoints=self.spacepoints(spacepoint_tag),
-                         truth=deposits, tracks=polylines, mc=mc, **extra,
+                         truth=deposits, tracks=polylines, mc=mc,
+                         radiologicals=radiologicals, **extra,
                          **kwargs)
 
 
@@ -1226,6 +1259,7 @@ class EventFile:
         self.path = str(path)
         self.art = ArtFile(self.path)
         self._events: dict[int, Event] = {}
+        self._scan_cache: dict = {}
         if isinstance(geometry, Geometry):
             self.geometry = geometry
         else:
@@ -1291,6 +1325,41 @@ class EventFile:
     @cached_property
     def event_ids(self) -> np.ndarray:
         return self.art.event_ids()
+
+    def is_disambiguated(self, tag: str | None = None, *, scan: int = 12) -> "bool | None":
+        """Whether a hit collection resolves the wrapped-wire ambiguity.
+
+        Disambiguation splits a wrapped channel across physical wires, so its
+        presence is the signature -- but a single event need not exercise it. A
+        cosmic track that stays on one drift face splits nothing, which made a
+        per-event test call the correctly disambiguated collection "NOT
+        disambiguated" on 5 of 10 events. Ask the collection, over several
+        events, and stop at the first event that settles it.
+
+        Returns None when the detector has no wrapped channels (nothing to
+        disambiguate) or nothing could be read.
+        """
+        key = ("disambig", tag)
+        cached = self._scan_cache.get(key)
+        if cached is not None:
+            return cached
+        if not self.geometry.wrapped_channels:
+            self._scan_cache[key] = None
+            return None
+        verdict = None
+        for i in range(min(scan, len(self))):
+            try:
+                hits = self[i].hits(tag)
+            except Exception:
+                continue
+            if not len(hits):
+                continue
+            verdict = False if verdict is None else verdict
+            if hits.channels_split_across_wires:
+                verdict = True
+                break
+        self._scan_cache[key] = verdict
+        return verdict
 
     def index_of(self, run: int, subrun: int, event: int) -> int | None:
         """Entry number of a given physics event, or ``None`` if absent.
