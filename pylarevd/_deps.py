@@ -33,8 +33,9 @@ class Dep:
 
 
 DEPENDENCIES: tuple[Dep, ...] = (
-    Dep("numpy", "everything", "numpy", required=True),
-    Dep("uproot", "reading art-ROOT files", "uproot", required=True),
+    Dep("pylar", "art-ROOT reader and LArSoft data model", "pylar", required=True),
+    Dep("numpy", "array operations (via pylar)", "numpy", required=True),
+    Dep("uproot", "reading art-ROOT files (via pylar)", "uproot", required=True),
     Dep("matplotlib", "static images (PNG/PDF/SVG)", "matplotlib"),
     Dep("plotly", "interactive figures and self-contained HTML", "plotly"),
     Dep("dash", "the interactive browser (python -m pylarevd.app)",
@@ -139,28 +140,21 @@ def report() -> str:
     # the geometries decide whether a file can be displayed at all
     try:
         import glob
-
         import numpy as np      # only for reading the geometry headers
-        here = os.path.dirname(os.path.abspath(__file__))
-        found = sorted(glob.glob(os.path.join(here, "geom", "*.npz")))
+        import pylar
+        pylar_dir = os.path.dirname(os.path.abspath(pylar.__file__))
+        found = sorted(glob.glob(os.path.join(pylar_dir, "geom", "*.npz")))
         lines.append("")
         if found:
-            lines.append("  bundled geometries:")
+            lines.append("  bundled geometries (from pylar):")
             for path in found:
                 with np.load(path, allow_pickle=False) as z:
                     lines.append(f"    {str(z['detector']):<22} "
                                  f"{int(z['nchannels']):>7} channels   "
                                  f"{os.path.basename(path)}")
         else:
-            lines.append("  no geometries found in pylarevd/geom/ -- "
+            lines.append("  no geometries found in pylar/geom/ -- "
                          "nothing can be displayed until one is exported")
-    except ImportError:
-        import glob
-        here = os.path.dirname(os.path.abspath(__file__))
-        found = sorted(glob.glob(os.path.join(here, "geom", "*.npz")))
-        lines.append("")
-        lines.append(f"  {len(found)} geometry file(s) present "
-                     f"(install numpy to read their detector names)")
     except Exception as exc:
         lines.append(f"  could not list geometries: {exc}")
     return "\n".join(lines)

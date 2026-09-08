@@ -28,14 +28,13 @@ from urllib.parse import parse_qsl, urlencode
 
 from ._deps import require
 
-require("dash", "the interactive browser")
+try:
+    from dash import Dash, Input, Output, State, dcc, html, no_update
+except ImportError:
+    Dash = Input = Output = State = dcc = html = no_update = None
 
-from dash import Dash, Input, Output, State, dcc, html, no_update
-
-from .artio import ArtReadError
+from pylar import ArtReadError, EventFile, Geometry, GeometryError
 from .theme import COLORMAPS, DEFAULT_COLORMAP, THEMES
-from .event import EventFile
-from .geometry import Geometry, GeometryError
 
 #: Controls whose value is mirrored into the URL, so a view can be linked.
 #: (component id, is-a-checklist)
@@ -562,6 +561,8 @@ def _extract_camera(relayout, fallback=None):
 
 def build_app(paths: list[str], geometry: str | None = None,
               allow_open: bool = True) -> Dash:
+    if Dash is None:
+        require("dash", "the interactive browser")
     files = _files_store(paths, geometry)
     # ONLY an explicit --geometry. Reusing the first file's resolved geometry
     # forced it onto every later one: opening a full-10kt file from a server

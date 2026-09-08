@@ -14,9 +14,8 @@ import os
 import numpy as np
 import pytest
 
-from pylarevd import EventFile
-from pylarevd.artio import ArtFile, ArtReadError
-from pylarevd.geometry import Geometry, GeometryError
+import pylar
+from pylar import EventFile, ArtFile, ArtReadError, Geometry, GeometryError
 
 # Sample files are not distributed with the code. Point the suite at your own
 # with PYLAREVD_TEST_DATA (a directory holding the two files below), or set
@@ -26,11 +25,17 @@ ROCKMU = os.environ.get(
     "PYLAREVD_ROCKMU", os.path.join(_DATA, "rock_muons_reco1.root") if _DATA else "")
 ATMNU = os.environ.get(
     "PYLAREVD_ATMNU", os.path.join(_DATA, "atmnu_radio_reco.root") if _DATA else "")
-GEOM = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    "pylarevd", "geom", "dune10kt_v6_1x2x6.npz")
+GEOM = os.path.join(os.path.dirname(os.path.abspath(pylar.__file__)),
+                    "geom", "dune10kt_v6_1x2x6.npz")
 
 needs_data = pytest.mark.skipif(not os.path.exists(ROCKMU), reason="sample file absent")
 needs_geom = pytest.mark.skipif(not os.path.exists(GEOM), reason="geometry absent")
+try:
+    import dash
+    _HAS_DASH = True
+except ImportError:
+    _HAS_DASH = False
+needs_dash = pytest.mark.skipif(not _HAS_DASH, reason="dash absent")
 
 
 # ---- layout: derived from streamer info, verified against real bytes -------
@@ -636,7 +641,7 @@ def test_wire_waveforms_are_actually_recovered():
     empty ones parsed. Assert on content, and on an invariant the file itself
     must satisfy.
     """
-    from pylarevd.streamers import UNPARSED
+    from pylar.streamers import UNPARSED
     f = ArtFile(ROCKMU)
     wires = f.read("recob::Wires_tpcrawdecoder_gauss_DetSim.", "recob::Wire", 0)
     roi = wires["fSignalROI"]
@@ -1105,7 +1110,7 @@ def test_file_selects_the_geometry_it_names():
 @needs_data
 def test_unexported_geometry_fails_loudly(monkeypatch):
     """Better a clear error than a display full of NaN."""
-    import pylarevd.event as ev_mod
+    import pylar.event as ev_mod
     monkeypatch.setattr(ArtFile, "geometry_config",
                         lambda self: {"Name": "protodune_sp_v9"})
     with pytest.raises(GeometryError, match="protodune_sp_v9"):
@@ -1114,7 +1119,7 @@ def test_unexported_geometry_fails_loudly(monkeypatch):
 
 @needs_geom
 def test_load_geometry_is_cached_by_path():
-    from pylarevd.event import load_geometry
+    from pylar.event import load_geometry
     assert load_geometry(GEOM) is load_geometry(GEOM)
 
 
@@ -1173,7 +1178,7 @@ def test_sequence_rejects_impossible_element_counts():
     out: one simb::MCTruth became 2.35 million TLorentzVector reads and never
     finished.
     """
-    import pylarevd.streamers as st
+    import pylar.streamers as st
     # 8 bytes: a count of 0x7FFFFFFF followed by nothing that could hold it
     buf = b"\x7f\xff\xff\xff" + b"\x00" * 4
     cur = st.Cursor(buf, 0)
@@ -1231,7 +1236,7 @@ def test_containment_is_per_tpc_not_a_bounding_box():
 
     Event 687/0/95 is exactly that case: 6.6 cm above the top face.
     """
-    from pylarevd.geometry import Geometry
+    from pylar.geometry import Geometry
     g = Geometry(GEOM)
     box = g.active_boxes
     centre = 0.5 * (box[0, :3] + box[0, 3:])
@@ -1249,7 +1254,7 @@ def test_containment_is_per_tpc_not_a_bounding_box():
 
 @needs_geom
 def test_in_active_is_vectorised():
-    from pylarevd.geometry import Geometry
+    from pylar.geometry import Geometry
     g = Geometry(GEOM)
     box = g.active_boxes
     centre = 0.5 * (box[0, :3] + box[0, 3:])
@@ -1597,6 +1602,7 @@ def test_title_wrapping_respects_the_canvas():
     assert "\n" not in _wrap_for(long, 20.0, 8.0)   # a poster does not
 
 
+@needs_dash
 def test_checklists_are_disabled_per_option_not_per_component():
     """dcc.Checklist has no component-level `disabled` prop.
 
@@ -1722,6 +1728,7 @@ def test_requirements_txt_covers_the_dependencies():
 # Starting with no files, and opening one by path
 # ---------------------------------------------------------------------------
 
+@needs_dash
 def test_app_starts_with_no_files():
     """Files must be optional: the browser can start empty and open by path."""
     from pylarevd.app import build_app, _files_store, render
@@ -1970,9 +1977,9 @@ def test_explicit_geometry_must_match_the_file():
 
     n_bad_geometry stayed 0, so nothing downstream could notice.
     """
-    from pylarevd.geometry import Geometry
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    other = os.path.join(root, "pylarevd", "geom", "dune10kt_v6_full.npz")
+    from pylar.geometry import Geometry
+    pylar_dir = os.path.dirname(os.path.abspath(pylar.__file__))
+    other = os.path.join(pylar_dir, "geom", "dune10kt_v6_full.npz")
     if not os.path.exists(other) or EventFile(ATMNU).geometry.detector == "dune10kt_v6":
         pytest.skip("need a second, different geometry")
     with pytest.raises(GeometryError, match="was produced with"):
@@ -1986,7 +1993,7 @@ def test_explicit_geometry_must_match_the_file():
 @needs_data
 def test_unreadable_event_id_cannot_answer_a_lookup():
     """(0, 0, entry) is a plausible triple index_of would happily match."""
-    from pylarevd.artio import UNKNOWN_EVENT_ID
+    from pylar.artio import UNKNOWN_EVENT_ID
     assert UNKNOWN_EVENT_ID == (-1, -1, -1)
     f = EventFile(ROCKMU)
     assert f.index_of(*UNKNOWN_EVENT_ID) is None
@@ -1995,7 +2002,7 @@ def test_unreadable_event_id_cannot_answer_a_lookup():
 
 def test_string_length_past_the_buffer_raises():
     """Slicing tolerated it and advanced the cursor by the bogus length."""
-    import pylarevd.streamers as st
+    import pylar.streamers as st
     cur = st.Cursor(b"\x05hi", 0)
     with pytest.raises(st.StreamerError, match="string of 5 bytes"):
         cur.string()

@@ -6,10 +6,10 @@ compiled extension — just `uproot` + `numpy` + `plotly`/`matplotlib`.
 
 ```
                        ┌──────────────── one-time, needs LArSoft ─────────────┐
-   GDML + fcl  ──────► │ shim/libevdgeom.so  ──ctypes──►  export_geometry.py  │ ──► geom/*.npz  (0.6 MB)
+   GDML + fcl  ──────► │ shim/libevdgeom.so  ──ctypes──►  export_geometry.py  │ ──► geom/*.npz  (in pylar)
                        └─────────────────────────────────────────────────────┘
-                                                                                       │
-   art-ROOT file ──uproot──► artio.py ──► event.py ──► display.py ──► PNG / PDF / HTML ◄┘
+                                                                                        │
+   art-ROOT file ──uproot──► pylar (artio + event) ──► pylarevd (display) ──► PNG / PDF / HTML ◄┘
                             (pure python, no LArSoft)
 ```
 
@@ -285,18 +285,21 @@ no logarithmic colour axis for markers, so the interactive backend colours by
 log₁₀ and relabels the ticks — the hover box still reports the real value.
 
 ## Layout
+ 
+`pylarevd` builds on the pure-Python reader and data model provided by **`pylar`**:
 
-| Path | Role |
-|---|---|
-| `pylarevd/artio.py` | member-wise art-ROOT decoder + `art::Assns` |
-| `pylarevd/streamers.py` | sequential reader for variable-length products |
-| `pylarevd/geometry.py` | wire coordinates, drift conversion, orientation keys |
-| `pylarevd/event.py` | `EventFile` / `Event` / `Hits` user API |
-| `pylarevd/display.py` | panels, 2-D/3-D/optical rendering (matplotlib + plotly) |
-| `pylarevd/export_geometry.py` | one-time geometry dump via ctypes |
-| `pylarevd/cli.py` | `python -m pylarevd` batch rendering |
-| `pylarevd/app.py` | `python -m pylarevd.app` interactive browser (Dash) |
-| `shim/geom_shim.cc` | flat-C wrapper around LArSoft geometry |
+| Package | Path | Role |
+|---|---|---|
+| `pylar` | `pylar/artio.py` | member-wise art-ROOT decoder + `art::Assns` |
+| `pylar` | `pylar/streamers.py` | sequential reader for variable-length products |
+| `pylar` | `pylar/geometry.py` | wire coordinates, drift conversion, orientation keys |
+| `pylar` | `pylar/event.py` | `EventFile` / `Event` / `Hits` user API |
+| `pylar` | `pylar/physics.py` | PDG names, interaction modes, kinematics |
+| `pylarevd` | `pylarevd/display.py` | panels, 2-D/3-D/optical rendering (matplotlib + plotly) |
+| `pylarevd` | `pylarevd/theme.py` | themes, colormaps, and marker cycles |
+| `pylarevd` | `pylarevd/cli.py` | `python -m pylarevd` batch rendering |
+| `pylarevd` | `pylarevd/app.py` | `python -m pylarevd.app` interactive browser (Dash) |
+| `pylarevd` | `pylarevd/_deps.py` | environment and dependency checker |
 
 ## Reconstructed and true objects
 

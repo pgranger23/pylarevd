@@ -16,7 +16,7 @@ Python 3.10+, and:
 
 | Package | For |
 |---|---|
-| `numpy`, `uproot` | reading the files (required) |
+| `pylar` | reading art-ROOT files & data model (required) |
 | `matplotlib` | static images (PNG/PDF/SVG) |
 | `plotly` | interactive HTML |
 | `dash` | the browser event browser (optional) |

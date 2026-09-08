@@ -21,28 +21,32 @@ are missing -- that is the situation it exists to diagnose -- and an eager
 it was written to replace.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
-#: public name -> the submodule that defines it
-_EXPORTS = {
-    "ArtFile": "artio", "ArtReadError": "artio",
-    "Event": "event", "EventFile": "event", "Hits": "event",
-    "MCParticles": "event", "Neutrino": "event", "OpticalActivity": "event",
-    "Showers": "event", "SpacePoints": "event", "Tracks": "event",
-    "TruthDeposits": "event", "Vertices": "event",
-    "Geometry": "geometry", "GeometryError": "geometry",
+_PYLAR_EXPORTS = {
+    "ArtFile", "ArtReadError", "Event", "EventFile", "Hits",
+    "MCParticles", "Neutrino", "OpticalActivity", "Showers",
+    "SpacePoints", "Tracks", "TruthDeposits", "Vertices",
+    "Geometry", "GeometryError", "physics",
 }
 
-__all__ = sorted(list(_EXPORTS) + ["physics"])
+_DISPLAY_EXPORTS = {
+    "EventDisplay", "Display3D", "OpticalDisplay", "FlashDisplay3D",
+    "display", "display_3d", "display_optical", "display_flashes_3d",
+}
+
+__all__ = sorted(list(_PYLAR_EXPORTS) + list(_DISPLAY_EXPORTS))
 
 
 def __getattr__(name: str):
     from importlib import import_module
 
-    if name == "physics":
-        return import_module(".physics", __name__)
-    if name in _EXPORTS:
-        return getattr(import_module("." + _EXPORTS[name], __name__), name)
+    if name in _DISPLAY_EXPORTS:
+        disp = import_module(".display", __name__)
+        return getattr(disp, name)
+    if name in _PYLAR_EXPORTS:
+        import pylar
+        return getattr(pylar, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

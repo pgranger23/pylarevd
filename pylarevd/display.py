@@ -26,12 +26,12 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 
-from .geometry import VIEW_NAMES
+from pylar.geometry import VIEW_NAMES
+from pylar.physics import format_latex_html
 
 from .theme import (COLORMAPS, DEFAULT_COLORMAP, MARKER_CYCLE,
                     PLOTLY_MARKER_CYCLE, THEMES, Theme, resolve_colormap,
                     resolve_theme)
-from .physics import format_latex_html
 
 SAVE_DPI = 180
 
@@ -641,7 +641,7 @@ class _TruthInfo:
             except Exception:
                 mc = None
 
-        from .physics import particle_symbol, particle_latex
+        from pylar.physics import particle_symbol, particle_latex
 
         # 1. Match Reco Tracks
         if self.tracks is not None and mc is not None and len(mc):
@@ -2820,3 +2820,120 @@ class OpticalDisplay(_TruthInfo):
 
     def show(self, **kwargs) -> None:
         self.plotly_figure(**kwargs).show(config=_PLOTLY_CONFIG)
+
+
+def display(event, tag: str | None = None, *, truth: bool = False,
+            reco: bool = False, tracks: bool | None = None,
+            vertices: bool | None = None, showers: bool | None = None,
+            pandora_vertex: bool = True, daughter_vertices: bool = True,
+            secondary_vertices: bool = True, radiologicals: bool = True,
+            particle_symbols: bool = False, **kwargs) -> EventDisplay:
+    """Return an :class:`EventDisplay` for this event."""
+    deposits = None
+    if kwargs.get("space") == "readout":
+        truth = reco = False
+    if truth:
+        try:
+            deposits = event.truth_deposits()
+        except Exception:
+            deposits = None
+    want_trk = reco if tracks is None else tracks
+    want_vtx = reco if vertices is None else vertices
+    want_shw = reco if showers is None else showers
+    got = {}
+    if want_trk:
+        try:
+            got["tracks"] = event.tracks()
+        except Exception:
+            got["tracks"] = None
+    if want_vtx:
+        try:
+            got["vertices"] = event.vertices()
+        except Exception:
+            got["vertices"] = None
+    if want_shw:
+        try:
+            got["showers"] = event.showers()
+        except Exception:
+            got["showers"] = None
+    if truth or particle_symbols:
+        try:
+            got["mc"] = event.mc_particles()
+        except Exception:
+            got["mc"] = None
+    if truth and not radiologicals:
+        deposits, got["mc"] = event._drop_radiologicals(deposits, got.get("mc"))
+    return EventDisplay(event, hits=event.hits(tag), truth=deposits,
+                        radiologicals=radiologicals,
+                        tracks=got.get("tracks"), vertices=got.get("vertices"),
+                        showers=got.get("showers"), mc=got.get("mc"),
+                        pandora_vertex=pandora_vertex,
+                        daughter_vertices=daughter_vertices,
+                        secondary_vertices=secondary_vertices,
+                        particle_symbols=particle_symbols,
+                        **kwargs)
+
+
+def display_flashes_3d(event, **kwargs) -> FlashDisplay3D:
+    """Reconstructed flashes in the detector volume (:class:`FlashDisplay3D`)."""
+    return FlashDisplay3D(event, event.optical(), **kwargs)
+
+
+def display_optical(event, tag: str | None = None, **kwargs) -> OpticalDisplay:
+    """Return an :class:`OpticalDisplay` for this event."""
+    try:
+        optical = event.optical(tag)
+    except Exception as exc:
+        hint = ""
+        if "opflash" in (exc.args[0] if exc.args else ""):
+            hint = " -- this file probably carries raw waveforms only, not reco"
+        raise type(exc)(f"{exc}{hint}") from exc
+    return OpticalDisplay(event, optical=optical, **kwargs)
+
+
+def display_3d(event, spacepoint_tag: str | None = None, *, truth: bool = False,
+               tracks: bool = True, vertices: bool = True, showers: bool = True,
+               pandora_vertex: bool = True, daughter_vertices: bool = True,
+               secondary_vertices: bool = True, radiologicals: bool = True,
+               particle_symbols: bool = False, **kwargs) -> Display3D:
+    """Return a :class:`Display3D` built from space points."""
+    deposits = None
+    if truth:
+        try:
+            deposits = event.truth_deposits()
+        except Exception:
+            deposits = None
+    polylines = None
+    if tracks:
+        try:
+            polylines = event.tracks()
+        except Exception:
+            polylines = None
+    extra = {}
+    if vertices:
+        try:
+            extra["vertices"] = event.vertices()
+        except Exception:
+            extra["vertices"] = None
+    if showers:
+        try:
+            extra["showers"] = event.showers()
+        except Exception:
+            extra["showers"] = None
+    mc = None
+    if truth or particle_symbols:
+        try:
+            mc = event.mc_particles()
+        except Exception:
+            mc = None
+    if truth and not radiologicals:
+        deposits, mc = event._drop_radiologicals(deposits, mc)
+    return Display3D(event, spacepoints=event.spacepoints(spacepoint_tag),
+                     truth=deposits, tracks=polylines, mc=mc,
+                     radiologicals=radiologicals,
+                     pandora_vertex=pandora_vertex,
+                     daughter_vertices=daughter_vertices,
+                     secondary_vertices=secondary_vertices,
+                     show_tracks=tracks, show_showers=showers,
+                     particle_symbols=particle_symbols, **extra,
+                     **kwargs)
