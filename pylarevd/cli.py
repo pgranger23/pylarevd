@@ -127,7 +127,9 @@ def main(argv=None) -> int:
     ap.add_argument("-e", "--events", default="0",
                     help="entries to draw: '0', '0,3,7', '2-5' or 'all' (default 0)")
     ap.add_argument("-g", "--geometry", default=None,
-                    help="geometry .npz (default: the one in pylarevd/geom/)")
+                    help="geometry .npz (default: auto-detected from pylario/geom/)")
+    ap.add_argument("--allow-geometry-mismatch", action="store_true",
+                    help="allow using a geometry even if its detector name differs from file metadata")
     ap.add_argument("-t", "--tag", default=None,
                     help="hit producer module label (default: prefer 'hitfd')")
     ap.add_argument("-o", "--outdir", default="evd_out", help="output directory")
@@ -199,7 +201,8 @@ def main(argv=None) -> int:
         ap.error("a file is required (or use --check / --list-colormaps)")
 
     try:
-        f = EventFile(a.file, geometry=a.geometry)
+        f = EventFile(a.file, geometry=a.geometry,
+                      allow_geometry_mismatch=a.allow_geometry_mismatch)
     except (ArtReadError, GeometryError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
