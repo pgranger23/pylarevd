@@ -349,7 +349,8 @@ _INDEX_TEMPLATE = """<!DOCTYPE html>
 </html>"""
 
 
-def _files_store(paths: list[str], geometry: str | None) -> dict[str, EventFile]:
+def _files_store(paths: list[str], geometry: str | None,
+                 allow_geometry_mismatch: bool = False) -> dict[str, EventFile]:
     geom = Geometry(geometry) if geometry else None
     out: dict[str, EventFile] = {}
     skipped: list[tuple[str, str]] = []
@@ -358,7 +359,8 @@ def _files_store(paths: list[str], geometry: str | None) -> dict[str, EventFile]
             # Deliberately NOT reusing the previous file's geometry: two samples
             # can need different detectors, and the wrong one fails silently
             # (all coordinates NaN). load_geometry() caches by path instead.
-            out[p] = EventFile(p, geometry=geom)
+            out[p] = EventFile(p, geometry=geom,
+                               allow_geometry_mismatch=allow_geometry_mismatch)
         except (ArtReadError, GeometryError, OSError, ValueError) as exc:
             # One unreadable file must not take the whole browser down with it.
             skipped.append((p, str(exc)))
@@ -404,7 +406,8 @@ def is_remote(path: str) -> bool:
 
 
 def open_file(files: dict[str, EventFile], path: str,
-              geometry: Geometry | None = None) -> EventFile:
+              geometry: Geometry | None = None,
+              allow_geometry_mismatch: bool = False) -> EventFile:
     """Open ``path`` and add it to ``files``, or return the already-open one.
 
     Accepts a local path or any URL uproot can read (``root://`` in practice).
@@ -430,7 +433,8 @@ def open_file(files: dict[str, EventFile], path: str,
     try:
         # geometry=None lets the file choose its own; load_geometry() caches the
         # .npz so this costs nothing after the first open of that detector.
-        files[path] = EventFile(path, geometry=geometry)
+        files[path] = EventFile(path, geometry=geometry,
+                                allow_geometry_mismatch=allow_geometry_mismatch)
     except (ArtReadError, GeometryError, OSError, ValueError) as exc:
         raise ValueError(f"could not open {os.path.basename(path)}: {exc}") from None
     return files[path]
@@ -560,10 +564,12 @@ def _extract_camera(relayout, fallback=None):
 
 
 def build_app(paths: list[str], geometry: str | None = None,
-              allow_open: bool = True) -> Dash:
+              allow_open: bool = True,
+              allow_geometry_mismatch: bool = False) -> Dash:
     if Dash is None:
         require("dash", "the interactive browser")
-    files = _files_store(paths, geometry)
+    files = _files_store(paths, geometry,
+                         allow_geometry_mismatch=allow_geometry_mismatch)
     # ONLY an explicit --geometry. Reusing the first file's resolved geometry
     # forced it onto every later one: opening a full-10kt file from a server
     # started on the 1x2x6 sample put 99% of its hits outside the channel map,
@@ -781,7 +787,8 @@ def build_app(paths: list[str], geometry: str | None = None,
         if not allow_open or not path:
             return no_update, no_update, ""
         try:
-            open_file(files, path, geom)
+            open_file(files, path, geom,
+                      allow_geometry_mismatch=allow_geometry_mismatch)
         except ValueError as exc:
             return no_update, no_update, f"✗ {exc}"
         # normalise_path, not expanduser: open_file stores under the
@@ -1293,7 +1300,8 @@ def build_app(paths: list[str], geometry: str | None = None,
                 failed = f"opening files by path is disabled: {wanted}"
             else:
                 try:
-                    open_file(files, wanted, geom)
+                    open_file(files, wanted, geom,
+                              allow_geometry_mismatch=allow_geometry_mismatch)
                     opts = file_options(files)
                     msg = f"✓ opened from link: {os.path.basename(wanted)}"
                 except ValueError as exc:
@@ -1333,6 +1341,8 @@ def main(argv=None) -> int:
                     help="art-ROOT file(s); optional -- with none, start empty "
                          "and use the 'open by path' box in the browser")
     ap.add_argument("-g", "--geometry", default=None, help="geometry .npz")
+    ap.add_argument("--allow-geometry-mismatch", action="store_true",
+                    help="permit using a geometry whose detector name differs from file metadata")
     ap.add_argument("--port", type=int, default=8050)
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address (default localhost only; use an SSH tunnel)")
@@ -1348,7 +1358,8 @@ def main(argv=None) -> int:
     # reach the port. That is exactly what is wanted on localhost and not at all
     # what is wanted on an exposed bind address.
     allow_open = loopback or a.allow_remote_open
-    app = build_app(a.files, a.geometry, allow_open=allow_open)
+    app = build_app(a.files, a.geometry, allow_open=allow_open,
+                    allow_geometry_mismatch=a.allow_geometry_mismatch)
     node = os.uname().nodename
     fqdn = node if "." in node else f"{node}.cern.ch"
     print(f"\n  pylarevd serving on http://{a.host}:{a.port}", flush=True)
