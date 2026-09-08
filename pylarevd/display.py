@@ -2939,6 +2939,7 @@ def display_3d(event, spacepoint_tag: str | None = None, *, truth: bool = False,
                      **kwargs)
 
 
+import sys as _sys
 import types as _types
 
 
@@ -2949,4 +2950,4 @@ class _DisplayModule(_types.ModuleType):
         return display(*args, **kwargs)
 
 
-sys.modules[__name__].__class__ = _DisplayModule
+_sys.modules[__name__].__class__ = _DisplayModule
