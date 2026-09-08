@@ -7,7 +7,7 @@
 # Check what you have with:  python -m pylarevd --check
 
 # required
-pylario>=0.1.0
+pylario @ git+https://github.com/pgranger23/pylario.git
 numpy>=1.24
 uproot>=5.0
 
