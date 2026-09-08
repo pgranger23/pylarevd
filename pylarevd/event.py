@@ -190,6 +190,9 @@ class SpacePoints(_Selectable):
     chisq: np.ndarray
     id: np.ndarray
     charge: np.ndarray
+    amplitude: np.ndarray | None = None
+    tick: np.ndarray | None = None
+    multiplicity: np.ndarray | None = None
 
     def __len__(self) -> int:
         return len(self.xyz)
@@ -262,6 +265,44 @@ class MCParticles(_Selectable):
 
 
 @dataclass
+class PrimaryInteraction:
+    """True primary interaction or decay (non-neutrino)."""
+
+    label: str
+    vertex: np.ndarray        # (3,) cm
+    origin: int               # simb::MCTruth fOrigin
+    particles: list[dict]     # list of primary particles {pdg, symbol, name, energy, status}
+    headline_text: str = ""
+    reaction: str = ""
+    latex: str = ""
+    html: str = ""
+
+    def headline(self) -> str:
+        if self.headline_text:
+            return self.headline_text
+        if self.reaction:
+            return self.reaction
+        origin_str = physics.origin_name(self.origin)
+        parts = [p.get("symbol") or p.get("name") for p in self.particles if "symbol" in p or "name" in p]
+        if not parts:
+            parts = [physics.particle_symbol(p["pdg"]) if "pdg" in p else str(p) for p in self.particles]
+        prod_str = " + ".join(parts[:4]) if parts else "particles"
+        if self.origin == 1 and ("decay" in self.label.lower() or "genie" in self.label.lower()):
+            return f"primary decay: {prod_str}"
+        return f"{origin_str}: {prod_str}"
+
+    def describe(self) -> str:
+        lines = [self.headline()]
+        lines.append(f"  vertex ({self.vertex[0]:.1f}, {self.vertex[1]:.1f}, {self.vertex[2]:.1f}) cm")
+        if self.particles:
+            shown = ", ".join(f"{p.get('symbol') or p.get('name')} ({p.get('energy', 0.0):.2f} GeV)"
+                              for p in self.particles[:6] if p.get("symbol") or p.get("name"))
+            if shown:
+                lines.append(f"  primary particles: {shown}")
+        return "\n".join(lines)
+
+
+@dataclass
 class Neutrino:
     """One true neutrino interaction, as the generator recorded it.
 
@@ -298,16 +339,23 @@ class Neutrino:
     all_energy: np.ndarray
 
     @property
+    def latex(self) -> str:
+        nu_sym = physics.particle_latex(self.pdg)
+        curr = "CC" if self.ccnc == physics.CC else "NC"
+        mode = physics.mode_name(self.mode)
+        return f"${nu_sym}\\text{{ {curr} {mode} }} (E = {self.energy:.2f}\\text{{ GeV}})$"
+
+    @property
     def is_cc(self) -> bool:
         return int(self.ccnc) == physics.CC
 
     @property
     def nu_name(self) -> str:
-        return physics.particle_name(self.pdg)
+        return physics.particle_symbol(self.pdg)
 
     @property
     def target_name(self) -> str:
-        return physics.particle_name(self.target)
+        return physics.particle_symbol(self.target)
 
     @property
     def mode_name(self) -> str:
@@ -319,10 +367,10 @@ class Neutrino:
                 f"{self.mode_name}   E = {self.energy:.2f} GeV")
 
     def final_state_counts(self) -> list[tuple[str, int, float]]:
-        """(name, count, summed energy) per species, most energetic first."""
+        """(symbol, count, summed energy) per species, most energetic first."""
         totals: dict[str, list] = {}
         for pdg, e in zip(self.fs_pdg, self.fs_energy):
-            row = totals.setdefault(physics.particle_name(int(pdg)), [0, 0.0])
+            row = totals.setdefault(physics.particle_symbol(int(pdg)), [0, 0.0])
             row[0] += 1
             row[1] += float(e)
         return sorted(((k, v[0], v[1]) for k, v in totals.items()),
@@ -332,7 +380,7 @@ class Neutrino:
         """Multi-line human summary, as shown on the display."""
         lines = [self.headline()]
         lines.append(f"  target {self.target_name}"
-                     f"   hit nucleon {physics.particle_name(self.hit_nucleon)}"
+                     f"   hit nucleon {physics.particle_symbol(self.hit_nucleon)}"
                      f"   {physics.origin_name(self.origin)}")
         lines.append(f"  W = {self.w:.2f} GeV   x = {self.x:.3f}   "
                      f"y = {self.y:.3f}   Q2 = {self.q2:.2f} GeV2")
@@ -543,19 +591,41 @@ class Event:
         raw = self._src.art.read(product, _SPACEPOINT_CLASS, self.entry)
         xyz = np.column_stack([raw["fXYZ[0]"], raw["fXYZ[1]"], raw["fXYZ[2]"]])
         charge = np.full(len(xyz), np.nan)
+        amplitude = np.full(len(xyz), np.nan)
+        tick = np.full(len(xyz), np.nan)
+        multiplicity = np.full(len(xyz), np.nan)
         try:
             assns = self._assns_for("recob::Hit", "recob::SpacePoint",
                                     ("pandora", "spsolve"))
             hits = self.hits()
             good = (assns.right_key >= 0) & (assns.right_key < len(xyz)) & \
                    (assns.left_key >= 0) & (assns.left_key < len(hits))
+            rk = assns.right_key[good]
+            lk = assns.left_key[good]
             charge = np.zeros(len(xyz))
-            np.add.at(charge, assns.right_key[good], hits.integral[assns.left_key[good]])
+            np.add.at(charge, rk, hits.integral[lk])
+
+            counts = np.zeros(len(xyz), dtype=int)
+            np.add.at(counts, rk, 1)
+            nz = counts > 0
+
+            amp_max = np.zeros(len(xyz))
+            np.maximum.at(amp_max, rk, hits.amplitude[lk])
+            amplitude = np.where(nz, amp_max, np.nan)
+
+            tick_sum = np.zeros(len(xyz))
+            np.add.at(tick_sum, rk, hits.tick[lk])
+            tick = np.where(nz, tick_sum / np.maximum(counts, 1), np.nan)
+
+            mult_sum = np.zeros(len(xyz))
+            np.add.at(mult_sum, rk, hits.multiplicity[lk])
+            multiplicity = np.where(nz, mult_sum / np.maximum(counts, 1), np.nan)
         except (ArtReadError, KeyError, ValueError):
             pass
         return SpacePoints(label=product.rstrip("."), xyz=xyz.astype(np.float64),
                            chisq=raw["fChisq"].astype(np.float64),
-                           id=raw["fID"].astype(np.int32), charge=charge)
+                           id=raw["fID"].astype(np.int32), charge=charge,
+                           amplitude=amplitude, tick=tick, multiplicity=multiplicity)
 
     @_memoised
     @_memoised
@@ -798,21 +868,117 @@ class Event:
         return None
 
     @_memoised
+    def true_interaction(self) -> "Neutrino | PrimaryInteraction | None":
+        """The true interaction (neutrino or other primary), or None."""
+        nu = self.neutrino()
+        if nu is not None:
+            return nu
+
+        products = self._src.art.find_product(_MCTRUTH_CLASS)
+        if not products:
+            return None
+        preferred = [p for p in products if "_generator_" in p]
+        products = preferred + [p for p in products if p not in preferred]
+
+        for product in products:
+            try:
+                raw = self._src.art.read(product, _MCTRUTH_CLASS, self.entry)
+            except Exception:
+                continue
+            parts = raw.get("fPartList") or []
+            origins = raw.get("fOrigin") or []
+            for i, plist in enumerate(parts):
+                if not plist:
+                    continue
+                vertex = None
+                primary_parts = []
+                for p in plist:
+                    traj = p.get("ftrajectory.ftrajectory") or []
+                    if not traj:
+                        continue
+                    pos, mom = traj[0][0], traj[0][1]
+                    status = int(p.get("fstatus", -1))
+                    mother = int(p.get("fmother", -1))
+                    pdg = int(p.get("fpdgCode", 0))
+                    e = float(mom.get("fE", 0.0))
+                    p_name = physics.particle_name(pdg)
+                    p_sym = physics.particle_symbol(pdg)
+
+                    if vertex is None and np.isfinite(pos.get("fP.fX", np.nan)):
+                        vertex = np.array([float(pos["fP.fX"]), float(pos["fP.fY"]), float(pos["fP.fZ"])])
+
+                    if status == physics.FINAL_STATE or status in (0, 1) or mother <= 0:
+                        primary_parts.append({"pdg": pdg, "symbol": p_sym, "name": p_name, "energy": e, "status": status})
+
+                reaction = ""
+                latex = ""
+                # Look for decaying nucleon (e.g. status 3 and pdg 2112/2212)
+                nuc = [p for p in plist if int(p.get("fpdgCode", 0)) in (2112, 2212, -2112, -2212) and int(p.get("fstatus", -1)) == 3]
+                if nuc:
+                    parent = nuc[0]
+                    parent_tid = parent.get("ftrackId")
+                    parent_pdg = int(parent.get("fpdgCode", 0))
+                    parent_sym = physics.particle_symbol(parent_pdg)
+                    parent_lat = physics.particle_latex(parent_pdg)
+
+                    traj = parent.get("ftrajectory.ftrajectory") or []
+                    if traj:
+                        p_pos = traj[-1][0]
+                        if np.isfinite(p_pos.get("fP.fX", np.nan)):
+                            vertex = np.array([float(p_pos["fP.fX"]), float(p_pos["fP.fY"]), float(p_pos["fP.fZ"])])
+
+                    daughters = [p for p in plist if int(p.get("fstatus", -1)) == 1 and int(p.get("fpdgCode", 0)) < 1000000000]
+                    decay_d = [d for d in daughters if int(d.get("fmother", -1)) == parent_tid or int(d.get("fmother", -1)) in [x.get("ftrackId") for x in plist if x.get("fmother") == parent_tid]]
+                    if not decay_d:
+                        decay_d = daughters
+                    d_syms = [physics.particle_symbol(int(d.get("fpdgCode"))) for d in decay_d]
+                    d_lat = [physics.particle_latex(int(d.get("fpdgCode"))) for d in decay_d]
+                    reaction = f"{parent_sym} -> {' + '.join(d_syms)}"
+                    latex = f"${parent_lat} \\to {' + '.join(d_lat)}$"
+                else:
+                    primaries = [p for p in plist if int(p.get("fstatus", -1)) in (0, 1) and int(p.get("fmother", -1)) <= 0 and int(p.get("fpdgCode", 0)) < 1000000000]
+                    if primaries:
+                        p_syms = [physics.particle_symbol(int(p.get("fpdgCode"))) for p in primaries]
+                        p_lat = [physics.particle_latex(int(p.get("fpdgCode"))) for p in primaries]
+                        reaction = " + ".join(p_syms)
+                        latex = f"${' + '.join(p_lat)}$"
+
+                if vertex is not None and np.isfinite(vertex).all():
+                    origin = int(origins[i]) if i < len(origins) else 0
+                    html_str = physics.format_latex_html(latex)
+                    return PrimaryInteraction(
+                        label=product.rstrip("."),
+                        vertex=vertex,
+                        origin=origin,
+                        particles=primary_parts,
+                        reaction=reaction,
+                        latex=latex,
+                        html=html_str,
+                    )
+        return None
+
+    @_memoised
+    def true_vertex(self) -> "np.ndarray | None":
+        """The true interaction or decay vertex (x, y, z) in cm, or None."""
+        inter = self.true_interaction()
+        if inter is not None and np.isfinite(inter.vertex).all():
+            return inter.vertex
+        return None
+
+    @_memoised
     def neutrino_track_ids(self, tol: float = 2.0) -> "np.ndarray | None":
-        """Track ids of every particle descending from the neutrino vertex.
+        """Track ids of every particle descending from the true interaction vertex.
 
         Radiological generators produce tens of thousands of *primaries*
         scattered through the detector, while everything from the interaction
         traces back to one point. Walking each particle to its root ancestor and
-        asking where that ancestor started separates the two cleanly: on the
-        sample here the root-start distance is 0 for the interaction and a
-        median 773 cm for the background.
+        asking where that ancestor started separates the two cleanly.
 
-        Returns ``None`` when the event has no neutrino, since then there is no
+        Returns ``None`` when the event has no true vertex, since then there is no
         signal/background split to make.
         """
-        nu = self.neutrino()
-        if nu is None or not np.isfinite(nu.vertex).all():
+        vtx = self.true_vertex()
+        if vtx is None:
             return None
         # min_points=1: a particle that never moved still parents ones that do,
         # and deposits reference it by track id.
@@ -832,7 +998,7 @@ class Event:
                 j = index[mother]
                 steps += 1
             roots[i] = j
-        d = np.linalg.norm(start[roots] - nu.vertex, axis=1)
+        d = np.linalg.norm(start[roots] - vtx, axis=1)
         return np.asarray(mc.track_id)[d < tol]
 
     @_memoised
@@ -921,6 +1087,78 @@ class Event:
                                raw["pos_.fCoordinates.fZ"]]).astype(np.float64)
         return Vertices(label=product.rstrip("."), xyz=xyz,
                         id=np.asarray(raw.get("id_", np.arange(len(xyz)))))
+
+    @_memoised
+    def vertex_roles(self) -> dict[str, list[int]]:
+        """Classify reconstructed vertices into roles:
+        - 'interaction': Pandora's primary interaction vertex [idx] or []
+        - 'primary_daughters': start vertices of immediate daughter particles [indices]
+        - 'secondary': rest of the reconstructed vertices [indices]
+        """
+        vtx = self.vertices()
+        if vtx is None or len(vtx) == 0:
+            return {"interaction": [], "primary_daughters": [], "secondary": []}
+
+        n_vtx = len(vtx)
+        interaction_vtx: list[int] = []
+        daughter_vtx: list[int] = []
+
+        try:
+            pfp_prod = self._pick(_PFP_CLASS, None, prefer=("pandora",))
+            pfp = self._src.art.read(pfp_prod, _PFP_CLASS, self.entry)
+            assn_pv = self._assns_for(_PFP_CLASS, _VERTEX_CLASS, prefer=("pandora",))
+            if assn_pv is not None:
+                parents = np.asarray(pfp["fParent"], dtype=np.uint64)
+                UINT64_MAX = np.uint64(18446744073709551615)
+                prim_pfps = np.where((parents == UINT64_MAX) | (parents == np.asarray(pfp["fSelf"], dtype=np.uint64)))[0]
+                if len(prim_pfps) == 0:
+                    prim_pfps = np.where(np.isin(pfp["fPdgCode"], [12, 14, 16]))[0]
+
+                for p_idx in prim_pfps:
+                    m = assn_pv.right_key[assn_pv.left_key == p_idx]
+                    if len(m):
+                        v_idx = int(m[0])
+                        if v_idx < n_vtx and v_idx not in interaction_vtx:
+                            interaction_vtx.append(v_idx)
+
+                    # Immediate daughters of the primary interaction
+                    d_pfps = pfp["fDaughters"][p_idx]
+                    for d in d_pfps:
+                        dm = assn_pv.right_key[assn_pv.left_key == d]
+                        if len(dm):
+                            dv_idx = int(dm[0])
+                            if dv_idx < n_vtx and dv_idx not in interaction_vtx and dv_idx not in daughter_vtx:
+                                daughter_vtx.append(dv_idx)
+        except Exception:
+            pass
+
+        secondary = [i for i in range(n_vtx) if i not in interaction_vtx and i not in daughter_vtx]
+        return {
+            "interaction": interaction_vtx,
+            "primary_daughters": daughter_vtx,
+            "secondary": secondary,
+        }
+
+    @_memoised
+    def pandora_interaction_vertex_index(self) -> int | None:
+        """Index of Pandora's interaction vertex in ``self.vertices()``, or None."""
+        roles = self.vertex_roles()
+        return roles["interaction"][0] if len(roles["interaction"]) else None
+
+    @_memoised
+    def primary_daughter_vertex_indices(self) -> list[int]:
+        """Indices of the primary daughter particles' start vertices in ``self.vertices()``."""
+        return self.vertex_roles()["primary_daughters"]
+
+    @_memoised
+    def secondary_vertex_indices(self) -> list[int]:
+        """Indices of secondary / decay reconstructed vertices in ``self.vertices()``."""
+        return self.vertex_roles()["secondary"]
+
+    @_memoised
+    def primary_vertex_index(self) -> int | None:
+        """Index of the primary reconstructed vertex in ``self.vertices()``, or None."""
+        return self.pandora_interaction_vertex_index()
 
     @_memoised
     def optical(self, tag: str | None = None, *, hits: bool = True) -> OpticalActivity:
@@ -1207,7 +1445,11 @@ class Event:
         return deposits, mc
 
     def display(self, tag: str | None = None, *, truth: bool = False,
-                reco: bool = False, radiologicals: bool = True, **kwargs):
+                reco: bool = False, tracks: bool | None = None,
+                vertices: bool | None = None, showers: bool | None = None,
+                pandora_vertex: bool = True, daughter_vertices: bool = True,
+                secondary_vertices: bool = True, radiologicals: bool = True,
+                particle_symbols: bool = False, **kwargs):
         """Return an :class:`~pylarevd.display.EventDisplay` for this event.
 
         With ``truth=True`` the true energy depositions are overlaid where the
@@ -1230,13 +1472,26 @@ class Event:
                 deposits = self.truth_deposits()
             except ArtReadError:
                 deposits = None
+        want_trk = reco if tracks is None else tracks
+        want_vtx = reco if vertices is None else vertices
+        want_shw = reco if showers is None else showers
         got = {}
-        for name in ("tracks", "vertices", "showers") if reco else ():
+        if want_trk:
             try:
-                got[name] = getattr(self, name)()
+                got["tracks"] = self.tracks()
             except (ArtReadError, KeyError):
-                got[name] = None
-        if truth:
+                got["tracks"] = None
+        if want_vtx:
+            try:
+                got["vertices"] = self.vertices()
+            except (ArtReadError, KeyError):
+                got["vertices"] = None
+        if want_shw:
+            try:
+                got["showers"] = self.showers()
+            except (ArtReadError, KeyError):
+                got["showers"] = None
+        if truth or particle_symbols:
             try:
                 got["mc"] = self.mc_particles()
             except (ArtReadError, KeyError):
@@ -1246,7 +1501,12 @@ class Event:
         return EventDisplay(self, hits=self.hits(tag), truth=deposits,
                             radiologicals=radiologicals,
                             tracks=got.get("tracks"), vertices=got.get("vertices"),
-                            showers=got.get("showers"), mc=got.get("mc"), **kwargs)
+                            showers=got.get("showers"), mc=got.get("mc"),
+                            pandora_vertex=pandora_vertex,
+                            daughter_vertices=daughter_vertices,
+                            secondary_vertices=secondary_vertices,
+                            particle_symbols=particle_symbols,
+                            **kwargs)
 
     def display_flashes_3d(self, **kwargs):
         """Reconstructed flashes in the detector volume (:class:`FlashDisplay3D`)."""
@@ -1262,15 +1522,18 @@ class Event:
         from .display import OpticalDisplay
         try:
             optical = self.optical(tag)
-        except ArtReadError as exc:
-            raw = self._src.art.find_product("raw::OpDetWaveform")
-            hint = (" (the file has raw::OpDetWaveform but no flash "
-                    "reconstruction)" if raw else "")
+        except (ArtReadError, KeyError) as exc:
+            hint = ""
+            if "opflash" in exc.args[0] if exc.args else False:
+                hint = " -- this file probably carries raw waveforms only, not reco"
             raise ArtReadError(f"{exc}{hint}") from exc
         return OpticalDisplay(self, optical=optical, **kwargs)
 
     def display_3d(self, spacepoint_tag: str | None = None, *, truth: bool = False,
-                   tracks: bool = True, radiologicals: bool = True, **kwargs):
+                   tracks: bool = True, vertices: bool = True, showers: bool = True,
+                   pandora_vertex: bool = True, daughter_vertices: bool = True,
+                   secondary_vertices: bool = True, radiologicals: bool = True,
+                   particle_symbols: bool = False, **kwargs):
         """Return a :class:`~pylarevd.display.Display3D` built from space points.
 
         The tag selects a ``recob::SpacePoint`` producer -- not a hit producer,
@@ -1293,13 +1556,18 @@ class Event:
             except (ArtReadError, KeyError):
                 polylines = None
         extra = {}
-        for name in ("vertices", "showers"):
+        if vertices:
             try:
-                extra[name] = getattr(self, name)()
+                extra["vertices"] = self.vertices()
             except (ArtReadError, KeyError):
-                extra[name] = None
+                extra["vertices"] = None
+        if showers:
+            try:
+                extra["showers"] = self.showers()
+            except (ArtReadError, KeyError):
+                extra["showers"] = None
         mc = None
-        if truth:
+        if truth or particle_symbols:
             try:
                 mc = self.mc_particles()
             except (ArtReadError, KeyError):
@@ -1308,7 +1576,12 @@ class Event:
             deposits, mc = self._drop_radiologicals(deposits, mc)
         return Display3D(self, spacepoints=self.spacepoints(spacepoint_tag),
                          truth=deposits, tracks=polylines, mc=mc,
-                         radiologicals=radiologicals, **extra,
+                         radiologicals=radiologicals,
+                         pandora_vertex=pandora_vertex,
+                         daughter_vertices=daughter_vertices,
+                         secondary_vertices=secondary_vertices,
+                         show_tracks=tracks, show_showers=showers,
+                         particle_symbols=particle_symbols, **extra,
                          **kwargs)
 
 

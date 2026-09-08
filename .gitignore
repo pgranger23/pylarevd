@@ -12,3 +12,6 @@ shim/*.so
 *.egg-info/
 build/
 dist/
+samples/
+*.gif
+

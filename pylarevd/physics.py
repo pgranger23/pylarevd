@@ -138,3 +138,87 @@ def status_name(code: int) -> str:
 
 def current_name(ccnc: int) -> str:
     return "CC" if int(ccnc) == CC else "NC"
+
+
+_PDG_SYMBOLS: dict[int, tuple[str, str]] = {
+    11: ("e⁻", "e^-"),
+    -11: ("e⁺", "e^+"),
+    12: ("νₑ", "\\nu_e"),
+    -12: ("ν̄ₑ", "\\bar{\\nu}_e"),
+    13: ("μ⁻", "\\mu^-"),
+    -13: ("μ⁺", "\\mu^+"),
+    14: ("ν_μ", "\\nu_\\mu"),
+    -14: ("ν̄_μ", "\\bar{\\nu}_\\mu"),
+    15: ("τ⁻", "\\tau^-"),
+    -15: ("τ⁺", "\\tau^+"),
+    16: ("ν_τ", "\\nu_\\tau"),
+    -16: ("ν̄_τ", "\\bar{\\nu}_\\tau"),
+    22: ("γ", "\\gamma"),
+    111: ("π⁰", "\\pi^0"),
+    211: ("π⁺", "\\pi^+"),
+    -211: ("π⁻", "\\pi^-"),
+    130: ("K⁰_L", "K^0_L"),
+    310: ("K⁰_S", "K^0_S"),
+    311: ("K⁰", "K^0"),
+    -311: ("K̄⁰", "\\bar{K}^0"),
+    321: ("K⁺", "K^+"),
+    -321: ("K⁻", "K^-"),
+    221: ("η", "\\eta"),
+    331: ("η'", "\\eta'"),
+    2112: ("n", "n"),
+    -2112: ("n̄", "\\bar{n}"),
+    2212: ("p", "p"),
+    -2212: ("p̄", "\\bar{p}"),
+    3122: ("Λ", "\\Lambda"),
+    3222: ("Σ⁺", "\\Sigma^+"),
+    3112: ("Σ⁻", "\\Sigma^-"),
+    3212: ("Σ⁰", "\\Sigma^0"),
+    3322: ("Ξ⁰", "\\Xi^0"),
+    3312: ("Ξ⁻", "\\Xi^-"),
+    3334: ("Ω⁻", "\\Omega^-"),
+    1000010020: ("d", "d"),
+    1000010030: ("t", "t"),
+    1000020030: ("³He", "^{3}He"),
+    1000020040: ("α", "\\alpha"),
+}
+
+
+def particle_symbol(pdg: int) -> str:
+    """Clean ASCII symbol for a particle (e.g. K+, e-, mu+, p, n)."""
+    pdg = int(pdg)
+    if pdg in _PDG_SYMBOLS:
+        return _PDG_SYMBOLS[pdg][0]
+    return particle_name(pdg)
+
+
+def particle_latex(pdg: int) -> str:
+    """LaTeX string for a particle (e.g. K^+, e^-, \\mu^+, p, n)."""
+    pdg = int(pdg)
+    if pdg in _PDG_SYMBOLS:
+        return _PDG_SYMBOLS[pdg][1]
+    name = particle_name(pdg)
+    return name.replace("_", "\\_")
+
+
+def format_latex_html(latex_str: str) -> str:
+    """Format LaTeX reaction string into clean HTML for Plotly hover tooltips."""
+    import re
+    if not latex_str:
+        return ""
+    s = latex_str.strip("$").strip()
+    s = s.replace(r"\to", " → ").replace(r"\rightarrow", " → ")
+    s = s.replace(r"\bar{\nu}", "ν̄").replace(r"\bar{n}", "n̄").replace(r"\bar{p}", "p̄")
+    s = s.replace(r"\nu", "ν").replace(r"\mu", "μ").replace(r"\pi", "π").replace(r"\gamma", "γ")
+    s = re.sub(r"\^\{?([0-9+\-]+)\}?", r"<sup>\1</sup>", s)
+    s = re.sub(r"\_\{?([a-zA-Z0-9μ]+)\}?", r"<sub>\1</sub>", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    parts = s.split(" ")
+    formatted = []
+    for p in parts:
+        if p in ("→", "+", "-"):
+            formatted.append(p)
+        else:
+            formatted.append(f"<i>{p}</i>")
+    return " ".join(formatted)
+
+
