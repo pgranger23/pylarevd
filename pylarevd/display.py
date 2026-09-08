@@ -2564,6 +2564,12 @@ class FlashDisplay3D(_TruthInfo):
             margin=dict(l=0, r=0, t=50, b=0))
         return fig
 
+    def save_html(self, path: str, *, bundle_plotlyjs: bool = True, **kwargs) -> str:
+        fig = self.plotly_figure()
+        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+        fig.write_html(path, include_plotlyjs="inline" if bundle_plotlyjs else "cdn")
+        return path
+
     def __repr__(self) -> str:
         return f"<FlashDisplay3D {self.event!r} flashes={len(self.flashes)}>"
 
