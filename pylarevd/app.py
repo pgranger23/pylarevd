@@ -33,7 +33,7 @@ try:
 except ImportError:
     Dash = Input = Output = State = dcc = html = no_update = None
 
-from pylar import ArtReadError, EventFile, Geometry, GeometryError
+from pylario import ArtReadError, EventFile, Geometry, GeometryError
 from .theme import COLORMAPS, DEFAULT_COLORMAP, THEMES
 
 #: Controls whose value is mirrored into the URL, so a view can be linked.

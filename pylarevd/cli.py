@@ -6,7 +6,7 @@ import argparse
 import os
 import sys
 
-from pylar import ArtReadError, EventFile, GeometryError
+from pylario import ArtReadError, EventFile, GeometryError
 from .display import PRESETS
 from .theme import COLORMAPS, DEFAULT_COLORMAP, THEMES
 

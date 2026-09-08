@@ -26,8 +26,8 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 
-from pylar.geometry import VIEW_NAMES
-from pylar.physics import format_latex_html
+from pylario.geometry import VIEW_NAMES
+from pylario.physics import format_latex_html
 
 from .theme import (COLORMAPS, DEFAULT_COLORMAP, MARKER_CYCLE,
                     PLOTLY_MARKER_CYCLE, THEMES, Theme, resolve_colormap,
@@ -641,7 +641,7 @@ class _TruthInfo:
             except Exception:
                 mc = None
 
-        from pylar.physics import particle_symbol, particle_latex
+        from pylario.physics import particle_symbol, particle_latex
 
         # 1. Match Reco Tracks
         if self.tracks is not None and mc is not None and len(mc):

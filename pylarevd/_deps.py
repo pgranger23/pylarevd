@@ -33,9 +33,9 @@ class Dep:
 
 
 DEPENDENCIES: tuple[Dep, ...] = (
-    Dep("pylar", "art-ROOT reader and LArSoft data model", "pylar", required=True),
-    Dep("numpy", "array operations (via pylar)", "numpy", required=True),
-    Dep("uproot", "reading art-ROOT files (via pylar)", "uproot", required=True),
+    Dep("pylario", "art-ROOT reader and LArSoft data model", "pylario", required=True),
+    Dep("numpy", "array operations (via pylario)", "numpy", required=True),
+    Dep("uproot", "reading art-ROOT files (via pylario)", "uproot", required=True),
     Dep("matplotlib", "static images (PNG/PDF/SVG)", "matplotlib"),
     Dep("plotly", "interactive figures and self-contained HTML", "plotly"),
     Dep("dash", "the interactive browser (python -m pylarevd.app)",
@@ -141,19 +141,19 @@ def report() -> str:
     try:
         import glob
         import numpy as np      # only for reading the geometry headers
-        import pylar
-        pylar_dir = os.path.dirname(os.path.abspath(pylar.__file__))
-        found = sorted(glob.glob(os.path.join(pylar_dir, "geom", "*.npz")))
+        import pylario
+        pylario_dir = os.path.dirname(os.path.abspath(pylario.__file__))
+        found = sorted(glob.glob(os.path.join(pylario_dir, "geom", "*.npz")))
         lines.append("")
         if found:
-            lines.append("  bundled geometries (from pylar):")
+            lines.append("  bundled geometries (from pylario):")
             for path in found:
                 with np.load(path, allow_pickle=False) as z:
                     lines.append(f"    {str(z['detector']):<22} "
                                  f"{int(z['nchannels']):>7} channels   "
                                  f"{os.path.basename(path)}")
         else:
-            lines.append("  no geometries found in pylar/geom/ -- "
+            lines.append("  no geometries found in pylario/geom/ -- "
                          "nothing can be displayed until one is exported")
     except Exception as exc:
         lines.append(f"  could not list geometries: {exc}")

@@ -6,10 +6,10 @@ compiled extension — just `uproot` + `numpy` + `plotly`/`matplotlib`.
 
 ```
                        ┌──────────────── one-time, needs LArSoft ─────────────┐
-   GDML + fcl  ──────► │ shim/libevdgeom.so  ──ctypes──►  export_geometry.py  │ ──► geom/*.npz  (in pylar)
+   GDML + fcl  ──────► │ shim/libevdgeom.so  ──ctypes──►  export_geometry.py  │ ──► geom/*.npz  (in pylario)
                        └─────────────────────────────────────────────────────┘
                                                                                         │
-   art-ROOT file ──uproot──► pylar (artio + event) ──► pylarevd (display) ──► PNG / PDF / HTML ◄┘
+   art-ROOT file ──uproot──► pylario (artio + event) ──► pylarevd (display) ──► PNG / PDF / HTML ◄┘
                             (pure python, no LArSoft)
 ```
 
@@ -286,15 +286,15 @@ log₁₀ and relabels the ticks — the hover box still reports the real value.
 
 ## Layout
  
-`pylarevd` builds on the pure-Python reader and data model provided by **`pylar`**:
+`pylarevd` builds on the pure-Python reader and data model provided by **`pylario`**:
 
 | Package | Path | Role |
 |---|---|---|
-| `pylar` | `pylar/artio.py` | member-wise art-ROOT decoder + `art::Assns` |
-| `pylar` | `pylar/streamers.py` | sequential reader for variable-length products |
-| `pylar` | `pylar/geometry.py` | wire coordinates, drift conversion, orientation keys |
-| `pylar` | `pylar/event.py` | `EventFile` / `Event` / `Hits` user API |
-| `pylar` | `pylar/physics.py` | PDG names, interaction modes, kinematics |
+| `pylario` | `pylario/artio.py` | member-wise art-ROOT decoder + `art::Assns` |
+| `pylario` | `pylario/streamers.py` | sequential reader for variable-length products |
+| `pylario` | `pylario/geometry.py` | wire coordinates, drift conversion, orientation keys |
+| `pylario` | `pylario/event.py` | `EventFile` / `Event` / `Hits` user API |
+| `pylario` | `pylario/physics.py` | PDG names, interaction modes, kinematics |
 | `pylarevd` | `pylarevd/display.py` | panels, 2-D/3-D/optical rendering (matplotlib + plotly) |
 | `pylarevd` | `pylarevd/theme.py` | themes, colormaps, and marker cycles |
 | `pylarevd` | `pylarevd/cli.py` | `python -m pylarevd` batch rendering |

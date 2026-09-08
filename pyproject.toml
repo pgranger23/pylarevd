@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "A LArSoft event display in pure python: reads art-ROOT files with uproot, no ROOT/art/LArSoft needed at display time"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["pylar>=0.1.0", "matplotlib>=3.6", "plotly>=5.15"]
+dependencies = ["pylario>=0.1.0", "matplotlib>=3.6", "plotly>=5.15"]
 
 [project.optional-dependencies]
 app = ["dash>=2.14"]

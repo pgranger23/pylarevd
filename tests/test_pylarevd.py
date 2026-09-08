@@ -14,8 +14,8 @@ import os
 import numpy as np
 import pytest
 
-import pylar
-from pylar import EventFile, ArtFile, ArtReadError, Geometry, GeometryError
+import pylario
+from pylario import EventFile, ArtFile, ArtReadError, Geometry, GeometryError
 
 # Sample files are not distributed with the code. Point the suite at your own
 # with PYLAREVD_TEST_DATA (a directory holding the two files below), or set
@@ -25,7 +25,7 @@ ROCKMU = os.environ.get(
     "PYLAREVD_ROCKMU", os.path.join(_DATA, "rock_muons_reco1.root") if _DATA else "")
 ATMNU = os.environ.get(
     "PYLAREVD_ATMNU", os.path.join(_DATA, "atmnu_radio_reco.root") if _DATA else "")
-GEOM = os.path.join(os.path.dirname(os.path.abspath(pylar.__file__)),
+GEOM = os.path.join(os.path.dirname(os.path.abspath(pylario.__file__)),
                     "geom", "dune10kt_v6_1x2x6.npz")
 
 needs_data = pytest.mark.skipif(not os.path.exists(ROCKMU), reason="sample file absent")
@@ -641,7 +641,7 @@ def test_wire_waveforms_are_actually_recovered():
     empty ones parsed. Assert on content, and on an invariant the file itself
     must satisfy.
     """
-    from pylar.streamers import UNPARSED
+    from pylario.streamers import UNPARSED
     f = ArtFile(ROCKMU)
     wires = f.read("recob::Wires_tpcrawdecoder_gauss_DetSim.", "recob::Wire", 0)
     roi = wires["fSignalROI"]
@@ -1110,7 +1110,7 @@ def test_file_selects_the_geometry_it_names():
 @needs_data
 def test_unexported_geometry_fails_loudly(monkeypatch):
     """Better a clear error than a display full of NaN."""
-    import pylar.event as ev_mod
+    import pylario.event as ev_mod
     monkeypatch.setattr(ArtFile, "geometry_config",
                         lambda self: {"Name": "protodune_sp_v9"})
     with pytest.raises(GeometryError, match="protodune_sp_v9"):
@@ -1119,7 +1119,7 @@ def test_unexported_geometry_fails_loudly(monkeypatch):
 
 @needs_geom
 def test_load_geometry_is_cached_by_path():
-    from pylar.event import load_geometry
+    from pylario.event import load_geometry
     assert load_geometry(GEOM) is load_geometry(GEOM)
 
 
@@ -1178,7 +1178,7 @@ def test_sequence_rejects_impossible_element_counts():
     out: one simb::MCTruth became 2.35 million TLorentzVector reads and never
     finished.
     """
-    import pylar.streamers as st
+    import pylario.streamers as st
     # 8 bytes: a count of 0x7FFFFFFF followed by nothing that could hold it
     buf = b"\x7f\xff\xff\xff" + b"\x00" * 4
     cur = st.Cursor(buf, 0)
@@ -1236,7 +1236,7 @@ def test_containment_is_per_tpc_not_a_bounding_box():
 
     Event 687/0/95 is exactly that case: 6.6 cm above the top face.
     """
-    from pylar.geometry import Geometry
+    from pylario.geometry import Geometry
     g = Geometry(GEOM)
     box = g.active_boxes
     centre = 0.5 * (box[0, :3] + box[0, 3:])
@@ -1254,7 +1254,7 @@ def test_containment_is_per_tpc_not_a_bounding_box():
 
 @needs_geom
 def test_in_active_is_vectorised():
-    from pylar.geometry import Geometry
+    from pylario.geometry import Geometry
     g = Geometry(GEOM)
     box = g.active_boxes
     centre = 0.5 * (box[0, :3] + box[0, 3:])
@@ -1977,9 +1977,9 @@ def test_explicit_geometry_must_match_the_file():
 
     n_bad_geometry stayed 0, so nothing downstream could notice.
     """
-    from pylar.geometry import Geometry
-    pylar_dir = os.path.dirname(os.path.abspath(pylar.__file__))
-    other = os.path.join(pylar_dir, "geom", "dune10kt_v6_full.npz")
+    from pylario.geometry import Geometry
+    pylario_dir = os.path.dirname(os.path.abspath(pylario.__file__))
+    other = os.path.join(pylario_dir, "geom", "dune10kt_v6_full.npz")
     if not os.path.exists(other) or EventFile(ATMNU).geometry.detector == "dune10kt_v6":
         pytest.skip("need a second, different geometry")
     with pytest.raises(GeometryError, match="was produced with"):
@@ -1993,7 +1993,7 @@ def test_explicit_geometry_must_match_the_file():
 @needs_data
 def test_unreadable_event_id_cannot_answer_a_lookup():
     """(0, 0, entry) is a plausible triple index_of would happily match."""
-    from pylar.artio import UNKNOWN_EVENT_ID
+    from pylario.artio import UNKNOWN_EVENT_ID
     assert UNKNOWN_EVENT_ID == (-1, -1, -1)
     f = EventFile(ROCKMU)
     assert f.index_of(*UNKNOWN_EVENT_ID) is None
@@ -2002,7 +2002,7 @@ def test_unreadable_event_id_cannot_answer_a_lookup():
 
 def test_string_length_past_the_buffer_raises():
     """Slicing tolerated it and advanced the cursor by the bogus length."""
-    import pylar.streamers as st
+    import pylario.streamers as st
     cur = st.Cursor(b"\x05hi", 0)
     with pytest.raises(st.StreamerError, match="string of 5 bytes"):
         cur.string()

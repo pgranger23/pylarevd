@@ -23,7 +23,7 @@ it was written to replace.
 
 __version__ = "0.2.0"
 
-_PYLAR_EXPORTS = {
+_PYLARIO_EXPORTS = {
     "ArtFile", "ArtReadError", "Event", "EventFile", "Hits",
     "MCParticles", "Neutrino", "OpticalActivity", "Showers",
     "SpacePoints", "Tracks", "TruthDeposits", "Vertices",
@@ -35,7 +35,7 @@ _DISPLAY_EXPORTS = {
     "display", "display_3d", "display_optical", "display_flashes_3d",
 }
 
-__all__ = sorted(list(_PYLAR_EXPORTS) + list(_DISPLAY_EXPORTS))
+__all__ = sorted(list(_PYLARIO_EXPORTS) + list(_DISPLAY_EXPORTS))
 
 
 def __getattr__(name: str):
@@ -44,9 +44,9 @@ def __getattr__(name: str):
     if name in _DISPLAY_EXPORTS:
         disp = import_module(".display", __name__)
         return getattr(disp, name)
-    if name in _PYLAR_EXPORTS:
-        import pylar
-        return getattr(pylar, name)
+    if name in _PYLARIO_EXPORTS:
+        import pylario
+        return getattr(pylario, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
