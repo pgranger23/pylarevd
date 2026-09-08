@@ -2937,3 +2937,16 @@ def display_3d(event, spacepoint_tag: str | None = None, *, truth: bool = False,
                      show_tracks=tracks, show_showers=showers,
                      particle_symbols=particle_symbols, **extra,
                      **kwargs)
+
+
+import types as _types
+
+
+class _DisplayModule(_types.ModuleType):
+    """Allow calling pylarevd.display(...) even when the module shadows the function."""
+
+    def __call__(self, *args, **kwargs):
+        return display(*args, **kwargs)
+
+
+sys.modules[__name__].__class__ = _DisplayModule
