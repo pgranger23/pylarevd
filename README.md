@@ -385,7 +385,8 @@ preferred.
 [Running it](#the-interactive-browser-start-here) is at the top of this file.
 It steps through events without regenerating anything: file/event selection with
 prev/next, hit product, colour-by (including by owning object) and scale,
-2D physical / 2D readout / 3D / optical / flashes 3D / light vs time, panel
+2D physical / 2D readout / 3D / optical / flashes 3D / light vs time /
+charge + light, panel
 grouping, the flash producer and light-animation settings, and truth and
 reco overlays. Controls a view ignores are greyed out — including the truth and
 reco checkboxes, which only apply to the physical views. Binds to localhost only
@@ -429,7 +430,7 @@ so a link carrying the event identity still lands correctly when pointed at
 another reconstruction pass of the same data. If the file does not contain that
 event, the link falls back to `entry` rather than failing.
 
-The CLI covers the same ground: `--mode {2d,readout,3d,optical,flash3d,light}`,
+The CLI covers the same ground: `--mode {2d,readout,3d,optical,flash3d,light,chargelight}`,
 `--reco`, `--flash-tag`, and the full `--colour-by` set.
 
 ## True neutrino interaction
@@ -602,6 +603,22 @@ checked, not trusted: every flash's PE must equal the summed PE of its hits.
 On the FD-HD sample `opflash` passes exactly; `opslicer`'s association links
 its brightest flash to 1853 hits spread over the whole 4.5 ms readout, fails,
 and is not used (the strip then shows total OpHit PE).
+
+**Charge and light together.** `--mode chargelight` (browser: **Charge + light
+(3D + PDS)**, python: `display_charge_light(ev)`) puts the same animation beside
+the 3-D charge: space points (grey, brightness ~ log charge -- the light owns
+the colour map), tracks, vertices and truth as in the 3-D view, with the
+photon-detector wall drawn where it is on the anode plane, lighting up frame by
+frame, and each flash a bar across the drift at its (y, z). The charge itself is
+static -- it is deposited within nanoseconds and read out over milliseconds of
+drift, so there is no shared clock to animate it on. In the browser the 3-D
+panel is a normal plotly scene (rotate it while it plays); the GIF uses a fixed
+camera (`elev`, `azim`), and draws the charge on the viewer's side of the wall
+over the tiles and the rest under them.
+
+```bash
+python -m pylarevd reco.root -e 0 --mode chargelight --truth --html
+```
 
 **Missing and misplaced flashes.** Two failures this view makes visible, both on
 the FD-HD atmospheric sample:

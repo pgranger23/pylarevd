@@ -270,3 +270,43 @@ def test_cli_light_mode_writes_an_animation(tmp_path):
     assert any(n.endswith("_light.gif") for n in names)
     assert any(n.endswith(".png") for n in names)
     assert "_light.gif" in (out / "manifest.csv").read_text()
+
+
+# ---- charge + light ----------------------------------------------------------
+
+@needs_atmnu
+def test_charge_light_figure_has_a_3d_panel_and_typed_frames(ev):
+    from pylarevd import display_charge_light
+    a = display_charge_light(ev, n_frames=6)
+    assert "space points" in a.summary()
+    fig = a.plotly_figure()
+    kinds = {d.type for d in fig.data}
+    assert {"scatter3d", "mesh3d", "bar"} <= kinds
+    for fr in fig.frames:
+        for i, d in zip(fr.traces, fr.data):
+            assert d.type == fig.data[i].type
+    # the lit wall is coloured by number on the tile colour scale
+    mesh = next(d for d in fig.data if d.type == "mesh3d" and d.intensity is not None)
+    assert mesh.intensitymode == "cell"
+    assert len(mesh.intensity) == len(mesh.i)
+
+
+@needs_atmnu
+def test_charge_light_frames_render_and_blit_like_a_full_draw(ev, tmp_path):
+    from pylarevd import display_charge_light
+    a = display_charge_light(ev, n_frames=6)
+    assert os.path.getsize(a.save(str(tmp_path / "cl.png"), dpi=50, frame=3)) > 10_000
+    blit = a.render_frames(dpi=50, frames=[3])[0]
+    assert blit.ndim == 3 and blit.shape[2] == 3 and blit.std() > 5
+
+
+@needs_atmnu
+def test_app_renders_charge_and_light():
+    pytest.importorskip("dash")
+    from pylario import EventFile
+    from pylarevd.app import render
+    files = {ATMNU: EventFile(ATMNU)}
+    fig, summary = render(files, ATMNU, 0, None, "integral", "auto",
+                          "chargelight", [], reco=["tracks"])
+    assert not summary.startswith("ERROR"), summary
+    assert any(d.type == "mesh3d" for d in fig.data) and len(fig.frames) > 0

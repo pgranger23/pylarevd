@@ -2950,6 +2950,27 @@ def display_light(event, tag: str | None = None, **kwargs):
     return LightAnimation(event, flash_tag=tag, **kwargs)
 
 
+def display_charge_light(event, tag: str | None = None, *,
+                         spacepoint_tag: str | None = None, truth: bool = False,
+                         tracks: bool = True, vertices: bool = True,
+                         showers: bool = True, radiologicals: bool = True,
+                         elev: float = 20.0, azim: float = -60.0, **kwargs):
+    """The 3-D charge and the light arriving on the photon detectors, together.
+
+    Returns a :class:`pylarevd.light.ChargeLightAnimation`: space points (and
+    tracks, vertices, truth as for :func:`display_3d`) next to the light
+    animation of :func:`display_light`. ``tag`` picks the flash producer;
+    other keyword arguments go to the light animation.
+    """
+    from .light import ChargeLightAnimation
+    style = {k: kwargs[k] for k in ("theme", "colormap", "preset") if k in kwargs}
+    charge = display_3d(event, spacepoint_tag, truth=truth, tracks=tracks,
+                        vertices=vertices, showers=showers,
+                        radiologicals=radiologicals, **style)
+    return ChargeLightAnimation(event, charge, flash_tag=tag, elev=elev,
+                                azim=azim, **kwargs)
+
+
 def display_optical(event, tag: str | None = None, **kwargs) -> OpticalDisplay:
     """Return an :class:`OpticalDisplay` for this event."""
     try:

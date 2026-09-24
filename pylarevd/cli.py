@@ -7,8 +7,8 @@ import os
 import sys
 
 from pylario import ArtReadError, EventFile, GeometryError
-from .display import (PRESETS, display_flashes_3d, display_light,
-                      display_optical)
+from .display import (PRESETS, display_charge_light, display_flashes_3d,
+                      display_light, display_optical)
 from .theme import COLORMAPS, DEFAULT_COLORMAP, THEMES
 
 
@@ -152,10 +152,13 @@ def main(argv=None) -> int:
                     help="hit quantity, or the object each hit belongs to "
                          "(2-D and readout views only)")
     ap.add_argument("--mode", default="2d",
-                    choices=["2d", "readout", "3d", "optical", "flash3d", "light"],
+                    choices=["2d", "readout", "3d", "optical", "flash3d", "light",
+                             "chargelight"],
                     help="which view to render (default: the 2-D physical view); "
-                         "'light' animates photon-detector hits and flashes in time")
-    lg = ap.add_argument_group("photon detectors (--mode optical, flash3d, light)")
+                         "'light' animates photon-detector hits and flashes in "
+                         "time, 'chargelight' does so beside the 3-D charge")
+    lg = ap.add_argument_group(
+        "photon detectors (--mode optical, flash3d, light, chargelight)")
     lg.add_argument("--flash-tag", default=None, metavar="LABEL",
                     help="flash producer module label, e.g. opflash or opslicer "
                          "(default: prefer opflash)")
@@ -277,10 +280,16 @@ def main(argv=None) -> int:
                 disp = display_flashes_3d(ev, a.flash_tag, **style)
             elif a.mode == "optical":
                 disp = display_optical(ev, a.flash_tag, **style)
-            elif a.mode == "light":
-                disp = display_light(ev, a.flash_tag, time_scale=a.light_clock,
-                                     fill=a.light_fill, n_frames=a.frames,
-                                     window=window, t0=a.t0, **style)
+            elif a.mode in ("light", "chargelight"):
+                light = dict(time_scale=a.light_clock, fill=a.light_fill,
+                             n_frames=a.frames, window=window, t0=a.t0, **style)
+                if a.mode == "chargelight":
+                    # tracks and vertices on by default, as in --mode 3d
+                    disp = display_charge_light(
+                        ev, a.flash_tag, truth=a.truth,
+                        radiologicals=not a.no_radiologicals, **light)
+                else:
+                    disp = display_light(ev, a.flash_tag, **light)
             else:
                 disp = ev.display(a.tag, truth=a.truth, reco=a.reco,
                                   radiologicals=not a.no_radiologicals,
@@ -295,9 +304,9 @@ def main(argv=None) -> int:
                    "hits": len(getattr(disp, "hits", []) or []),
                    "headline": (disp.neutrino.headline() if disp.neutrino else ""),
                    "png": "", "html": "", "status": "ok", "error": ""}
-            if a.mode == "light" and a.anim != "none":
+            if a.mode in ("light", "chargelight") and a.anim != "none":
                 anim = disp.save_animation(
-                    _unique_path(f"{stem}_light.{a.anim}", taken), fps=a.fps)
+                    _unique_path(f"{stem}_{a.mode}.{a.anim}", taken), fps=a.fps)
                 row["anim"] = os.path.basename(anim)
                 print("  ->", anim)
             if not a.only_html:

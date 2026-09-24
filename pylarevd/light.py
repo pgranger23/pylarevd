@@ -798,6 +798,29 @@ class LightAnimation(_TruthInfo):
         rgba[v < PE_OFF] = to_rgba(self._off_colour())
         return rgba
 
+    #: Tile level of a detector that is dark (its afterglow has faded).
+    _OFF_LEVEL = -0.02
+
+    def _tile_levels(self, v: np.ndarray) -> np.ndarray:
+        """0..1 position on the log colour range, or ``_OFF_LEVEL`` if dark.
+
+        The interactive figure colours tiles by number through
+        :meth:`_tile_colorscale` rather than by colour string: plotly validates
+        every element of every frame, and 120 frames of colour strings took
+        seconds where numeric arrays take milliseconds.
+        """
+        lo, hi = self.pe_range
+        u = (np.log10(np.clip(v, lo, hi)) - np.log10(lo)) / (np.log10(hi) - np.log10(lo))
+        return np.round(np.where(v < PE_OFF, self._OFF_LEVEL, u), 3)
+
+    def _tile_colorscale(self) -> list:
+        """The tile colour map on [_OFF_LEVEL, 1], dark colour at the bottom."""
+        off = self._off_colour()
+        span = 1.0 - self._OFF_LEVEL
+        head = [[0.0, off], [0.5 * -self._OFF_LEVEL / span, off]]
+        return head + [[(-self._OFF_LEVEL + p) / span, c]
+                       for p, c in charge_colorscale(self.theme, self.colormap)]
+
     def _tick_positions(self) -> tuple[np.ndarray, list[str]]:
         """Frame-clock positions and labels for the time strip."""
         lo, hi = self.window
@@ -869,8 +892,11 @@ class LightAnimation(_TruthInfo):
         _pyplot().close(scene.fig)
         return out
 
+    #: GIF/MP4 resolution when none is asked for.
+    anim_dpi = 90
+
     def animation_bytes(self, fmt: str = "gif", *, fps: float = 12.0,
-                        dpi: int = 90, hold: float = 2.0) -> bytes:
+                        dpi: int | None = None, hold: float = 2.0) -> bytes:
         """Encode the animation. ``fmt`` is ``gif`` or ``mp4`` (needs ffmpeg).
 
         The last frame is held for ``hold`` seconds so a looping GIF does not
@@ -882,13 +908,13 @@ class LightAnimation(_TruthInfo):
         if fmt == "mp4" and shutil.which("ffmpeg") is None:
             raise ValueError("mp4 needs the ffmpeg executable on PATH; "
                              "write a .gif instead")
-        frames = self.render_frames(dpi=dpi)
+        frames = self.render_frames(dpi=dpi or self.anim_dpi)
         if fmt == "gif":
             return _encode_gif(frames, fps, hold)
         return _encode_mp4(frames, fps, hold)
 
-    def save_animation(self, path: str, *, fps: float = 12.0, dpi: int = 90,
-                       hold: float = 2.0) -> str:
+    def save_animation(self, path: str, *, fps: float = 12.0,
+                       dpi: int | None = None, hold: float = 2.0) -> str:
         """Write the animation; the format follows the extension (.gif/.mp4)."""
         ext = os.path.splitext(path)[1] or ".gif"
         data = self.animation_bytes(ext, fps=fps, dpi=dpi, hold=hold)
@@ -914,6 +940,89 @@ class LightAnimation(_TruthInfo):
         self.plotly_figure(**kwargs).show(config=_PLOTLY_CONFIG)
 
 
+class ChargeLightAnimation(LightAnimation):
+    """The light animation beside the 3-D charge it came from.
+
+    Left: the reconstructed space points (grey, brightness ~ log charge),
+    tracks and the true vertex, with the photon-detector wall drawn where it
+    is -- on the anode plane -- lighting up frame by frame, and each flash a
+    bar across the drift at its (y, z) once its time has come. Right: the
+    same wall face-on, and the time strip underneath, as in
+    :class:`LightAnimation`. Charge is static: it is deposited within
+    nanoseconds and read out over milliseconds of drift, so there is no
+    common clock on which to animate it with the light.
+
+    ``charge`` is a :class:`pylarevd.display.Display3D`; its colour settings
+    are not used, since the light owns the colour map here.
+    """
+
+    #: the figure is ~1.7x wider than the light-only one
+    anim_dpi = 72
+
+    def __init__(self, event, charge, *, elev: float = 20.0,
+                 azim: float = -60.0, **kwargs):
+        super().__init__(event, **kwargs)
+        self.charge = charge
+        self.elev = float(elev)
+        self.azim = float(azim)
+
+    def _title(self) -> str:
+        run, subrun, ev = self.event.id
+        return (f"{self.geometry.detector}   run {run} / subrun {subrun} / "
+                f"event {ev}   -   charge (3-D) and light vs time")
+
+    def summary(self) -> str:
+        d3 = self.charge
+        extra = [f"  3-D charge: {len(d3.sp):,} space points ({d3.sp.label}), "
+                 f"grey by log charge"]
+        if d3.tracks is not None and len(d3.tracks):
+            extra[0] += f"; {len(d3.tracks)} tracks"
+        lines = super().summary().splitlines()
+        return "\n".join(lines[:2] + extra + lines[2:])
+
+    def __repr__(self) -> str:
+        return (f"<ChargeLightAnimation {self.event!r} frames={self.n_frames} "
+                f"spacepoints={len(self.charge.sp)}>")
+
+    @cached_property
+    def _charge_ranges(self):
+        """(x, y, z) ranges of the 3-D panel: full drift and height, and z
+        around the charge -- the whole wall when the detector is short
+        enough, so the light pattern is seen in full."""
+        boxes = self.geometry.tpcs
+        xr = (min(b.xmin for b in boxes), max(b.xmax for b in boxes))
+        yr = (min(b.ymin for b in boxes), max(b.ymax for b in boxes))
+        zr = (min(b.zmin for b in boxes), max(b.zmax for b in boxes))
+        span = zr[1] - zr[0]
+        sp = self.charge.sp
+        if span > 2.5 * (yr[1] - yr[0]) and len(sp):
+            # a long detector (the full FD module is 58 m): frame the charge
+            z = np.asarray(sp.xyz)[:, 2]
+            c, half = 0.5 * (z.min() + z.max()), max(600.0, 0.8 * np.ptp(z))
+            zr = (max(zr[0], c - half), min(zr[1], c + half))
+        return xr, yr, zr
+
+    def _charge_levels(self) -> tuple[np.ndarray, np.ndarray]:
+        """Space-point positions and a 0..1 brightness from log charge."""
+        sp = self.charge.sp
+        xyz = np.asarray(sp.xyz, float) if len(sp) else np.zeros((0, 3))
+        q = getattr(sp, "charge", None)
+        if q is None or not len(xyz):
+            return xyz, np.full(len(xyz), 0.7)
+        lq = np.log10(np.clip(np.asarray(q, float), 1e-3, None))
+        lo, hi = np.percentile(lq, [2, 99.5]) if len(lq) > 1 else (0.0, 1.0)
+        return xyz, np.clip((lq - lo) / max(hi - lo, 1e-9), 0, 1)
+
+    def _charge_points(self) -> tuple[np.ndarray, np.ndarray]:
+        """Space-point positions and their grey-scale RGBA colours."""
+        from matplotlib.colors import to_rgb
+        xyz, f = self._charge_levels()
+        dim = np.array(to_rgb(self.theme.grid))
+        bright = np.array(to_rgb(self.theme.fg))
+        rgb = dim + (bright - dim) * (0.25 + 0.75 * f)[:, None]
+        return xyz, np.column_stack([rgb, np.full(len(rgb), 0.9)])
+
+
 # --------------------------------------------------------------------------
 # matplotlib scene
 
@@ -933,10 +1042,17 @@ class _MplScene:
         W = a.walls
         scale = PRESETS[a.preset]["fonts"]
 
-        # Layout in inches: walls stacked, strip under them, colourbar right.
+        # Layout in inches: walls stacked, strip under them, colourbar right;
+        # with charge, a 3-D panel to the left of the walls.
+        charge = getattr(a, "charge", None)
         fig_w = 11.0 * max(1.0, scale ** 0.5)
         left, right_w, gap = 0.75, 1.15, 0.35
-        wall_w = fig_w - left - right_w
+        c3d_w = 0.0
+        if charge is not None:
+            c3d_w = 7.4 * max(1.0, scale ** 0.5)
+            fig_w += c3d_w
+        wall_left = left + c3d_w + (0.35 if charge is not None else 0.0)
+        wall_w = fig_w - wall_left - right_w
         spans = [W.extent(w) for w in range(W.n_walls)]
         wall_h = [wall_w * (s[3] - s[2]) / (s[1] - s[0]) for s in spans]
         cap = 6.4 / max(1, len(wall_h)) if len(wall_h) > 1 else 6.4
@@ -963,7 +1079,7 @@ class _MplScene:
         tile_idx = []
         for w in range(W.n_walls):
             y0 = top - wall_h[w]
-            ax = fig.add_axes(frac(left, y0, wall_w, wall_h[w]))
+            ax = fig.add_axes(frac(wall_left, y0, wall_w, wall_h[w]))
             top = y0 - gap
             ax.set_facecolor(t.axes_bg)
             zmin, zmax, ymin, ymax = spans[w]
@@ -1036,7 +1152,7 @@ class _MplScene:
                 self.vertex_art.append(v)
 
         # colourbar
-        cax = fig.add_axes(frac(left + wall_w + 0.18, fig_h - head_h
+        cax = fig.add_axes(frac(wall_left + wall_w + 0.18, fig_h - head_h
                                 - sum(wall_h) - gap * (len(wall_h) - 1),
                                 0.16, sum(wall_h) + gap * (len(wall_h) - 1)))
         sm = plt.cm.ScalarMappable(norm=mcolors.LogNorm(vmin=lo, vmax=hi),
@@ -1047,7 +1163,7 @@ class _MplScene:
                         t, fonts)
 
         # ---- strip
-        sax = fig.add_axes(frac(left, bottom, wall_w, strip_h))
+        sax = fig.add_axes(frac(left, bottom, wall_left + wall_w - left, strip_h))
         self.strip_ax = sax
         sax.set_facecolor(t.axes_bg)
         n = a.n_frames
@@ -1110,7 +1226,7 @@ class _MplScene:
         self.clock = fig.text(left / fig_w, 1 - (head_h - 0.12) / fig_h, "",
                               fontsize=fonts["suptitle"] * 1.35, color=t.fg,
                               ha="left", va="bottom", family="monospace")
-        self.status = fig.text((left + wall_w) / fig_w,
+        self.status = fig.text((wall_left + wall_w) / fig_w,
                                1 - (head_h - 0.12) / fig_h, "",
                                fontsize=fonts["label"], color=t.fg_muted,
                                ha="right", va="bottom")
@@ -1120,11 +1236,23 @@ class _MplScene:
         if len(f["pe"]):
             key.append("◯ flash ±1σ")
         key.append("□ outline: light this frame")
-        fig.text((left + wall_w) / fig_w, 1 - 0.40 / fig_h,
+        fig.text((wall_left + wall_w) / fig_w, 1 - 0.40 / fig_h,
                  "     ".join(key), fontsize=fonts["legend"],
                  color=t.fg_muted, ha="right", va="top")
         self._cum = np.cumsum(inside + outside)
         self._fg_rgba = np.array(mcolors.to_rgba(t.fg))
+
+        # ---- 3-D charge, beside the walls
+        self.tiles3d = None
+        self.front3d = []
+        self.bars3d = []
+        if charge is not None:
+            block_h = sum(wall_h) + gap * (len(wall_h) - 1)
+            block_bottom = fig_h - head_h - block_h
+            ax3 = fig.add_axes(frac(left - 0.55, block_bottom - 0.45,
+                                    c3d_w + 0.1, block_h + 0.35),
+                               projection="3d")
+            self._build_charge3d(ax3, charge)
 
     def _dynamic(self) -> list:
         """Artists that change between frames, in drawing (z) order."""
@@ -1133,6 +1261,11 @@ class _MplScene:
             out += [el, c] + ([lab] if lab is not None else [])
         out += self.vertex_art
         out += [self.elapsed, self.playhead, self.clock, self.status]
+        # 3-D: the wall, then flash bars, then whatever is in front of it
+        if self.tiles3d is not None:
+            out.append(self.tiles3d)
+        out += [bar for _j, bar in self.bars3d]
+        out += self.front3d
         return out
 
     def start_blit(self) -> None:
@@ -1152,6 +1285,10 @@ class _MplScene:
         canvas.restore_region(self._bg)
         for art in self._dynamic():
             if art.get_visible():
+                if hasattr(art, "do_3d_projection"):
+                    # the colours of a 3-D collection are applied when it is
+                    # projected, not when they are set
+                    art.do_3d_projection()
                 art.axes.draw_artist(art) if art.axes is not None \
                     else self.fig.draw_artist(art)
         return np.asarray(canvas.buffer_rgba())[..., :3].copy()
@@ -1192,9 +1329,120 @@ class _MplScene:
             if lab is not None:
                 lab.set_visible(on)
                 lab.set_alpha(max(0.75, float(alpha[j])) if on else 0.0)
+        if self.tiles3d is not None:
+            self.tiles3d.set_facecolor(rgba[self.tile3d_idx])
+        for j, bar in self.bars3d:
+            on = bool(alpha[j] > 0)
+            bar.set_visible(on)
+            bar.set_alpha(float(alpha[j]) if on else 0.0)
         what = "PE in the window" if k is None else "PE so far"
         self.status.set_text(f"{pe_so_far:,.0f} {what}   \u00b7   "
                              f"{nflash} flash{'es' * (nflash != 1)}")
+
+
+    def _build_charge3d(self, ax, d3) -> None:
+        """Space points, tracks and the true vertex, with the PD wall in place.
+
+        Drawn in the detector frame the 3-D view uses (horizontal z, depth x,
+        vertical y). Charge is grey-scale -- brightness ~ log charge -- so it
+        cannot be mistaken for light, which owns the colour map.
+        Matplotlib has no depth buffer across collections, so the charge is
+        split by which side of the photon-detector wall it lies on: behind it
+        is drawn first, in front of it after the tiles.
+        """
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+        a, t, fonts = self.a, self.t, self.fonts
+        W = a.walls
+        ax.set_facecolor(t.axes_bg)
+        ax.computed_zorder = False
+        xr, yr, zr = a._charge_ranges
+        az = np.radians(a.azim)
+
+        # outline of the region shown, and of each photon-detector wall
+        z0, z1 = zr
+        x0, x1 = xr
+        y0, y1 = yr
+        for (xa, xb) in ((x0, x0), (x1, x1)):
+            ax.plot([z0, z1, z1, z0, z0], [xa, xa, xa, xa, xa],
+                    [y0, y0, y1, y1, y0], color=t.grid, lw=0.5, alpha=0.5)
+        for (zz, yy) in ((z0, y0), (z1, y0), (z1, y1), (z0, y1)):
+            ax.plot([zz, zz], [x0, x1], [yy, yy], color=t.grid, lw=0.5,
+                    alpha=0.5)
+
+        sel = np.flatnonzero((W.z + W.half_z >= z0) & (W.z - W.half_z <= z1))
+        self.tile3d_idx = sel
+        verts = [[(max(z0, W.z[i] - W.half_z[i]), W.x[i], W.y[i] - W.half_y[i]),
+                  (min(z1, W.z[i] + W.half_z[i]), W.x[i], W.y[i] - W.half_y[i]),
+                  (min(z1, W.z[i] + W.half_z[i]), W.x[i], W.y[i] + W.half_y[i]),
+                  (max(z0, W.z[i] - W.half_z[i]), W.x[i], W.y[i] + W.half_y[i])]
+                 for i in sel]
+        self.tiles3d = Poly3DCollection(verts, facecolors=a._off_colour(),
+                                        edgecolors="none", zorder=3)
+        ax.add_collection3d(self.tiles3d)
+
+        pts, rgba = a._charge_points()
+        wall_x = W.wall_x[0] if W.n_walls == 1 else None
+        if len(pts):
+            inside = ((pts[:, 2] >= z0) & (pts[:, 2] <= z1))
+            pts, rgba = pts[inside], rgba[inside]
+            if wall_x is not None:
+                # the eye sits at +sin(azim) along the drift axis
+                front = (pts[:, 0] - wall_x) * np.sin(az) > 0
+            else:
+                front = np.ones(len(pts), bool)
+            back = ~front
+            size = 4.0 if len(pts) < 3000 else (2.2 if len(pts) < 15000 else 1.2)
+            if back.any():
+                ax.scatter(pts[back, 2], pts[back, 0], pts[back, 1], s=size,
+                           c=rgba[back], linewidths=0, depthshade=False,
+                           zorder=2)
+            if front.any():
+                self.front3d.append(ax.scatter(
+                    pts[front, 2], pts[front, 0], pts[front, 1], s=size,
+                    c=rgba[front], linewidths=0, depthshade=False, zorder=5))
+        if d3.tracks is not None:
+            for p in d3.tracks.points:
+                p = np.asarray(p)
+                if len(p) < 2:
+                    continue
+                keep = (p[:, 2] >= z0) & (p[:, 2] <= z1)
+                if keep.sum() < 2:
+                    continue
+                ln, = ax.plot(p[keep, 2], p[keep, 0], p[keep, 1], color=t.track,
+                              lw=0.9, alpha=0.8, zorder=6)
+                self.front3d.append(ln)
+        tv = a.true_vertex
+        if tv is not None and np.isfinite(tv).all():
+            v, = ax.plot([tv[2]], [tv[0]], [tv[1]], marker="*", markersize=13,
+                         color=t.mctrack, markeredgecolor=t.axes_bg,
+                         markeredgewidth=0.8, linestyle="none", zorder=7)
+            self.front3d.append(v)
+
+        # flashes: a bar across the drift at their (y, z) -- light does not
+        # measure x
+        f = a.flashes
+        widths = _pe_width(f["pe"], lo=0.8, hi=3.2)
+        for j in range(len(f["pe"])):
+            if not (z0 <= f["z"][j] <= z1):
+                continue
+            bar, = ax.plot([f["z"][j]] * 2, [x0, x1], [f["y"][j]] * 2,
+                           color=t.track, lw=widths[j] * 1.3, zorder=4,
+                           visible=False)
+            self.bars3d.append((j, bar))
+
+        ax.set_xlim(z0, z1)
+        ax.set_ylim(x0, x1)
+        ax.set_zlim(y0, y1)
+        ax.set_box_aspect((z1 - z0, x1 - x0, y1 - y0), zoom=1.05)
+        ax.view_init(elev=a.elev, azim=a.azim)
+        ax.set_xlabel("z [cm]", fontsize=fonts["label"], labelpad=2)
+        ax.set_ylabel("x [cm] (drift)", fontsize=fonts["label"], labelpad=2)
+        ax.set_zlabel("y [cm]", fontsize=fonts["label"], labelpad=2)
+        _style_axes(ax, t, fonts, three_d=True)
+        n = len(d3.sp)
+        ax.set_title(f"charge: {n:,} space points (grey: log charge)  +  "
+                     "light on the anode wall", fontsize=fonts["label"],
+                     color=t.fg_muted, pad=0)
 
 
 def _encode_gif(frames: list[np.ndarray], fps: float, hold: float) -> bytes:
@@ -1273,6 +1521,97 @@ def _r(v, nd: int = 1) -> list:
     return [None if not np.isfinite(x) else float(x) for x in arr]
 
 
+def _plotly_charge3d(a, fig, add) -> None:
+    """The 3-D panel: charge from Display3D, the PD wall and flash bars."""
+    from matplotlib.colors import to_rgb
+    t, W, f = a.theme, a.walls, a.flashes
+    d3 = a.charge
+    _xyz, level = a._charge_levels()
+    dim = np.array(to_rgb(t.grid))
+    bright = np.array(to_rgb(t.fg))
+    grey = [[0.0, _hex(dim + (bright - dim) * 0.25)], [1.0, _hex(bright)]]
+    for tr in d3.plotly_figure().data:
+        tr = tr.to_plotly_json()
+        tr.pop("scene", None)
+        if tr.get("name") == "space points":
+            # light owns the colour map here; charge is grey
+            tr["marker"] = dict(size=2.4 if len(level) < 15000 else 1.4,
+                                color=_r(level, 2), cmin=0, cmax=1,
+                                colorscale=grey, showscale=False, opacity=0.9)
+            tr["name"] = "space points (grey: log charge)"
+        add(tr, 1, col=1)
+
+    xr, yr, zr = a._charge_ranges
+    ever = np.maximum(a.values.max(axis=0), a.collected) >= PE_OFF
+    lighting = dict(ambient=1.0, diffuse=0.0, specular=0.0, roughness=1.0,
+                    fresnel=0.0)
+
+    def mesh(idx):
+        z0 = W.z[idx] - W.half_z[idx]
+        z1 = W.z[idx] + W.half_z[idx]
+        y0 = W.y[idx] - W.half_y[idx]
+        y1 = W.y[idx] + W.half_y[idx]
+        X = np.column_stack([z0, z1, z1, z0]).ravel()
+        Y = np.repeat(W.x[idx], 4)
+        Z = np.column_stack([y0, y0, y1, y1]).ravel()
+        b = 4 * np.arange(len(idx))
+        return dict(type="mesh3d", x=_r(X), y=_r(Y, 2), z=_r(Z),
+                    i=np.column_stack([b, b]).ravel().tolist(),
+                    j=np.column_stack([b + 1, b + 2]).ravel().tolist(),
+                    k=np.column_stack([b + 2, b + 3]).ravel().tolist(),
+                    flatshading=True, lighting=lighting, hoverinfo="skip",
+                    showlegend=False, showscale=False)
+
+    dark = np.flatnonzero(~ever)
+    if len(dark):
+        add({**mesh(dark), "color": a._off_colour(),
+             "name": "photon detectors"}, 1, col=1)
+    lit = np.flatnonzero(ever)
+    if len(lit):
+        def wall3d(k):
+            v = (a.collected if k is None else a.values[k])[lit]
+            return dict(intensity=np.repeat(a._tile_levels(v), 2)
+                        .astype(np.float32))
+        add({**mesh(lit), "name": "photon detectors (lit)",
+             "intensitymode": "cell", "colorscale": a._tile_colorscale(),
+             "cmin": a._OFF_LEVEL, "cmax": 1.0}, 1, wall3d, col=1)
+
+    def bars(k, fresh):
+        on = np.ones(len(f["pe"]), bool) if k is None else (
+            (f["frame"] == k) if fresh else (f["frame"] < k))
+        if k is None and fresh:
+            on[:] = False
+        sel = np.flatnonzero(on)
+        xs, ys, zs = [], [], []
+        for j in sel:
+            xs += [float(f["z"][j])] * 2 + [None]
+            ys += [xr[0], xr[1], None]
+            zs += [float(f["y"][j])] * 2 + [None]
+        return dict(x=xs or [None], y=ys or [None], z=zs or [None])
+
+    add(dict(type="scatter3d", mode="lines", hoverinfo="skip",
+             line=dict(color=t.track, width=3), opacity=0.4,
+             name="earlier flashes (bar: x unknown)", showlegend=False), 1,
+        lambda k: bars(k, False), col=1)
+    add(dict(type="scatter3d", mode="lines", hoverinfo="skip",
+             line=dict(color=t.track, width=8),
+             name="new flash (bar: x unknown)", showlegend=False), 1,
+        lambda k: bars(k, True), col=1)
+
+    pane = dict(backgroundcolor=t.axes_bg, gridcolor=t.grid,
+                zerolinecolor=t.grid, color=t.fg_muted)
+    el, az = np.radians(a.elev), np.radians(a.azim)
+    r = 1.9
+    fig.update_scenes(
+        xaxis=dict(title="z [cm] (beam)", range=list(zr), **pane),
+        yaxis=dict(title="x [cm] (drift)", range=list(xr), **pane),
+        zaxis=dict(title="y [cm] (up)", range=list(yr), **pane),
+        aspectmode="data",
+        camera=dict(eye=dict(x=r * np.cos(el) * np.cos(az),
+                             y=r * np.cos(el) * np.sin(az),
+                             z=r * np.sin(el))))
+
+
 def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
     """Animated plotly figure: one frame per clock tick, slider and play.
 
@@ -1292,22 +1631,50 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
     strip_share = 0.24
     wall_share = [(1 - strip_share) * r / sum(ratio) for r in ratio]
     titles = [W.wall_label(w) if (nw > 1 or W.projected) else ""
-              for w in range(nw)] + [""]
-    fig = make_subplots(rows=nw + 1, cols=1,
-                        row_heights=wall_share + [strip_share],
-                        vertical_spacing=0.08 if nw == 1 else 0.05,
-                        subplot_titles=titles)
+              for w in range(nw)]
+    charge = getattr(a, "charge", None)
+    srow = nw + 1
+    if charge is None:
+        wcol = 1
+        fig = make_subplots(rows=nw + 1, cols=1,
+                            row_heights=wall_share + [strip_share],
+                            vertical_spacing=0.08 if nw == 1 else 0.05,
+                            subplot_titles=titles + [""])
+    else:
+        # the 3-D charge spans the wall rows on the left; the strip spans all
+        wcol = 2
+        specs = ([[{"type": "scene", "rowspan": nw}, {"type": "xy"}]]
+                 + [[None, {"type": "xy"}] for _ in range(nw - 1)]
+                 + [[{"type": "xy", "colspan": 2}, None]])
+        order = []                    # make_subplots titles run row by row
+        for w in range(nw):
+            order += ([f"charge: {len(charge.sp):,} space points "
+                       "(grey: log charge) + light on the anode wall"]
+                      if w == 0 else []) + [titles[w]]
+        fig = make_subplots(rows=nw + 1, cols=2, specs=specs,
+                            column_widths=[0.5, 0.5],
+                            row_heights=wall_share + [strip_share],
+                            horizontal_spacing=0.05,
+                            vertical_spacing=0.08 if nw == 1 else 0.05,
+                            subplot_titles=order + [""])
     f = a.flashes
     lo, hi = a.pe_range
     n = a.n_frames
     dyn: list[tuple[int, callable]] = []     # (trace index, frame -> dict)
 
-    def add(static: dict, row: int, fn=None, k0: int | None = 0):
+    def add(static: dict, row: int, fn=None, k0: int | None = 0,
+            col: int | None = None):
         """Add a trace; ``fn(k)`` gives its per-frame properties."""
         props = dict(static)
         if fn is not None:
-            props.update(fn(k0))
-        fig.add_trace(props, row=row, col=1)
+            for key, val in fn(k0).items():
+                if isinstance(val, dict) and isinstance(props.get(key), dict):
+                    props[key] = {**props[key], **val}
+                else:
+                    props[key] = val
+        if col is None:
+            col = 1 if row == srow else wcol
+        fig.add_trace(props, row=row, col=col)
         if fn is not None:
             # Frame entries MUST repeat the trace type: plotly.py validates a
             # typeless entry as a scatter, and the animation then turns the
@@ -1332,11 +1699,15 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
 
         def tiles(k, m=m):
             v = (a.collected if k is None else a.values[k])[m]
-            return dict(marker=dict(color=[_hex(c) for c in a._tile_rgba(v)],
-                                    line=dict(width=0)),
-                        customdata=_r(v))
+            # float32: plotly ships numpy arrays base64-encoded, so
+            # precision is size
+            return dict(marker=dict(color=a._tile_levels(v).astype(np.float32)),
+                        customdata=np.round(v, 1).astype(np.float32))
 
-        add(dict(type="bar", x=_r(W.z[m]), y=_r(2 * W.half_y[m]),
+        add(dict(type="bar", marker=dict(colorscale=a._tile_colorscale(),
+                                         cmin=a._OFF_LEVEL, cmax=1.0,
+                                         line=dict(width=0)),
+                 x=_r(W.z[m]), y=_r(2 * W.half_y[m]),
                  base=_r(W.y[m] - W.half_y[m]), width=_r(2 * W.half_z[m]),
                  text=hover_txt, textposition="none",
                  hovertemplate=("z %{x:.0f} cm · %{text}<br>"
@@ -1407,15 +1778,18 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
                                     f"y {tv[1]:.0f}, z {tv[2]:.0f} cm"
                                     "<extra></extra>")), row)
         zmin, zmax, ymin, ymax = spans[w]
-        xa = "x" if row == 1 else f"x{row}"
+        xa = fig.get_subplot(row, wcol).xaxis.plotly_name.replace("axis", "")
         # Equal aspect, and shrink the panel rather than pad the axis: the
         # default filled the width with z = -1000..2300 cm of nothing.
-        fig.update_xaxes(range=[zmin, zmax], row=row, col=1,
+        fig.update_xaxes(range=[zmin, zmax], row=row, col=wcol,
                          title_text="z [cm] (beam)" if row == nw else None,
                          showgrid=False, zeroline=False, constrain="domain")
-        fig.update_yaxes(range=[ymin, ymax], row=row, col=1, title_text="y [cm]",
+        fig.update_yaxes(range=[ymin, ymax], row=row, col=wcol, title_text="y [cm]",
                          scaleanchor=xa, scaleratio=1, showgrid=False,
                          zeroline=False, constrain="domain")
+
+    if charge is not None:
+        _plotly_charge3d(a, fig, add)
 
     # colourbar carrier: bars take explicit colours, so the scale lives here
     decades = np.arange(np.floor(np.log10(lo)), np.ceil(np.log10(hi)) + 1)

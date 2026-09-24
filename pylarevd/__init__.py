@@ -36,10 +36,11 @@ _PYLARIO_EXPORTS = {
 _DISPLAY_EXPORTS = {
     "EventDisplay", "Display3D", "OpticalDisplay", "FlashDisplay3D",
     "display", "display_3d", "display_optical", "display_flashes_3d",
-    "display_light",
+    "display_light", "display_charge_light",
 }
 
-_LIGHT_EXPORTS = {"LightAnimation", "PhotonDetectorWalls"}
+_LIGHT_EXPORTS = {"LightAnimation", "ChargeLightAnimation",
+                  "PhotonDetectorWalls"}
 
 __all__ = sorted(list(_PYLARIO_EXPORTS) + list(_DISPLAY_EXPORTS)
                  + list(_LIGHT_EXPORTS))

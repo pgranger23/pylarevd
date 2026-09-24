@@ -34,7 +34,8 @@ except ImportError:
     Dash = Input = Output = State = dcc = html = no_update = None
 
 from pylario import ArtReadError, EventFile, Geometry, GeometryError
-from .display import display_flashes_3d, display_light, display_optical
+from .display import (display_charge_light, display_flashes_3d,
+                      display_light, display_optical)
 from .theme import COLORMAPS, DEFAULT_COLORMAP, THEMES
 
 #: Controls whose value is mirrored into the URL, so a view can be linked.
@@ -49,7 +50,9 @@ _URL_CONTROLS = (("file", False), ("entry", False), ("tag", False),
                  ("light-fill", False))
 
 #: Views that read the photon-detector products rather than TPC hits.
-_OPTICAL_MODES = ("optical", "flash3d", "light")
+_OPTICAL_MODES = ("optical", "flash3d", "light", "chargelight")
+#: Views that animate the light (clock and tile controls apply).
+_LIGHT_MODES = ("light", "chargelight")
 
 def url_params(values, event_id=None) -> str:
     """Serialise control values into a query string.
@@ -480,11 +483,22 @@ def _parse_reco(reco):
 
 
 def light_display(ev, flash_tag=None, light_scale=None, light_fill=None,
-                  style=None):
-    """The light animation for one control state (render and exports share it)."""
-    return display_light(ev, flash_tag,
-                         time_scale=light_scale or "log",
-                         fill=light_fill or "afterglow", **(style or {}))
+                  style=None, *, charge=False, truth=False, reco=None,
+                  radiologicals=True):
+    """The light animation for one control state (render and exports share it).
+
+    ``charge=True`` puts the 3-D charge beside it, with the truth and reco
+    overlays the 3-D view would draw.
+    """
+    light = dict(time_scale=light_scale or "log",
+                 fill=light_fill or "afterglow", **(style or {}))
+    if not charge:
+        return display_light(ev, flash_tag, **light)
+    want_tracks, want_vertices, want_pandora = _parse_reco(reco)
+    return display_charge_light(ev, flash_tag, truth=bool(truth),
+                                tracks=want_tracks,
+                                vertices=want_vertices or want_pandora,
+                                radiologicals=radiologicals, **light)
 
 
 def render(files: dict[str, EventFile], path, entry, tag, colour, scale, mode,
@@ -519,8 +533,10 @@ def render(files: dict[str, EventFile], path, entry, tag, colour, scale, mode,
         if mode == "optical":
             d = display_optical(ev, flash_tag, **style)
             return d.plotly_figure(height=None), d.summary()
-        if mode == "light":
-            d = light_display(ev, flash_tag, light_scale, light_fill, style)
+        if mode in _LIGHT_MODES:
+            d = light_display(ev, flash_tag, light_scale, light_fill, style,
+                              charge=mode == "chargelight", truth=want_truth,
+                              reco=reco, radiologicals=radiologicals)
             return d.plotly_figure(height=None), d.summary()
         if mode == "3d":
             d = ev.display_3d(truth=want_truth,
@@ -708,7 +724,9 @@ def build_app(paths: list[str], geometry: str | None = None,
                                       {"label": "Flashes 3D (PDS)",
                                        "value": "flash3d"},
                                       {"label": "Light vs time (PDS)",
-                                       "value": "light"}],
+                                       "value": "light"},
+                                      {"label": "Charge + light (3D + PDS)",
+                                       "value": "chargelight"}],
                                   value="2d", clearable=False,
                                   style={"width": "210px", **_CTL})]),
                     html.Div([html.Label("panels", style=_LABEL),
@@ -919,7 +937,11 @@ def build_app(paths: list[str], geometry: str | None = None,
             {"label": mark("Flashes 3D (PDS)", caps["optical"]), "value": "flash3d",
              "disabled": not caps["optical"]},
             {"label": mark("Light vs time (PDS)", caps["optical"]),
-             "value": "light", "disabled": not caps["optical"]}]
+             "value": "light", "disabled": not caps["optical"]},
+            {"label": mark("Charge + light (3D + PDS)",
+                           caps["optical"] and caps["spacepoints"]),
+             "value": "chargelight",
+             "disabled": not (caps["optical"] and caps["spacepoints"])}]
         # Several flash finders can run on the same OpHits (opflash, opslicer)
         # and they disagree -- opflash drops some interactions' flashes -- so
         # the choice is the user's, not a hardcoded preference.
@@ -957,7 +979,8 @@ def build_app(paths: list[str], geometry: str | None = None,
         except Exception:
             return no_update, no_update, no_update
         has_reco = any(caps[k] for k in ("tracks", "vertices", "showers"))
-        drawn = mode in ("2d", "3d")        # readout/optical draw no overlays
+        # readout/optical draw no overlays; the charge+light 3-D panel does
+        drawn = mode in ("2d", "3d", "chargelight")
 
         def option(label, available):
             if not available:
@@ -1040,7 +1063,7 @@ def build_app(paths: list[str], geometry: str | None = None,
         other = mode in _OPTICAL_MODES
         three_d = mode == "3d"
         readout = mode == "readout"
-        light = mode == "light"
+        light = mode in _LIGHT_MODES
         return ((other or three_d), other, (other or readout),
                 (other or readout or three_d), not other, not light, not light)
 
@@ -1093,7 +1116,7 @@ def build_app(paths: list[str], geometry: str | None = None,
         cam_to_apply = None
         if cam_ref:
             cam_to_apply = cam_ref
-        elif current_cam and mode in ("3d", "flash3d"):
+        elif current_cam and mode in ("3d", "flash3d", "chargelight"):
             # Check if event changed: if staying on the same event (e.g. toggling reco, truth, etc.)
             # or if reference is set, keep the perspective intact!
             same_ev = (seen is not None and last_ev is not None and
@@ -1218,9 +1241,12 @@ def build_app(paths: list[str], geometry: str | None = None,
                 fig_mpl = d.figure()
                 fig_mpl.savefig(buf, format="pdf", bbox_inches="tight", dpi=300)
                 plt.close(fig_mpl)
-            elif mode == "light":
+            elif mode in _LIGHT_MODES:
                 # the static light map: every tile's PE over the whole window
-                d = light_display(ev, flash_tag, light_scale, light_fill, style)
+                d = light_display(ev, flash_tag, light_scale, light_fill, style,
+                                  charge=mode == "chargelight",
+                                  truth=want_truth, reco=reco,
+                                  radiologicals=bool(radio))
                 fig_mpl = d.figure(None)
                 fig_mpl.savefig(buf, format="pdf", dpi=300)
                 plt.close(fig_mpl)
@@ -1296,10 +1322,13 @@ def build_app(paths: list[str], geometry: str | None = None,
             want_truth = bool(truth)
 
             run, subrun, ev_num = ev.id
-            if mode == "light":
-                d = light_display(ev, flash_tag, light_scale, light_fill, style)
+            if mode in _LIGHT_MODES:
+                d = light_display(ev, flash_tag, light_scale, light_fill, style,
+                                  charge=mode == "chargelight",
+                                  truth=want_truth, reco=reco,
+                                  radiologicals=bool(radio))
                 gif_bytes = d.animation_bytes("gif")
-                filename = (f"pylarevd_run{run}_sub{subrun}_ev{ev_num}_light_"
+                filename = (f"pylarevd_run{run}_sub{subrun}_ev{ev_num}_{mode}_"
                             f"{flash_tag or 'default'}.gif")
                 _save_backup(filename, gif_bytes, "Light animation GIF")
                 return dcc.send_bytes(gif_bytes, filename=filename,
