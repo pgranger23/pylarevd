@@ -310,3 +310,29 @@ def test_app_renders_charge_and_light():
                           "chargelight", [], reco=["tracks"])
     assert not summary.startswith("ERROR"), summary
     assert any(d.type == "mesh3d" for d in fig.data) and len(fig.frames) > 0
+
+
+# ---- keeping the 3-D view while the time changes ------------------------------
+
+def test_keep_view_script_is_valid_and_shipped(tmp_path):
+    """The camera keeper must reach both the browser app and saved HTML.
+
+    Without it every animation frame put a rotated or zoomed 3-D view back to
+    the camera last saved in the layout -- which plotly updates only on a
+    mouse-up inside the 3-D canvas.
+    """
+    from pylarevd.light import KEEP_VIEW_JS
+    assert "scene.plot = function" in KEEP_VIEW_JS
+    assert KEEP_VIEW_JS.count("(") == KEEP_VIEW_JS.count(")")
+    assert KEEP_VIEW_JS.count("{") == KEEP_VIEW_JS.count("}")
+    pytest.importorskip("dash")
+    from pylarevd.app import build_app
+    assert "__pylarevdKeepView" in build_app([]).index_string
+
+
+@needs_atmnu
+def test_saved_light_html_carries_the_keeper(ev, tmp_path):
+    from pylarevd import display_charge_light
+    path = display_charge_light(ev, n_frames=4).save_html(
+        str(tmp_path / "cl.html"), bundle_plotlyjs=False)
+    assert "__pylarevdKeepView" in open(path).read()

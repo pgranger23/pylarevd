@@ -36,6 +36,7 @@ except ImportError:
 from pylario import ArtReadError, EventFile, Geometry, GeometryError
 from .display import (display_charge_light, display_flashes_3d,
                       display_light, display_optical)
+from .light import KEEP_VIEW_JS
 from .theme import COLORMAPS, DEFAULT_COLORMAP, THEMES
 
 #: Controls whose value is mirrored into the URL, so a view can be linked.
@@ -356,7 +357,8 @@ _INDEX_TEMPLATE = """<!DOCTYPE html>
       }
     </style>
   </head>
-  <body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer></body>
+  <body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer>
+  <script>__KEEP_VIEW__</script></body>
 </html>"""
 
 
@@ -630,7 +632,7 @@ def build_app(paths: list[str], geometry: str | None = None,
     # default (dark grey) applies -- unreadable on this panel. State both the
     # enabled and disabled colours explicitly.
     app.index_string = _INDEX_TEMPLATE.replace("__FG__", FG).replace(
-        "__MUTED__", FG_MUTED)
+        "__MUTED__", FG_MUTED).replace("__KEEP_VIEW__", KEEP_VIEW_JS)
 
     app.layout = html.Div(
         id="app-container",

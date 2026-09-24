@@ -82,6 +82,112 @@ PE_OFF = 0.2
 _MAX_WALLS = 6
 
 
+#: Keeps a rotated or zoomed 3-D view when the animation moves on.
+#:
+#: Every animation frame redraws the 3-D scene, and plotly's redraw
+#: (``scene.plot`` -> ``setViewport``) puts the camera back to the one saved
+#: in the figure layout. plotly saves it only on a mouse-up inside the 3-D
+#: canvas: not when the release lands outside it (a drag from the 3-D panel
+#: over the wall panel), not after a wheel zoom (it saves before the zoom is
+#: applied), and not during a drag. So the view jumped back as soon as the
+#: time changed, and could not be turned at all while playing.
+#:
+#: The fix wraps each scene's redraw: if the layout's camera is still the one
+#: the scene last drew with -- nobody but the user has moved it -- the redraw
+#: skips plotly's camera reset and leaves the live view alone, even in the
+#: middle of a drag. A camera the figure itself changes (a new event, "fix
+#: perspective") is still applied.
+#: Mouse-ups anywhere and wheel zooms also save the view the way plotly's own
+#: mouse-up does, so the browser app's relayoutData sees it. Included in the
+#: browser app's page and in saved HTML; figures without 3-D are untouched.
+KEEP_VIEW_JS = r"""
+(function () {
+  if (window.__pylarevdKeepView) { return; }
+  window.__pylarevdKeepView = true;
+  function key(c) {
+    if (!c) { return ''; }
+    var out = [];
+    ['eye', 'center', 'up'].forEach(function (v) {
+      var p = c[v] || {};
+      ['x', 'y', 'z'].forEach(function (a) {
+        out.push(p[a] === undefined ? '' : Number(p[a]).toFixed(6));
+      });
+    });
+    return out.join(',');
+  }
+  function scenes(gd) {
+    var fl = gd._fullLayout || {}, out = [];
+    Object.keys(fl).forEach(function (k) {
+      if (/^scene\d*$/.test(k) && fl[k] && fl[k]._scene) { out.push(fl[k]._scene); }
+    });
+    return out;
+  }
+  function wrap(scene) {
+    if (scene.__pylarevdKeepView) { return; }
+    scene.__pylarevdKeepView = true;
+    var plot = scene.plot;
+    scene.plot = function (sceneData, fullLayout, layout) {
+      var keep = false;
+      try {
+        var full = fullLayout && fullLayout[this.id];
+        keep = !!full && this.__drawnWith !== undefined &&
+               key(full.camera) === this.__drawnWith;
+      } catch (e) { keep = false; }
+      if (keep) {
+        // Nobody but the user has moved the camera since the last draw:
+        // redraw without plotly's camera reset, so a view being dragged or
+        // zoomed -- even mid-gesture -- is left exactly as it is.
+        this.setViewport = function (sceneLayout) {
+          this.glplot.setAspectratio(sceneLayout.aspectratio);
+        };
+      }
+      try {
+        return plot.apply(this, arguments);
+      } finally {
+        if (keep) { delete this.setViewport; }
+        try {
+          this.__drawnWith = key(fullLayout[this.id].camera);
+        } catch (e) { this.__drawnWith = undefined; }
+      }
+    };
+    try { scene.__drawnWith = key(scene.fullSceneLayout.camera); } catch (e) {}
+  }
+  function save(gd) {
+    scenes(gd).forEach(function (s) {
+      try {
+        if (!gd.layout || !s.isCameraChanged(gd.layout)) { return; }
+        var upd = {};
+        upd[s.id + '.camera'] = s.getCamera();
+        s.saveLayout(gd.layout);
+        s.__drawnWith = key(upd[s.id + '.camera']);
+        if (gd.emit) { gd.emit('plotly_relayout', upd); }
+      } catch (e) { /* a view that cannot be saved is left as it was */ }
+    });
+  }
+  function scan() {
+    document.querySelectorAll('.js-plotly-plot').forEach(function (gd) {
+      scenes(gd).forEach(wrap);
+      if (!gd.__pylarevdKeepView && gd.addEventListener) {
+        gd.__pylarevdKeepView = true;
+        gd.addEventListener('wheel', function () {
+          setTimeout(function () { save(gd); }, 150);
+        }, true);
+      }
+    });
+  }
+  function saveAll() {
+    setTimeout(function () {
+      document.querySelectorAll('.js-plotly-plot').forEach(save);
+    }, 0);
+  }
+  document.addEventListener('mouseup', saveAll, true);
+  document.addEventListener('touchend', saveAll, true);
+  scan();
+  setInterval(scan, 300);
+})();
+"""
+
+
 def _fmt_dt(dt_us: float) -> str:
     """Signed time offset, in ns below 1 us."""
     a = abs(dt_us)
@@ -933,7 +1039,8 @@ class LightAnimation(_TruthInfo):
         fig = self.plotly_figure(**kwargs)
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
         fig.write_html(path, include_plotlyjs="inline" if bundle_plotlyjs else "cdn",
-                       config=_PLOTLY_CONFIG, auto_play=False)
+                       config=_PLOTLY_CONFIG, auto_play=False,
+                       post_script=KEEP_VIEW_JS)
         return path
 
     def show(self, **kwargs) -> None:

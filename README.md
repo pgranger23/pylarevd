@@ -612,9 +612,12 @@ photon-detector wall drawn where it is on the anode plane, lighting up frame by
 frame, and each flash a bar across the drift at its (y, z). The charge itself is
 static -- it is deposited within nanoseconds and read out over milliseconds of
 drift, so there is no shared clock to animate it on. In the browser the 3-D
-panel is a normal plotly scene (rotate it while it plays); the GIF uses a fixed
-camera (`elev`, `azim`), and draws the charge on the viewer's side of the wall
-over the tiles and the rest under them.
+panel is a normal plotly scene: rotate and zoom it while it plays, or between
+steps of the slider, and the view is kept. (plotly on its own put the camera
+back on every frame unless the drag ended inside the 3-D canvas; a small script
+in the page and in saved HTML, `KEEP_VIEW_JS`, stops that.) The GIF uses a
+fixed camera (`elev`, `azim`), and draws the charge on the viewer's side of the
+wall over the tiles and the rest under them.
 
 ```bash
 python -m pylarevd reco.root -e 0 --mode chargelight --truth --html
