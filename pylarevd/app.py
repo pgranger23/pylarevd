@@ -34,6 +34,7 @@ except ImportError:
     Dash = Input = Output = State = dcc = html = no_update = None
 
 from pylario import ArtReadError, EventFile, Geometry, GeometryError
+from .display import display_flashes_3d, display_light, display_optical
 from .theme import COLORMAPS, DEFAULT_COLORMAP, THEMES
 
 #: Controls whose value is mirrored into the URL, so a view can be linked.
@@ -41,7 +42,14 @@ from .theme import COLORMAPS, DEFAULT_COLORMAP, THEMES
 _URL_CONTROLS = (("file", False), ("entry", False), ("tag", False),
                  ("colour", False), ("scale", False), ("mode", False),
                  ("merge", False), ("theme", False), ("colormap", False),
-                 ("truth", True), ("reco", True), ("radio", True))
+                 ("truth", True), ("reco", True), ("radio", True),
+                 # appended, not interleaved: links written before these
+                 # controls existed must keep parsing position by position
+                 ("flash-tag", False), ("light-scale", False),
+                 ("light-fill", False))
+
+#: Views that read the photon-detector products rather than TPC hits.
+_OPTICAL_MODES = ("optical", "flash3d", "light")
 
 def url_params(values, event_id=None) -> str:
     """Serialise control values into a query string.
@@ -471,10 +479,20 @@ def _parse_reco(reco):
     return want_tracks, want_vertices, want_pandora
 
 
+def light_display(ev, flash_tag=None, light_scale=None, light_fill=None,
+                  style=None):
+    """The light animation for one control state (render and exports share it)."""
+    return display_light(ev, flash_tag,
+                         time_scale=light_scale or "log",
+                         fill=light_fill or "afterglow", **(style or {}))
+
+
 def render(files: dict[str, EventFile], path, entry, tag, colour, scale, mode,
            truth, merge="orientation", reco=None, theme="dark",
            colormap=DEFAULT_COLORMAP, radiologicals=True,
-           particle_symbols: bool = False) -> tuple[object, str]:
+           particle_symbols: bool = False, flash_tag: str | None = None,
+           light_scale: str | None = None,
+           light_fill: str | None = None) -> tuple[object, str]:
     """Build the figure for one control state.
 
     Module-level rather than a closure so it can be exercised without a
@@ -496,10 +514,13 @@ def render(files: dict[str, EventFile], path, entry, tag, colour, scale, mode,
         style = dict(theme=theme or "dark", colormap=colormap or DEFAULT_COLORMAP)
         want_tracks, want_vertices, want_pandora = _parse_reco(reco)
         if mode == "flash3d":
-            d = ev.display_flashes_3d(**style)
+            d = display_flashes_3d(ev, flash_tag, **style)
             return d.plotly_figure(height=None), d.summary()
         if mode == "optical":
-            d = ev.display_optical(**style)
+            d = display_optical(ev, flash_tag, **style)
+            return d.plotly_figure(height=None), d.summary()
+        if mode == "light":
+            d = light_display(ev, flash_tag, light_scale, light_fill, style)
             return d.plotly_figure(height=None), d.summary()
         if mode == "3d":
             d = ev.display_3d(truth=want_truth,
@@ -561,6 +582,19 @@ def _extract_camera(relayout, fallback=None):
     if "eye" in cam and isinstance(cam["eye"], dict) and "x" in cam["eye"]:
         return cam
     return fallback
+
+
+def _save_backup(filename: str, data: bytes, what: str) -> None:
+    """Keep a copy of a download under evd_out/, as the other exports do."""
+    try:
+        os.makedirs("evd_out", exist_ok=True)
+        local_path = os.path.join("evd_out", filename)
+        with open(local_path, "wb") as f:
+            f.write(data)
+        print(f"[pylarevd] {what} saved to {local_path} ({len(data)} bytes)")
+    except Exception as e:
+        print(f"[pylarevd] Note: could not write local backup: {e}",
+              file=sys.stderr)
 
 
 def build_app(paths: list[str], geometry: str | None = None,
@@ -672,7 +706,9 @@ def build_app(paths: list[str], geometry: str | None = None,
                                       {"label": "3D space points", "value": "3d"},
                                       {"label": "Optical (PDS)", "value": "optical"},
                                       {"label": "Flashes 3D (PDS)",
-                                       "value": "flash3d"}],
+                                       "value": "flash3d"},
+                                      {"label": "Light vs time (PDS)",
+                                       "value": "light"}],
                                   value="2d", clearable=False,
                                   style={"width": "210px", **_CTL})]),
                     html.Div([html.Label("panels", style=_LABEL),
@@ -685,6 +721,25 @@ def build_app(paths: list[str], geometry: str | None = None,
                                       {"label": "split every face", "value": "none"}],
                                   value="orientation", clearable=False,
                                   style={"width": "190px", **_CTL})]),
+                    html.Div([html.Label("flash producer", style=_LABEL),
+                              dcc.Dropdown(id="flash-tag", clearable=False,
+                                           style={"width": "130px", **_CTL})]),
+                    html.Div([html.Label("light clock", style=_LABEL),
+                              dcc.Dropdown(
+                                  id="light-scale",
+                                  options=[{"label": "log after onset",
+                                            "value": "log"},
+                                           {"label": "linear", "value": "linear"}],
+                                  value="log", clearable=False,
+                                  style={"width": "150px", **_CTL})]),
+                    html.Div([html.Label("light tiles", style=_LABEL),
+                              dcc.Dropdown(
+                                  id="light-fill",
+                                  options=[{"label": "afterglow", "value": "afterglow"},
+                                           {"label": "cumulative",
+                                            "value": "cumulative"}],
+                                  value="afterglow", clearable=False,
+                                  style={"width": "125px", **_CTL})]),
                     html.Div([
                         html.Label("overlays", style=_LABEL),
                         dcc.Checklist(
@@ -734,8 +789,10 @@ def build_app(paths: list[str], geometry: str | None = None,
                                     title="Save vector PDF from current perspective",
                                     style={**_CTL, "marginRight": "6px", "padding": "6px 12px", "cursor": "pointer",
                                            "borderRadius": "4px"}),
-                        html.Button("🎞️ rotate GIF", id="snapshot-gif", n_clicks=0,
-                                    title="Export rotating 360° animated GIF of the 3D event",
+                        html.Button("🎞️ animated GIF", id="snapshot-gif", n_clicks=0,
+                                    title=("Export an animated GIF: the light "
+                                           "arriving in 'Light vs time', a "
+                                           "360° rotation in the 3D view"),
                                     style={**_CTL, "padding": "6px 12px", "cursor": "pointer",
                                            "borderRadius": "4px"}),
                     ]),
@@ -804,12 +861,15 @@ def build_app(paths: list[str], geometry: str | None = None,
                   Output("tag", "options"), Output("tag", "value"),
                   Output("colour", "options"), Output("mode", "options"),
                   Output("path-msg", "children", allow_duplicate=True),
+                  Output("flash-tag", "options"), Output("flash-tag", "value"),
                   Input("file", "value"),
                   State("entry", "value"), State("tag", "value"),
-                  State("last-event", "data"), prevent_initial_call="initial_duplicate")
-    def _on_file(path, entry, tag, last):
+                  State("last-event", "data"), State("flash-tag", "value"),
+                  prevent_initial_call="initial_duplicate")
+    def _on_file(path, entry, tag, last, flash_tag):
         if path is None or path not in files:
-            return [], None, [], None, no_update, no_update, no_update
+            return ([], None, [], None, no_update, no_update, no_update,
+                    [], None)
         f = files[path]
         # Entry numbers are an artefact of how a file was written. When the user
         # switches files mid-session, follow the *physics* event they were on --
@@ -857,9 +917,23 @@ def build_app(paths: list[str], geometry: str | None = None,
             {"label": mark("Optical (PDS)", caps["optical"]), "value": "optical",
              "disabled": not caps["optical"]},
             {"label": mark("Flashes 3D (PDS)", caps["optical"]), "value": "flash3d",
-             "disabled": not caps["optical"]}]
+             "disabled": not caps["optical"]},
+            {"label": mark("Light vs time (PDS)", caps["optical"]),
+             "value": "light", "disabled": not caps["optical"]}]
+        # Several flash finders can run on the same OpHits (opflash, opslicer)
+        # and they disagree -- opflash drops some interactions' flashes -- so
+        # the choice is the user's, not a hardcoded preference.
+        try:
+            producers = [p.split("_")[1]
+                         for p in f.art.find_product("recob::OpFlash")]
+        except Exception:
+            producers = []
+        if flash_tag not in producers:
+            flash_tag = ("opflash" if "opflash" in producers else
+                         (producers[0] if producers else None))
         return (opts, entry, tags, tag, colour_opts, mode_opts,
-                followed if followed else no_update)
+                followed if followed else no_update,
+                [{"label": p, "value": p} for p in producers], flash_tag)
 
     @app.callback(Output("truth", "options"), Output("reco", "options"),
                   Output("radio", "options"),
@@ -957,13 +1031,18 @@ def build_app(paths: list[str], geometry: str | None = None,
 
     @app.callback(Output("tag", "disabled"), Output("colour", "disabled"),
                   Output("scale", "disabled"), Output("merge", "disabled"),
+                  Output("flash-tag", "disabled"),
+                  Output("light-scale", "disabled"),
+                  Output("light-fill", "disabled"),
                   Input("mode", "value"))
     def _enable(mode):  # noqa: D401
         """Grey out every control the selected view ignores."""
-        other = mode in ("optical", "flash3d")
+        other = mode in _OPTICAL_MODES
         three_d = mode == "3d"
         readout = mode == "readout"
-        return (other or three_d), other, (other or readout), (other or readout or three_d)
+        light = mode == "light"
+        return ((other or three_d), other, (other or readout),
+                (other or readout or three_d), not other, not light, not light)
 
     @app.callback(Output("fig", "figure"), Output("summary", "children"),
                   Output("summary", "style"), Output("last-event", "data"),
@@ -976,15 +1055,21 @@ def build_app(paths: list[str], geometry: str | None = None,
                   Input("radio", "value"),
                   Input("camera-ref", "data"),
                   Input("show-symbols", "data"),
+                  Input("flash-tag", "value"),
+                  Input("light-scale", "value"),
+                  Input("light-fill", "value"),
                   State("fig", "relayoutData"),
                   State("camera-current", "data"),
                   State("last-event", "data"))
     def _render(path, entry, tag, colour, scale, mode, truth, merge, reco,
                 theme, colormap, radio, cam_ref, show_symbols,
+                flash_tag, light_scale, light_fill,
                 relayout, last_cam, last_ev):
         fig, summary = render(files, path, entry, tag, colour, scale, mode, truth,
                               merge, reco, theme, colormap, bool(radio),
-                              particle_symbols=bool(show_symbols))
+                              particle_symbols=bool(show_symbols),
+                              flash_tag=flash_tag, light_scale=light_scale,
+                              light_fill=light_fill)
         base = {"fontSize": "11px", "margin": "0 0 6px 0", "whiteSpace": "pre-wrap",
                 "fontFamily": "ui-monospace, monospace"}
         seen = None
@@ -1074,10 +1159,14 @@ def build_app(paths: list[str], geometry: str | None = None,
                   State("fig", "relayoutData"),
                   State("camera-ref", "data"),
                   State("camera-current", "data"),
+                  State("flash-tag", "value"),
+                  State("light-scale", "value"),
+                  State("light-fill", "value"),
                   prevent_initial_call=True)
     def _snapshot(n_clicks, path, entry, tag, colour, scale, mode, truth,
                   merge, reco, theme, colormap, radio, show_symbols,
-                  relayout, cam_ref, current_cam):
+                  relayout, cam_ref, current_cam, flash_tag, light_scale,
+                  light_fill):
         import io
         import matplotlib.pyplot as plt
 
@@ -1125,12 +1214,18 @@ def build_app(paths: list[str], geometry: str | None = None,
                 fig_mpl.savefig(buf, format="pdf", bbox_inches="tight", pad_inches=0.3, dpi=300)
                 plt.close(fig_mpl)
             elif mode == "flash3d":
-                d = ev.display_flashes_3d(**style)
+                d = display_flashes_3d(ev, flash_tag, **style)
                 fig_mpl = d.figure()
                 fig_mpl.savefig(buf, format="pdf", bbox_inches="tight", dpi=300)
                 plt.close(fig_mpl)
+            elif mode == "light":
+                # the static light map: every tile's PE over the whole window
+                d = light_display(ev, flash_tag, light_scale, light_fill, style)
+                fig_mpl = d.figure(None)
+                fig_mpl.savefig(buf, format="pdf", dpi=300)
+                plt.close(fig_mpl)
             elif mode == "optical":
-                d = ev.display_optical(**style)
+                d = display_optical(ev, flash_tag, **style)
                 fig_mpl = d.figure()
                 fig_mpl.savefig(buf, format="pdf", bbox_inches="tight", dpi=300)
                 plt.close(fig_mpl)
@@ -1185,10 +1280,14 @@ def build_app(paths: list[str], geometry: str | None = None,
                   State("fig", "relayoutData"),
                   State("camera-ref", "data"),
                   State("camera-current", "data"),
+                  State("flash-tag", "value"),
+                  State("light-scale", "value"),
+                  State("light-fill", "value"),
                   prevent_initial_call=True)
     def _snapshot_gif(n_clicks, path, entry, tag, colour, scale, mode, truth,
                       merge, reco, theme, colormap, radio, show_symbols,
-                      relayout, cam_ref, current_cam):
+                      relayout, cam_ref, current_cam, flash_tag, light_scale,
+                      light_fill):
         if not path or entry is None or path not in files:
             return no_update
         try:
@@ -1197,6 +1296,14 @@ def build_app(paths: list[str], geometry: str | None = None,
             want_truth = bool(truth)
 
             run, subrun, ev_num = ev.id
+            if mode == "light":
+                d = light_display(ev, flash_tag, light_scale, light_fill, style)
+                gif_bytes = d.animation_bytes("gif")
+                filename = (f"pylarevd_run{run}_sub{subrun}_ev{ev_num}_light_"
+                            f"{flash_tag or 'default'}.gif")
+                _save_backup(filename, gif_bytes, "Light animation GIF")
+                return dcc.send_bytes(gif_bytes, filename=filename,
+                                      type="image/gif")
             filename = f"pylarevd_run{run}_sub{subrun}_ev{ev_num}_3d_rotation.gif"
 
             cam = _extract_camera(relayout) or cam_ref or current_cam
@@ -1228,14 +1335,7 @@ def build_app(paths: list[str], geometry: str | None = None,
             gif_bytes = d.rotate_gif(elev=elev, start_azim=azim, zoom=zoom, pad=0.20,
                                      particle_symbols=bool(show_symbols))
 
-            try:
-                os.makedirs("evd_out", exist_ok=True)
-                local_path = os.path.join("evd_out", filename)
-                with open(local_path, "wb") as f:
-                    f.write(gif_bytes)
-                print(f"[pylarevd] Rotating GIF saved to {local_path} ({len(gif_bytes)} bytes)")
-            except Exception as e:
-                print(f"[pylarevd] Note: could not write local GIF backup: {e}", file=sys.stderr)
+            _save_backup(filename, gif_bytes, "Rotating GIF")
 
             return dcc.send_bytes(gif_bytes, filename=filename, type="image/gif")
         except Exception as exc:

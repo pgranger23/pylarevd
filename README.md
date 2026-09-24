@@ -62,8 +62,8 @@ If port 8050 is taken (a colleague on a shared machine, or your own earlier
 session), use `--port 8051` and change both numbers in the tunnel to match.
 
 Once it is up: step through events with the ◀ ▶ buttons or the **left/right
-arrow keys**, switch between 2-D physical, 2-D readout, 3-D, optical and 3-D
-flash views, colour hits by charge or by the object that owns them, toggle truth
+arrow keys**, switch between 2-D physical, 2-D readout, 3-D, optical, 3-D
+flash and animated light views, colour hits by charge or by the object that owns them, toggle truth
 and reco overlays, and switch theme and colormap. Every control is mirrored into
 the URL, so you can paste a link to exactly what you are looking at — see
 [Browser reference](#browser-reference) for the details, including opening files
@@ -296,6 +296,7 @@ log₁₀ and relabels the ticks — the hover box still reports the real value.
 | `pylario` | `pylario/event.py` | `EventFile` / `Event` / `Hits` user API |
 | `pylario` | `pylario/physics.py` | PDG names, interaction modes, kinematics |
 | `pylarevd` | `pylarevd/display.py` | panels, 2-D/3-D/optical rendering (matplotlib + plotly) |
+| `pylarevd` | `pylarevd/light.py` | photon-detector hits and flashes animated in time |
 | `pylarevd` | `pylarevd/theme.py` | themes, colormaps, and marker cycles |
 | `pylarevd` | `pylarevd/cli.py` | `python -m pylarevd` batch rendering |
 | `pylarevd` | `pylarevd/app.py` | `python -m pylarevd.app` interactive browser (Dash) |
@@ -384,7 +385,8 @@ preferred.
 [Running it](#the-interactive-browser-start-here) is at the top of this file.
 It steps through events without regenerating anything: file/event selection with
 prev/next, hit product, colour-by (including by owning object) and scale,
-2D physical / 2D readout / 3D / optical, panel grouping, and truth and
+2D physical / 2D readout / 3D / optical / flashes 3D / light vs time, panel
+grouping, the flash producer and light-animation settings, and truth and
 reco overlays. Controls a view ignores are greyed out — including the truth and
 reco checkboxes, which only apply to the physical views. Binds to localhost only
 unless you pass `--host`.
@@ -427,8 +429,8 @@ so a link carrying the event identity still lands correctly when pointed at
 another reconstruction pass of the same data. If the file does not contain that
 event, the link falls back to `entry` rather than failing.
 
-The CLI covers the same ground: `--mode {2d,readout,3d,optical}`, `--reco`,
-and the full `--colour-by` set.
+The CLI covers the same ground: `--mode {2d,readout,3d,optical,flash3d,light}`,
+`--reco`, `--flash-tag`, and the full `--colour-by` set.
 
 ## True neutrino interaction
 
@@ -544,10 +546,75 @@ position along it is unknown. If a sample does reconstruct x, flashes are drawn
 as points instead. `OpticalActivity.has_x` says which, and the summary states it
 outright.
 
-The time window defaults to +-50 us around the brightest flash, matching the 2-D
-optical view; the whole readout is milliseconds wide and dominated by
-radiological light. Both the window and any cap on the number drawn are stated
-in the title rather than silently applied.
+The time window defaults to +-50 us around the brightest burst of OpHit light,
+matching the 2-D optical view and the light animation; the whole readout is
+milliseconds wide and dominated by radiological light. It used to centre on the
+brightest *flash*, which fails exactly when the flash finder dropped the
+interaction's flash (see below). Both the window and any cap on the number drawn
+are stated in the title rather than silently applied. `--flash-tag opslicer`
+(or `display_flashes_3d(ev, "opslicer")`) picks another flash producer.
+
+## Light vs time (animated PDS view)
+
+```bash
+python -m pylarevd reco.root -e 0 --mode light            # GIF + static map
+python -m pylarevd reco.root -e 0 --mode light --html     # + interactive page
+```
+
+```python
+from pylarevd import display_light
+a = display_light(ev)                  # or display_light(ev, "opslicer")
+a.save_animation("light.gif")          # .mp4 too, if ffmpeg is on PATH
+a.save_html("light.html")              # play button + time slider
+a.save("light.png")                    # static: PE collected over the window
+a.save("t.png", frame=20)              # one frame
+print(a.summary())
+```
+
+Every photon detector is a tile on the wall it is mounted on (beam z across, y
+up; one panel per APA plane, so three for the full FD-HD module). Tiles light
+up as their OpHits arrive, and reconstructed flashes appear as their +-1 sigma
+(y, z) ellipse at their own time, bright when new and fading to a ghost. A strip
+underneath shows the PE arriving in each frame, split into hits that belong to a
+flash and hits that belong to none, with every flash as a stem at its time and a
+playhead. The true vertex is a star. In the browser pick **Light vs time
+(PDS)**; the **animated GIF** button then exports this animation.
+
+**The clock.** By default frames are log-spaced after `t0`, the onset of the
+brightest OpHit light burst: a short linear pre-roll, then one 16 ns hit
+quantum per frame while the prompt light spreads out from the vertex, then
+geometric growth to ~0.4 us per frame by +10 us for the slow component and
+later flashes (Michel electrons). On the FD-HD sample the prompt light reaches
+detectors 2-4 m from the vertex ~70 ns after the onset and those beyond 8 m
+after ~250 ns, so a uniform clock would show it in a single frame.
+`--light-clock linear` (or `time_scale="linear"`) gives a uniform one;
+`--window LO,HI` and `--t0` override the defaults.
+
+**The tiles.** `afterglow` (default) keeps 70 % of a tile's PE from frame to
+frame, so an arrival flares up and fades -- that is what makes arrivals
+visible; `cumulative` accumulates instead. A tile that receives light in the
+current frame is outlined. The colour range is fixed for the whole animation,
+so frames compare. Tiles are cells of the detector grid, not the sensor
+outline.
+
+**Flash-hit links** come from the `OpFlash`<->`OpHit` association and are
+checked, not trusted: every flash's PE must equal the summed PE of its hits.
+On the FD-HD sample `opflash` passes exactly; `opslicer`'s association links
+its brightest flash to 1853 hits spread over the whole 4.5 ms readout, fails,
+and is not used (the strip then shows total OpHit PE).
+
+**Missing and misplaced flashes.** Two failures this view makes visible, both on
+the FD-HD atmospheric sample:
+
+- `opflash` sometimes has **no flash at the interaction at all** -- 23 kPE of
+  hits at t0 and nothing reconstructed (the `RemoveLateLight` divide-by-width
+  bug in LArSoft's `OpFlashAlg`). The summary says so and names the other flash
+  producers in the file; `opslicer` finds that flash (26 kPE).
+- `opslicer` stores **negative widths and a centre pinned to one detector** for
+  every flash. Wherever a flash's width is negative or not a number, its centre
+  and width are recomputed as the PE-weighted mean and RMS of the detectors in
+  `fPEperOpDet` -- which reproduces `opflash`'s stored centres to 1e-12 cm --
+  and the summary counts them. All three optical views apply this.
 
 ## Hit disambiguation
 

@@ -7,7 +7,8 @@ import os
 import sys
 
 from pylario import ArtReadError, EventFile, GeometryError
-from .display import PRESETS
+from .display import (PRESETS, display_flashes_3d, display_light,
+                      display_optical)
 from .theme import COLORMAPS, DEFAULT_COLORMAP, THEMES
 
 
@@ -45,7 +46,7 @@ def _parse_events(spec: str, n: int) -> list[int]:
 
 
 _MANIFEST_FIELDS = ("entry", "run", "subrun", "event", "hits", "headline",
-                    "png", "html", "status", "error")
+                    "png", "html", "status", "error", "anim")
 
 
 def _write_manifest(outdir: str, rows: list[dict]) -> None:
@@ -66,7 +67,7 @@ def _write_manifest(outdir: str, rows: list[dict]) -> None:
 
     def cell(row, key):
         value = row.get(key, "")
-        if key in ("png", "html") and value:
+        if key in ("png", "html", "anim") and value:
             return f'<a href="{_html.escape(value)}">{key}</a>'
         return _html.escape(str(value))
 
@@ -151,8 +152,33 @@ def main(argv=None) -> int:
                     help="hit quantity, or the object each hit belongs to "
                          "(2-D and readout views only)")
     ap.add_argument("--mode", default="2d",
-                    choices=["2d", "readout", "3d", "optical", "flash3d"],
-                    help="which view to render (default: the 2-D physical view)")
+                    choices=["2d", "readout", "3d", "optical", "flash3d", "light"],
+                    help="which view to render (default: the 2-D physical view); "
+                         "'light' animates photon-detector hits and flashes in time")
+    lg = ap.add_argument_group("photon detectors (--mode optical, flash3d, light)")
+    lg.add_argument("--flash-tag", default=None, metavar="LABEL",
+                    help="flash producer module label, e.g. opflash or opslicer "
+                         "(default: prefer opflash)")
+    lg.add_argument("--light-clock", default="log", choices=["log", "linear"],
+                    help="light animation frame spacing: log after the light "
+                         "onset (resolves the prompt light, default) or linear")
+    lg.add_argument("--light-fill", default="afterglow",
+                    choices=["afterglow", "cumulative"],
+                    help="light animation tiles: flare and fade (default) or "
+                         "accumulate")
+    lg.add_argument("--frames", type=int, default=120,
+                    help="light animation frames (default 120)")
+    lg.add_argument("--window", default=None, metavar="LO,HI",
+                    help="light animation window in us, absolute "
+                         "(default: 0.25 us before to 10 us after the onset)")
+    lg.add_argument("--t0", type=float, default=None,
+                    help="light animation time origin in us "
+                         "(default: onset of the brightest light burst)")
+    lg.add_argument("--anim", default="gif", choices=["gif", "mp4", "none"],
+                    help="light animation file format (mp4 needs ffmpeg; "
+                         "default gif)")
+    lg.add_argument("--fps", type=float, default=12.0,
+                    help="light animation frames per second (default 12)")
     ap.add_argument("--reco", action="store_true",
                     help="overlay reconstructed tracks, vertices and showers")
     ap.add_argument("--merge", default="orientation",
@@ -217,6 +243,16 @@ def main(argv=None) -> int:
             print(f"  [{i}] run {run} subrun {sub} event {ev}")
         return 0
 
+    window = None
+    if a.window:
+        try:
+            lo, hi = (float(v) for v in a.window.split(","))
+            window = (lo, hi)
+        except ValueError:
+            print(f"error: --window {a.window!r}: expected LO,HI in us",
+                  file=sys.stderr)
+            return 2
+
     try:
         entries = _parse_events(a.events, len(f))
     except ValueError as exc:
@@ -238,9 +274,13 @@ def main(argv=None) -> int:
                                      radiologicals=not a.no_radiologicals,
                                      **style)
             elif a.mode == "flash3d":
-                disp = ev.display_flashes_3d(**style)
+                disp = display_flashes_3d(ev, a.flash_tag, **style)
             elif a.mode == "optical":
-                disp = ev.display_optical(**style)
+                disp = display_optical(ev, a.flash_tag, **style)
+            elif a.mode == "light":
+                disp = display_light(ev, a.flash_tag, time_scale=a.light_clock,
+                                     fill=a.light_fill, n_frames=a.frames,
+                                     window=window, t0=a.t0, **style)
             else:
                 disp = ev.display(a.tag, truth=a.truth, reco=a.reco,
                                   radiologicals=not a.no_radiologicals,
@@ -255,6 +295,11 @@ def main(argv=None) -> int:
                    "hits": len(getattr(disp, "hits", []) or []),
                    "headline": (disp.neutrino.headline() if disp.neutrino else ""),
                    "png": "", "html": "", "status": "ok", "error": ""}
+            if a.mode == "light" and a.anim != "none":
+                anim = disp.save_animation(
+                    _unique_path(f"{stem}_light.{a.anim}", taken), fps=a.fps)
+                row["anim"] = os.path.basename(anim)
+                print("  ->", anim)
             if not a.only_html:
                 row["png"] = os.path.basename(
                     disp.save(_unique_path(f"{stem}.png", taken), dpi=a.dpi))

@@ -939,7 +939,8 @@ def test_3d_puts_gravity_up():
 # ---------------------------------------------------------------------------
 
 _URL_VALS = ["/data/a.root", 7, "hitfd", "track", "auto", "2d", "view",
-             "light", "magma", ["on"], [], ["on"]]
+             "light", "magma", ["on"], [], ["on"],
+             "opslicer", "linear", "cumulative"]
 _BY_NAME = {"a.root": "/data/a.root", "b.root": "/data/b.root"}
 
 

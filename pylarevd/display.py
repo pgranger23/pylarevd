@@ -2278,6 +2278,32 @@ class Display3D(_TruthInfo):
         return buf.getvalue()
 
 
+def _light_centre(op) -> float | None:
+    """Time to centre a default optical window on, in us.
+
+    The onset of the brightest burst of OpHit light when there are hits,
+    otherwise the brightest flash. Keying on flashes alone fails exactly when
+    it matters: a flash finder can drop the interaction's flash (LArSoft
+    OpFlashFinder's late-light removal does, on a few percent of events), and
+    the window then centred on a radiological flash microseconds away -- on
+    the FD-HD sample, a 1.4 kPE flash 19 us after a 23 kPE interaction that
+    had no flash at all.
+    """
+    from .light import hit_time_quantum, light_onset
+    if not len(op):
+        return None
+    hits = ~np.asarray(op.is_flash)
+    if hits.any():
+        t, pe = np.asarray(op.time)[hits], np.asarray(op.pe)[hits]
+        onset = light_onset(t, pe, hit_time_quantum(t))
+        if onset is not None:
+            return float(onset)
+    fl = np.asarray(op.is_flash)
+    if fl.any():
+        return float(np.asarray(op.time)[np.argmax(np.where(fl, op.pe, -np.inf))])
+    return float(np.asarray(op.time)[np.argmax(op.pe)])
+
+
 class FlashDisplay3D(_TruthInfo):
     """Reconstructed optical flashes in the detector volume.
 
@@ -2308,20 +2334,20 @@ class FlashDisplay3D(_TruthInfo):
 
     @property
     def window(self):
-        """(lo, hi) time window, defaulting around the brightest flash.
+        """(lo, hi) time window, defaulting around the brightest light burst.
 
         The readout is milliseconds wide and dominated by radiological light;
         without a default window the brightest 200 flashes are drawn from the
-        whole of it and the physics flash is just one bar among them. Same rule
-        as the 2-D optical view, so the two agree on what they are showing.
+        whole of it and the physics flash is just one bar among them. Centred
+        by :func:`_light_centre`, the same rule as the 2-D optical view and
+        the light animation, so all three agree on what they are showing.
         """
         if self.time_range is not None:
             return tuple(self.time_range)
         o = self.op
         if not len(o) or not o.is_flash.any():
             return None
-        brightest = int(np.argmax(np.where(o.is_flash, o.pe, -np.inf)))
-        centre = float(o.time[brightest])
+        centre = _light_centre(o)
         return (centre - 50.0, centre + 50.0)
 
     @cached_property
@@ -2378,7 +2404,21 @@ class FlashDisplay3D(_TruthInfo):
             lines.append(head)
         if not len(f):
             lines.append("  no flashes in the time window")
+            o = self.op
+            win = self.window
+            hits = ~np.asarray(o.is_flash)
+            if win is not None and hits.any():
+                m = hits & (o.time >= win[0]) & (o.time <= win[1])
+                if o.pe[m].sum() >= 100:
+                    lines.append(
+                        f"  ! but {o.pe[m].sum():,.0f} PE of optical hits are "
+                        f"in it: {o.label.split(' + ')[0]} reconstructed no "
+                        f"flash for this light (see the light animation, or "
+                        f"another flash producer)")
             return "\n".join(lines)
+        if getattr(self, "repaired", 0):
+            lines.append(f"  {self.repaired} flashes had no usable (y, z) from "
+                         "the flash finder; recomputed from per-detector PE")
         lines.append(f"  drift position: "
                      + ("reconstructed" if self.op.has_x else
                         "NOT reconstructed by this flash finder - drawn as a "
@@ -2480,7 +2520,13 @@ class FlashDisplay3D(_TruthInfo):
 
     # ---- interactive (plotly) ------------------------------------------
 
-    def plotly_figure(self):
+    def plotly_figure(self, *, height: int | None = None):
+        """Interactive 3-D view. ``height=None`` fills the container.
+
+        Takes ``height`` like the other displays: the browser app passes it to
+        every view, and this signature lacking it made the Flashes-3D mode
+        raise TypeError on every render.
+        """
         import plotly.graph_objects as go
         t = self.theme
         fig = go.Figure()
@@ -2561,6 +2607,7 @@ class FlashDisplay3D(_TruthInfo):
             legend=dict(bgcolor=t.legend_bg, bordercolor=t.legend_edge,
                         borderwidth=1, font=dict(color=t.fg)),
             uirevision="flash3d",      # keep the camera across event steps
+            height=height,
             margin=dict(l=0, r=0, t=50, b=0))
         return fig
 
@@ -2597,7 +2644,7 @@ class OpticalDisplay(_TruthInfo):
 
     @property
     def _window(self):
-        """(lo, hi) time window, defaulting to a span around the brightest flash.
+        """(lo, hi) time window, defaulting to a span around the brightest light.
 
         The full readout is milliseconds wide and dominated by radiological
         activity; the physics flash is nanoseconds wide. Showing everything by
@@ -2605,12 +2652,9 @@ class OpticalDisplay(_TruthInfo):
         """
         if self.time_range is not None:
             return tuple(self.time_range)
-        o = self.op
-        if not len(o):
+        centre = _light_centre(self.op)
+        if centre is None:
             return None
-        brightest = int(np.argmax(np.where(o.is_flash, o.pe, -np.inf))) \
-            if o.is_flash.any() else int(np.argmax(o.pe))
-        centre = float(o.time[brightest])
         return (centre - 50.0, centre + 50.0)
 
     def _flash_y_range(self) -> tuple[float, float]:
@@ -2661,6 +2705,9 @@ class OpticalDisplay(_TruthInfo):
         if nonpos:
             lines.append(f"  {nonpos} entries have PE <= 0 (baseline undershoot); "
                          "they sit at the bottom of the log colour scale")
+        if getattr(self, "repaired", 0):
+            lines.append(f"  {self.repaired} flashes had no usable (y, z) from "
+                         "the flash finder; recomputed from per-detector PE")
         window = self._window
         if window:
             lines.append(f"  showing t in [{window[0]:.1f}, {window[1]:.1f}] us "
@@ -2880,9 +2927,27 @@ def display(event, tag: str | None = None, *, truth: bool = False,
                         **kwargs)
 
 
-def display_flashes_3d(event, **kwargs) -> FlashDisplay3D:
-    """Reconstructed flashes in the detector volume (:class:`FlashDisplay3D`)."""
-    return FlashDisplay3D(event, event.optical(), **kwargs)
+def display_flashes_3d(event, tag: str | None = None, **kwargs) -> FlashDisplay3D:
+    """Reconstructed flashes in the detector volume (:class:`FlashDisplay3D`).
+
+    ``tag`` picks the flash producer (``opflash``, ``opslicer``, ...).
+    """
+    from .light import repair_flash_positions
+    optical, n = repair_flash_positions(event, event.optical(tag))
+    d = FlashDisplay3D(event, optical, **kwargs)
+    d.repaired = n
+    return d
+
+
+def display_light(event, tag: str | None = None, **kwargs):
+    """Photon-detector hits and flashes as they arrive in time.
+
+    Returns a :class:`pylarevd.light.LightAnimation`; ``tag`` picks the flash
+    producer. Save it with ``.save_animation("x.gif")``, ``.save_html(...)``
+    or, for one frame, ``.save("x.png", frame=k)``.
+    """
+    from .light import LightAnimation
+    return LightAnimation(event, flash_tag=tag, **kwargs)
 
 
 def display_optical(event, tag: str | None = None, **kwargs) -> OpticalDisplay:
@@ -2894,7 +2959,11 @@ def display_optical(event, tag: str | None = None, **kwargs) -> OpticalDisplay:
         if "opflash" in (exc.args[0] if exc.args else ""):
             hint = " -- this file probably carries raw waveforms only, not reco"
         raise type(exc)(f"{exc}{hint}") from exc
-    return OpticalDisplay(event, optical=optical, **kwargs)
+    from .light import repair_flash_positions
+    optical, n = repair_flash_positions(event, optical)
+    d = OpticalDisplay(event, optical=optical, **kwargs)
+    d.repaired = n
+    return d
 
 
 def display_3d(event, spacepoint_tag: str | None = None, *, truth: bool = False,
