@@ -333,3 +333,34 @@ File: `static/viewlight.js` only (no edits to main.js, index.html, style.css, vi
 - **Screenshot**: `getCanvas()` renders synchronously and returns GL canvas + overlay composited (the legend DOM element is not included).
 - **Test hooks**: `app.views.view2d.debugRender()` (sync render + `gl.finish`), `debugState()` (views, rects), `debugHitPx(panel, k)`, `resetView()`.
 - Known gaps: no equal-aspect option; no vertex/label hover; legend not in screenshot; `size` slider is not in the URL; hit-point size is a CSS-px diameter growing mildly with zoom; the draw is not culled for panels outside the viewport (not needed so far).
+
+## Parity work (round 2) — shared contract
+
+Restores the Dash app's remaining features. Owners: F (main.js, index.html,
+style.css, view2d.js, export.py), G (view3d.js, new viewoptical.js), H
+(server.py, new static/exports.js). Shared names, fixed here:
+
+- `state.view` gains `'optical'` (panel `#panel-optical`, owned by viewoptical.js)
+  and `'flash3d'` (uses `#panel-3d`; view3d draws flash bars instead of / on top of
+  the charge, see below). F adds them to the selector, the layout CSS and the view
+  registry (`import viewoptical from './viewoptical.js'`, stub until G fills it).
+- `state.ov.pvtx` (default on): the Pandora interaction vertex (`vtx/role == 1`),
+  toggled separately from `state.ov.vtx` (daughter + secondary vertices, roles 2
+  and 3). F adds the toggle and handles 2-D; G handles 3-D.
+- colour-by `'chisq'` (space points only): exporter emits `sp/chisq` f32 (F); 3-D
+  colouring (G); 2-D falls back to charge.
+- `merge2d` URL param (`orientation` | `view` | `none`), registered by view2d (F).
+  The exporter emits extra panel sets: `meta.panels_view`, `meta.panels_none`, and
+  `hits/panel_view`, `hits/panel_none` u8. Projected overlays (`tracks2d`, ...) are
+  emitted for those groupings too, under `tracks2d_view/...` and
+  `tracks2d_none/...` with the same layout.
+- `view3d.cameraInfo()` (G) → `{position:[x,y,z], target:[x,y,z], up:[x,y,z]}` in
+  detector coordinates (cm). exports.js (H) uses it for the 3-D PDF and rotation GIF.
+- exports.js (H) adds the "PDF" and "GIF" buttons to the toolbar itself (DOM
+  injection); F adds only `import './exports.js'` to main.js.
+- `GET /api/export?file=&entry=&hits=&flash=&kind=pdf|gif&view=<state.view>&...`
+  (H) renders with the existing Python renderers (EventDisplay.figure,
+  Display3D.figure / rotate_gif, OpticalDisplay, FlashDisplay3D,
+  LightAnimation / ChargeLightAnimation save_animation), passing the relevant
+  state (colour, scale, cmap, theme, overlays, merge2d, light params, camera).
+- `POST /api/open` already exists (WP-B); F adds the "open by path" box.
