@@ -31,6 +31,12 @@ select, input[type=number], button {
   border-radius: 4px; padding: 2px 6px; font: inherit;
 }
 input[type=number] { width: 5em; }
+input[type=text] { background: var(--axes-bg); color: var(--fg); border: 1px solid var(--legend-edge); border-radius: 4px; padding: 2px 6px; font: inherit; }
+#inp-open { width: 22em; }
+button:disabled, input:disabled { opacity: 0.5; cursor: not-allowed; }
+.open-msg { color: var(--muted); max-width: 40em; white-space: normal; }
+.open-msg.error { color: #f87171; }
+[hidden] { display: none !important; }
 button { cursor: pointer; }
 button:hover { border-color: var(--accent); }
 .evlabel span { color: var(--fg); min-width: 11em; text-align: center; display: inline-block; font-variant-numeric: tabular-nums; }
@@ -43,6 +49,10 @@ button:hover { border-color: var(--accent); }
 #main[data-view="2d"] #panel-2d { display: block; }
 #main[data-view="light"] { grid-template-columns: 1fr; }
 #main[data-view="light"] #panel-light { display: block; }
+#main[data-view="optical"] { grid-template-columns: 1fr; }
+#main[data-view="optical"] #panel-optical { display: block; }
+#main[data-view="flash3d"] { grid-template-columns: 1fr; }
+#main[data-view="flash3d"] #panel-3d { display: block; }
 #main[data-view="charge+light"] { grid-template-columns: 3fr 2fr; }
 #main[data-view="charge+light"] #panel-3d, #main[data-view="charge+light"] #panel-light { display: block; }
 #main[data-view="2d+3d"] { grid-template-columns: 1fr 1fr; }

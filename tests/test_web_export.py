@@ -182,6 +182,39 @@ def test_fd_event_content(fd_event):
 
 
 @needs_fd
+def test_fd_panel_groupings(fd_event):
+    f, (h, a) = fd_event
+    from pylarevd.display import EventDisplay
+    m = h["meta"]
+    n = len(f[1].hits("hitfd"))
+    for sf, mg in (("_view", "view"), ("_none", "none")):
+        d = EventDisplay(f[1], hits=f[1].hits("hitfd"), merge=mg)
+        assert [p["title"] for p in m[f"panels{sf}"]] == [p.title for p in d.panels]
+        assert all(p["faces"] for p in m[f"panels{sf}"])
+        assert a[f"hits/panel{sf}"].shape == (n,)
+        for k, p in enumerate(d.panels):
+            assert np.array_equal(a[f"hits/panel{sf}"] == k, p.mask)
+        for pre, key in (("tracks2d", "track"), ("mc2d", "index"), ("showers2d", "shower"),
+                         ("vtx2d", None)):
+            if pre == "vtx2d":
+                assert len(a[f"vtx2d{sf}/hv"]) == len(a[f"vtx2d{sf}/panel"]) == len(a[f"vtx2d{sf}/index"])
+                assert a[f"vtx2d{sf}/panel"].max() < len(m[f"panels{sf}"])
+                continue
+            _check_offsets(a, f"{pre}{sf}", len(a[f"{pre}{sf}/panel"]))
+            assert len(a[f"{pre}{sf}/{key}"]) == len(a[f"{pre}{sf}/panel"])
+            assert a[f"{pre}{sf}/panel"].max() < len(m[f"panels{sf}"])
+        assert len(m["truth"][f"vertex2d{sf}"]) == len(d.panels)
+    # the finest grouping never has fewer panels than the coarsest
+    assert len(m["panels_none"]) >= len(m["panels_view"])
+
+
+@needs_fd
+def test_fd_spacepoint_chisq(fd_event):
+    f, (h, a) = fd_event
+    assert a["sp/chisq"].shape == (len(a["sp/xyz"]),) and a["sp/chisq"].dtype == np.float32
+
+
+@needs_fd
 def test_fd_panel_matches_display(fd_event):
     f, (h, a) = fd_event
     from pylarevd.display import EventDisplay

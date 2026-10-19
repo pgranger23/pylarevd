@@ -24,6 +24,8 @@ from .bundle import bundle_bytes
 #: spacepoint/hit group kinds exported as ``hits/group/<kind>``
 GROUP_KINDS = ("track", "shower", "pfparticle", "cluster", "slice")
 NO_PANEL = 255
+#: extra panel groupings shipped next to the default (orientation): suffix, EventDisplay merge
+GROUPINGS = (("_view", "view"), ("_none", "none"))
 #: above this many true-trajectory points, mc2d covers from_interaction only
 MC2D_FULL_MAX_POINTS = 400_000
 #: above this many true particles, labels match against from_interaction ones only
@@ -277,6 +279,7 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
 
     # ---- hits + panels -------------------------------------------------
     d = None
+    extra: dict = {}     # suffix -> EventDisplay for the other panel groupings
     if hits is not None and len(hits):
         d = section("display", lambda: EventDisplay(
             ev, hits=hits, truth=deposits, tracks=tracks, vertices=vertices,
@@ -300,6 +303,19 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         arrays["hits/chan_view"] = np.asarray(hits.chan_view, np.int8)
         arrays["hits/drift_sign"] = np.asarray(hits.drift_sign, np.int8)
         meta["panels"] = [_panel_meta(d, k, p) for k, p in enumerate(panels)]
+        # the other two panel groupings (merge="view" / "none"), shipped as extra
+        # panel sets so the browser switches between them without a refetch
+        for sf, mg in GROUPINGS:
+            def _extra(sf=sf, mg=mg):
+                dx = EventDisplay(ev, hits=hits, truth=deposits, tracks=tracks,
+                                  vertices=vertices, showers=showers, mc=mc, merge=mg)
+                px = np.full(len(hits), NO_PANEL, np.uint8)
+                for k, p in enumerate(dx.panels):
+                    px[p.mask] = k
+                arrays[f"hits/panel{sf}"] = px
+                meta[f"panels{sf}"] = [_panel_meta(dx, k, p) for k, p in enumerate(dx.panels)]
+                extra[sf] = dx
+            section(f"panels{sf}", _extra)
         # the classic readout view (channel vs tick), one panel per plane
         try:
             from ..display import _readout_panels
@@ -353,7 +369,7 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         avail["spacepoints"] = True
         arrays["sp/xyz"] = _f32(spacepoints.xyz)
         arrays["sp/charge"] = _f32(spacepoints.charge)
-        for name in ("amplitude", "tick"):
+        for name in ("amplitude", "tick", "chisq"):
             v = getattr(spacepoints, name, None)
             if v is not None:
                 arrays[f"sp/{name}"] = _f32(v)
@@ -366,8 +382,9 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         arrays["tracks/id"] = np.asarray(tracks.id, np.int32)
         arrays["tracks/chi2"] = _f32(tracks.chi2)
         if d is not None:
-            section("tracks2d", lambda: _add_projected(
-                arrays, "tracks2d", "track", d, list(tracks.points), panels))
+            for sf, dd in [("", d)] + list(extra.items()):
+                section(f"tracks2d{sf}", lambda sf=sf, dd=dd: _add_projected(
+                    arrays, f"tracks2d{sf}", "track", dd, list(tracks.points), dd.panels))
     if showers is not None:
         avail["showers"] = True
         arrays["showers/start"] = _f32(showers.start)
@@ -376,28 +393,29 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         arrays["showers/angle"] = _f32(showers.open_angle)
         arrays["showers/id"] = np.asarray(showers.id, np.int32)
         if d is not None:
-            def cones():
+            def cones(sf, dd):
                 polys, owner, pan = [], [], []
-                full = d.showers
+                full = dd.showers
                 try:
-                    for k, panel in enumerate(panels):
+                    for k, panel in enumerate(dd.panels):
                         for j in range(len(full)):
-                            d.showers = full[[j]]
-                            for w, x in d._shower_wx(panel):
+                            dd.showers = full[[j]]
+                            for w, x in dd._shower_wx(panel):
                                 polys.append(np.column_stack([w, x]))
                                 owner.append(j)
                                 pan.append(k)
                 finally:
-                    d.showers = full
+                    dd.showers = full
                 lens = np.array([len(p) for p in polys], np.int64)
                 off = np.zeros(len(polys) + 1, np.uint32)
                 off[1:] = np.cumsum(lens)
-                arrays["showers2d/points"] = (_f32(np.concatenate(polys)) if polys
-                                              else np.zeros((0, 2), np.float32))
-                arrays["showers2d/offsets"] = off
-                arrays["showers2d/panel"] = np.asarray(pan, np.uint8)
-                arrays["showers2d/shower"] = np.asarray(owner, np.int32)
-            section("showers2d", cones)
+                arrays[f"showers2d{sf}/points"] = (_f32(np.concatenate(polys)) if polys
+                                                   else np.zeros((0, 2), np.float32))
+                arrays[f"showers2d{sf}/offsets"] = off
+                arrays[f"showers2d{sf}/panel"] = np.asarray(pan, np.uint8)
+                arrays[f"showers2d{sf}/shower"] = np.asarray(owner, np.int32)
+            for sf, dd in [("", d)] + list(extra.items()):
+                section(f"showers2d{sf}", lambda sf=sf, dd=dd: cones(sf, dd))
     if vertices is not None:
         avail["vertices"] = True
         arrays["vtx/xyz"] = _f32(vertices.xyz)
@@ -412,19 +430,20 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         arrays["vtx/role"] = role
         arrays["vtx/id"] = np.asarray(vertices.id, np.int32)
         if d is not None:
-            hv, pan, idx = [], [], []
-            for k, panel in enumerate(panels):
-                pr = d.project_points(panel, vertices.xyz[:, 0], vertices.xyz[:, 1],
-                                      vertices.xyz[:, 2])
-                if pr is None:
-                    continue
-                ok = np.flatnonzero(np.isfinite(pr[0]) & np.isfinite(pr[1]))
-                hv.append(np.column_stack([pr[0][ok], pr[1][ok]]))
-                pan.append(np.full(len(ok), k, np.uint8))
-                idx.append(ok.astype(np.int32))
-            arrays["vtx2d/hv"] = _stack(hv, (2,))
-            arrays["vtx2d/panel"] = _stack(pan, (), np.uint8)
-            arrays["vtx2d/index"] = _stack(idx, (), np.int32)
+            for sf, dd in [("", d)] + list(extra.items()):
+                hv, pan, idx = [], [], []
+                for k, panel in enumerate(dd.panels):
+                    pr = dd.project_points(panel, vertices.xyz[:, 0], vertices.xyz[:, 1],
+                                           vertices.xyz[:, 2])
+                    if pr is None:
+                        continue
+                    ok = np.flatnonzero(np.isfinite(pr[0]) & np.isfinite(pr[1]))
+                    hv.append(np.column_stack([pr[0][ok], pr[1][ok]]))
+                    pan.append(np.full(len(ok), k, np.uint8))
+                    idx.append(ok.astype(np.int32))
+                arrays[f"vtx2d{sf}/hv"] = _stack(hv, (2,))
+                arrays[f"vtx2d{sf}/panel"] = _stack(pan, (), np.uint8)
+                arrays[f"vtx2d{sf}/index"] = _stack(idx, (), np.int32)
     timing["reco_overlays"] = round(time.time() - t0, 3)
 
     # ---- truth: trajectories + deposits -------------------------------
@@ -461,11 +480,12 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
             meta["truth"]["mc2d_scope"] = scope
             polys = [mc.points[i] for i in sel]
 
-            def mc2d():
-                _add_projected(arrays, "mc2d", "index", d, polys, panels)
+            def mc2d(sf, dd):
+                _add_projected(arrays, f"mc2d{sf}", "index", dd, polys, dd.panels)
                 # owner is the position in `polys`; make it an index into mc/*
-                arrays["mc2d/index"] = sel[arrays["mc2d/index"]].astype(np.int32)
-            section("mc2d", mc2d)
+                arrays[f"mc2d{sf}/index"] = sel[arrays[f"mc2d{sf}/index"]].astype(np.int32)
+            for sf, dd in [("", d)] + list(extra.items()):
+                section(f"mc2d{sf}", lambda sf=sf, dd=dd: mc2d(sf, dd))
             timing["mc2d_s"] = round(time.time() - t, 3)
     if deposits is not None:
         avail["deposits"] = True
@@ -478,13 +498,14 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
             np.isin(np.abs(deposits.track_id), ids).astype(np.uint8)
             if ids is not None else np.ones(len(deposits), np.uint8))
     if d is not None and tv is not None:
-        v2 = []
-        for panel in panels:
-            try:
-                v2.append(d._true_vertex_wx(panel))
-            except Exception:
-                v2.append(None)
-        meta["truth"]["vertex2d"] = [None if v is None else [v[0], v[1]] for v in v2]
+        for sf, dd in [("", d)] + list(extra.items()):
+            v2 = []
+            for panel in dd.panels:
+                try:
+                    v2.append(dd._true_vertex_wx(panel))
+                except Exception:
+                    v2.append(None)
+            meta["truth"][f"vertex2d{sf}"] = [None if v is None else [v[0], v[1]] for v in v2]
 
     # ---- particle labels ----------------------------------------------
     if d is not None and (mc is not None) and (tracks is not None or showers is not None

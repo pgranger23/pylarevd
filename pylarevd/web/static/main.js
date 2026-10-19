@@ -46,14 +46,17 @@ import { THEMES, CMAP_NAMES } from './colormaps.js';
 import view3d from './view3d.js';
 import view2d from './view2d.js';
 import viewlight from './viewlight.js';
+import viewoptical from './viewoptical.js';
+import './exports.js';
 
-const OVERLAYS = ['truth', 'rad', 'dep', 'tracks', 'showers', 'vtx', 'labels', 'pd'];
-const OV_DEFAULT = ['truth', 'tracks', 'showers', 'vtx', 'pd'];
+const OVERLAYS = ['truth', 'rad', 'dep', 'tracks', 'showers', 'pvtx', 'vtx', 'labels', 'pd'];
+const OV_DEFAULT = ['truth', 'tracks', 'showers', 'pvtx', 'vtx', 'pd'];
 const VIEW_PANELS = {
   '3d': ['view3d'], '2d': ['view2d'], 'light': ['viewlight'],
   'charge+light': ['view3d', 'viewlight'], '2d+3d': ['view2d', 'view3d'],
+  'optical': ['viewoptical'], 'flash3d': ['view3d'],
 };
-const PANEL_IDS = { view3d: 'panel-3d', view2d: 'panel-2d', viewlight: 'panel-light' };
+const PANEL_IDS = { view3d: 'panel-3d', view2d: 'panel-2d', viewlight: 'panel-light', viewoptical: 'panel-optical' };
 
 const DEFAULTS = {
   file: '', entry: 0, hits: '', flash: '', view: '3d', color: 'charge', scale: 'auto',
@@ -73,7 +76,7 @@ const state = { ...DEFAULTS, ov: Object.fromEntries(OVERLAYS.map((o) => [o, OV_D
 export const app = {
   state, api,
   bundle: null, geometry: null,
-  views: { view3d, view2d, viewlight },
+  views: { view3d, view2d, viewlight, viewoptical },
   get theme() { return THEMES[state.theme] || THEMES.dark; },
   setState, registerParam, status, requestLayout,
   on(type, fn) {
@@ -214,6 +217,8 @@ function bindControls() {
     const i = parseInt(e.target.value, 10);
     if (Number.isFinite(i)) gotoIndex(i);
   });
+  $('inp-open').addEventListener('keydown', (e) => { if (e.key === 'Enter') openByPath(); });
+  $('btn-open').addEventListener('click', openByPath);
   $('btn-reset').addEventListener('click', () => guard(app.views.view3d, 'resetView'));
   $('btn-shot').addEventListener('click', screenshot);
   $('btn-link').addEventListener('click', async () => {
@@ -226,6 +231,57 @@ function bindControls() {
     if (e.key === 'ArrowLeft') { step(-1); e.preventDefault(); }
     else if (e.key === 'ArrowRight') { step(1); e.preventDefault(); }
   });
+}
+
+// ------------------------------------------------------------- open by path
+function openMsg(text, isError) {
+  const el = $('open-msg');
+  el.textContent = text || '';
+  el.classList.toggle('error', !!isError);
+  el.hidden = !text;
+}
+
+async function openByPath() {
+  const path = $('inp-open').value.trim();
+  if (!path || $('btn-open').disabled) return;
+  openMsg('opening ...', false);
+  try {
+    const r = await fetch('/api/open', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }),
+    });
+    let body = null;
+    try { body = await r.json(); } catch (e) { /* not JSON */ }
+    if (!r.ok) {
+      const msg = (body && body.error) || `HTTP ${r.status}`;
+      if (r.status === 403) setOpenAllowed(false, msg);
+      openMsg(msg, true);
+      return;
+    }
+    files = await api.files();
+    fillSelect($('sel-file'), files.map((f) => [f.path, f.name || f.path]), body.path);
+    $('inp-open').value = '';
+    openMsg('', false);
+    await openFile(body.path, 0);
+  } catch (e) {
+    openMsg(String(e.message || e), true);
+  }
+}
+
+function setOpenAllowed(ok, why) {
+  $('inp-open').disabled = !ok; $('btn-open').disabled = !ok;
+  const tip = ok ? 'absolute path of a .root file on the server, Enter to open' : (why || 'opening files by path is disabled on this server');
+  $('inp-open').title = tip; $('btn-open').title = tip;
+}
+
+async function initOpenBox() {
+  if (sampleName) { $('open-group').hidden = true; return; }
+  try {
+    const r = await fetch('/api/status');
+    if (r.ok) {
+      const st = await r.json();
+      if (st.allow_open === false) setOpenAllowed(false, 'opening files by path is disabled when the server is bound beyond localhost (restart with --allow-remote-open)');
+    }
+  } catch (e) { /* attempt anyway; a 403 will disable the box */ }
 }
 
 // ---------------------------------------------------------------- navigation
@@ -377,6 +433,7 @@ async function boot() {
   readUrl();                                        // after registerParam so extra keys restore
   document.documentElement.dataset.theme = state.theme;
   bindControls();
+  initOpenBox();
   $('sum-toggle').addEventListener('click', () => { setState({ sum: state.sum === '1' ? '0' : '1' }); });
   app.on('state', (s, ch) => { if (ch.has('sum')) applySummaryOpen(); });
   applySummaryOpen();

@@ -207,6 +207,7 @@ function init(container, app) {
   V.app = app; V.container = container;
   const st = document.createElement('style'); st.textContent = CSS; document.head.appendChild(st);
   app.registerParam('space2d', 'wire');
+  app.registerParam('merge2d', 'orientation');
   container.innerHTML = '';
   V.glc = document.createElement('canvas'); V.glc.className = 'v2d-canvas';
   V.ovc = document.createElement('canvas'); V.ovc.className = 'v2d-canvas v2d-ov';
@@ -214,12 +215,14 @@ function init(container, app) {
   V.ov = V.ovc.getContext('2d');
   // controls (own DOM: no change to the main toolbar)
   const bar = document.createElement('div'); bar.className = 'v2d-bar';
-  bar.innerHTML = '<label>space <select class="sp"><option value="wire">wire (w, x)</option><option value="readout">readout (channel, tick)</option></select></label>' +
+  bar.innerHTML = '<label title="how wire-plane hits are grouped into panels">panels <select class="mg"><option value="orientation">by wire orientation</option><option value="view">by view (U/V/Z)</option><option value="none">split every face</option></select></label>' +
+    '<label>space <select class="sp"><option value="wire">wire (w, x)</option><option value="readout">readout (channel, tick)</option></select></label>' +
     '<label title="share the w axis across panels (pan/zoom together)"><input type="checkbox" class="lk" checked> link w</label>' +
     '<label>size <input type="range" class="sz" min="1" max="10" step="0.5" value="3"></label>' +
     '<button class="rs" title="reset zoom of all panels (or double-click)">reset zoom</button>';
   container.appendChild(bar);
-  V.bar = { sel: bar.querySelector('.sp'), lk: bar.querySelector('.lk'), sz: bar.querySelector('.sz'), rs: bar.querySelector('.rs') };
+  V.bar = { mg: bar.querySelector('.mg'), sel: bar.querySelector('.sp'), lk: bar.querySelector('.lk'), sz: bar.querySelector('.sz'), rs: bar.querySelector('.rs') };
+  V.bar.mg.addEventListener('change', () => app.setState({ merge2d: V.bar.mg.value }));
   V.bar.sel.addEventListener('change', () => app.setState({ space2d: V.bar.sel.value }));
   V.bar.lk.addEventListener('change', () => { V.linkW = V.bar.lk.checked; if (V.linkW) syncLinked(-1); schedule(true, true); });
   V.bar.sz.addEventListener('input', () => { V.size = parseFloat(V.bar.sz.value); schedule(true, false); });
@@ -240,10 +243,22 @@ function init(container, app) {
 const HIT_NUM = ['charge', 'amplitude', 'tick', 'multiplicity'];
 const CAT_KINDS = ['track', 'shower', 'pfparticle', 'cluster', 'slice'];
 
+/** suffix of the panel grouping in use: '' (by wire orientation), '_view' or '_none'. Only the wire
+ *  space is grouped, and only if the exporter shipped that set (older bundles: orientation). */
+function sfxFor(space) {
+  if (space === 'readout' || !V.S) return '';
+  const g = V.app.state.merge2d;
+  const s = g === 'view' ? '_view' : g === 'none' ? '_none' : '';
+  return s && V.S.bundle.meta['panels' + s] ? s : '';
+}
+function sfx() { return sfxFor(V.space); }
+function vk() { return V.space === 'readout' ? 'readout' : 'wire' + sfx(); }
+function wirePanels() { const m = V.S.bundle.meta; return m['panels' + sfx()] || []; }
+
 function panelSpecs(space) {
   if (!V.S) return [];
   const m = V.S.bundle.meta;
-  return (space === 'readout' ? m.panels_readout : m.panels) || [];
+  return (space === 'readout' ? m.panels_readout : m['panels' + sfxFor(space)]) || [];
 }
 
 function buildLayout(space) {
@@ -253,7 +268,7 @@ function buildLayout(space) {
   let pan, h, v;
   if (space === 'readout') {
     pan = b.get('hits/chan_view'); const ch = b.get('hits/channel'); h = ch ? Float32Array.from(ch) : null; v = b.get('hits/tick');
-  } else { pan = b.get('hits/panel'); h = b.get('hits/h'); v = b.get('hits/v'); }
+  } else { pan = b.get('hits/panel' + sfxFor(space)); h = b.get('hits/h'); v = b.get('hits/v'); }
   const L = { space, np, n: 0, ranges: [], orig: null, pos: null, vsrc: v, bufs: new Map(), grids: [], specs };
   if (!pan || !h || !v) { L.ranges = specs.map(() => [0, 0]); L.pos = new Res(new Float32Array(0)); L.orig = new Uint32Array(0); return L; }
   const cnt = new Uint32Array(np + 1);
@@ -275,8 +290,9 @@ function buildLayout(space) {
 
 function layout() {
   const S = V.S;
-  if (!S.layouts[V.space]) S.layouts[V.space] = buildLayout(V.space);
-  return S.layouts[V.space];
+  const k = vk();
+  if (!S.layouts[k]) S.layouts[k] = buildLayout(V.space);
+  return S.layouts[k];
 }
 
 function layoutBuf(L, key, make) {
@@ -344,6 +360,8 @@ function colorSpec() {
     const info = catRanks(c);
     if (info) return { kind: 'cat', name: c, info };
     note = `no ${c} grouping in this event; showing charge`; c = 'charge';
+  } else if (c === 'chisq') {
+    note = 'chisq is a space-point quantity; showing charge'; c = 'charge';
   } else if (c === 'y' || c === 'z' || c === 'pdg') {
     note = `${c} is not available per hit in 2D; showing charge`; c = 'charge';
   }
@@ -418,12 +436,13 @@ function buildFans(pts, offs, panel, np) {
 }
 
 function overlaySet(kind) {
-  const S = V.S, b = S.bundle, np = (b.meta.panels || []).length;
-  if (S.sets[kind] !== undefined) return S.sets[kind];
+  const S = V.S, b = S.bundle, sf = sfx(), np = wirePanels().length;
+  const skey = kind + sf;
+  if (S.sets[skey] !== undefined) return S.sets[skey];
   let set = null;
   try {
     if (kind === 'tracks') {
-      const pts = b.get('tracks2d/points'), off = b.get('tracks2d/offsets'), pan = b.get('tracks2d/panel'), id = b.get('tracks2d/track');
+      const pts = b.get(`tracks2d${sf}/points`), off = b.get(`tracks2d${sf}/offsets`), pan = b.get(`tracks2d${sf}/panel`), id = b.get(`tracks2d${sf}/track`);
       if (pts && off && pan) {
         const info = catRanks('track');
         set = buildLines(pts, off, pan, np, (r) => {
@@ -432,10 +451,10 @@ function overlaySet(kind) {
         }, false);
       }
     } else if (kind === 'showers') {
-      const pts = b.get('showers2d/points'), off = b.get('showers2d/offsets'), pan = b.get('showers2d/panel');
+      const pts = b.get(`showers2d${sf}/points`), off = b.get(`showers2d${sf}/offsets`), pan = b.get(`showers2d${sf}/panel`);
       if (pts && off && pan) { set = buildLines(pts, off, pan, np, () => 0, true); set.fill = buildFans(pts, off, pan, np); }
     } else if (kind === 'mc') {
-      const pts = b.get('mc2d/points'), off = b.get('mc2d/offsets'), pan = b.get('mc2d/panel'), idx = b.get('mc2d/index');
+      const pts = b.get(`mc2d${sf}/points`), off = b.get(`mc2d${sf}/offsets`), pan = b.get(`mc2d${sf}/panel`), idx = b.get(`mc2d${sf}/index`);
       const pdg = b.get('mc/pdg'), fi = b.get('mc/from_interaction');
       if (pts && off && pan) {
         set = buildLines(pts, off, pan, np, (r) => {
@@ -446,7 +465,7 @@ function overlaySet(kind) {
       }
     }
   } catch (e) { console.error('view2d overlay', kind, e); }
-  S.sets[kind] = set;
+  S.sets[skey] = set;
   return set;
 }
 
@@ -462,9 +481,10 @@ function projectPoint(panel, x, y, z) {
 
 function depositSet() {
   const S = V.S, b = S.bundle;
-  if (S.sets.dep !== undefined) return S.sets.dep;
+  const skey = 'dep' + sfx();
+  if (S.sets[skey] !== undefined) return S.sets[skey];
   let set = null;
-  const xyz = b.get('dep/xyz'), panels = b.meta.panels || [], np = panels.length;
+  const xyz = b.get('dep/xyz'), panels = wirePanels(), np = panels.length;
   if (xyz && np) {
     const n = xyz.length / 3, fi = b.get('dep/from_interaction');
     const pos = panels.map(() => new Float32Array(2 * n)), flag = panels.map(() => new Float32Array(n)), cnt = new Uint32Array(np);
@@ -501,7 +521,7 @@ function depositSet() {
       S.res.push(a, f); set.pos.push(a); set.flag.push(f); set.n.push(cnt[p]);
     }
   }
-  S.sets.dep = set;
+  S.sets[skey] = set;
   return set;
 }
 
@@ -541,20 +561,20 @@ function frameViews(space) {
 
 function ensureViews() {
   const specs = panelSpecs(V.space);
-  const cur = V.views[V.space];
+  const cur = V.views[vk()];
   if (cur && cur.length === specs.length) return cur;
-  if (!specs.length) return (V.views[V.space] = []);
-  return (V.views[V.space] = frameViews(V.space));
+  if (!specs.length) return (V.views[vk()] = []);
+  return (V.views[vk()] = frameViews(V.space));
 }
 
 function resetViews() {
   if (!V.S) return;
-  V.views[V.space] = frameViews(V.space);
+  V.views[vk()] = frameViews(V.space);
   schedule(true, true);
 }
 
 function syncLinked(src) {
-  const vs = V.views[V.space]; if (!vs || !V.linkW) return;
+  const vs = V.views[vk()]; if (!vs || !V.linkW) return;
   let ref = src >= 0 ? vs[src] : vs.find((v) => v.link);
   if (!ref) return;
   for (const v of vs) if (v.link && v !== ref) { v.cx = ref.cx; v.hx = ref.hx; }
@@ -562,7 +582,7 @@ function syncLinked(src) {
 
 // ---------------------------------------------------------------------------- layout / geometry of the canvas
 function computeRects() {
-  const n = (V.views[V.space] || []).length || panelSpecs(V.space).length;
+  const n = (V.views[vk()] || []).length || panelSpecs(V.space).length;
   V.rects = [];
   if (!n) return;
   const gut = V.cw >= 640 ? GUTTER : 0;
@@ -728,11 +748,11 @@ function niceTicks(lo, hi, target) {
 function fmt(v) { return Math.abs(v) >= 1000 || (Math.abs(v) < 0.01 && v !== 0) ? v.toExponential(1) : v.toPrecision(3).replace(/\.?0+$/, ''); }
 
 function toPx(p, hx, hy) {
-  const r = V.rects[p], v = V.views[V.space][p];
+  const r = V.rects[p], v = V.views[vk()][p];
   return [r.px + (hx - v.cx) / (2 * v.hx) * r.pw + r.pw / 2, r.py + r.ph / 2 - (hy - v.cy) / (2 * v.hy) * r.ph];
 }
 function toData(p, px, py) {
-  const r = V.rects[p], v = V.views[V.space][p];
+  const r = V.rects[p], v = V.views[vk()][p];
   return [v.cx + (px - r.px - r.pw / 2) / r.pw * 2 * v.hx, v.cy - (py - r.py - r.ph / 2) / r.ph * 2 * v.hy];
 }
 
@@ -741,10 +761,10 @@ function renderOv() {
   const th = V.app.theme, st = V.app.state, S = V.S;
   g.setTransform(V.dpr, 0, 0, V.dpr, 0, 0);
   g.clearRect(0, 0, V.cw, V.ch);
-  const views = V.views[V.space] || [], specs = S ? panelSpecs(V.space) : [];
+  const views = V.views[vk()] || [], specs = S ? panelSpecs(V.space) : [];
   if (!S) { g.fillStyle = th.fg_muted; g.font = '12px system-ui, sans-serif'; g.fillText('2D: no event loaded', 12, 44); return; }
   if (V.rects.length !== views.length) computeRects();
-  const wire = V.space === 'wire', ov = st.ov;
+  const wire = V.space === 'wire', ov = st.ov, sf = sfx();
   const roles = S.bundle.get('vtx/role');
   g.textBaseline = 'alphabetic';
   for (let p = 0; p < views.length; p++) {
@@ -760,11 +780,13 @@ function renderOv() {
       for (const xc of sp.edges || []) { const y = toPx(p, 0, xc)[1]; g.beginPath(); g.moveTo(r.px, y); g.lineTo(r.px + r.pw, y); g.stroke(); }
       g.setLineDash([]); g.globalAlpha = 1;
       // vertices
-      if (ov.vtx && S.bundle.get('vtx2d/hv')) {
-        const hv = S.bundle.get('vtx2d/hv'), pa = S.bundle.get('vtx2d/panel'), ix = S.bundle.get('vtx2d/index');
+      if ((ov.vtx || ov.pvtx) && S.bundle.get(`vtx2d${sf}/hv`)) {
+        const hv = S.bundle.get(`vtx2d${sf}/hv`), pa = S.bundle.get(`vtx2d${sf}/panel`), ix = S.bundle.get(`vtx2d${sf}/index`);
         const by = { x: [], D: [], o: [] };
         for (let k = 0; k < pa.length; k++) {
           if (pa[k] !== p) continue;
+          const rl = roles && ix ? roles[ix[k]] : 3;
+          if (rl === 1 ? !ov.pvtx : !ov.vtx) continue;
           const [x, y] = toPx(p, hv[2 * k], hv[2 * k + 1]);
           if (x < r.px - 10 || x > r.px + r.pw + 10 || y < r.py - 10 || y > r.py + r.ph + 10) continue;
           const role = roles && ix ? roles[ix[k]] : 3;
@@ -773,7 +795,7 @@ function renderOv() {
         for (const kind of ['o', 'D', 'x']) drawMarkers(g, kind, by[kind], th.vertex, th.axes_bg);
       }
       // true vertex
-      const tv = S.bundle.meta.truth && S.bundle.meta.truth.vertex2d && S.bundle.meta.truth.vertex2d[p];
+      const tv = S.bundle.meta.truth && S.bundle.meta.truth['vertex2d' + sf] && S.bundle.meta.truth['vertex2d' + sf][p];
       if (ov.truth && tv) { const [x, y] = toPx(p, tv[0], tv[1]); drawMarkers(g, 'X', [x, y], th.mctrack, th.axes_bg); }
     }
     // hover ring
@@ -838,17 +860,18 @@ function drawMarkers(g, kind, xy, col, edge) {
 function labelProjection(p) {
   const S = V.S;
   if (!S.labelPts) S.labelPts = {};
-  if (S.labelPts[p]) return S.labelPts[p];
+  const lk = sfx() + p;
+  if (S.labelPts[lk]) return S.labelPts[lk];
   const b = S.bundle, pos = b.get('labels/pos'), tx = b.get('labels/text'), texts = b.meta.label_texts || [];
   const out = [];
-  const panel = (b.meta.panels || [])[p];
+  const panel = wirePanels()[p];
   if (pos && panel) {
     for (let k = 0; k < pos.length / 3; k++) {
       const pr = projectPoint(panel, pos[3 * k], pos[3 * k + 1], pos[3 * k + 2]);
       if (pr) out.push({ h: pr[0], v: pr[1], text: texts[tx[k]] || '' });
     }
   }
-  return (S.labelPts[p] = out);
+  return (S.labelPts[lk] = out);
 }
 
 function drawLabels(g, p, r, th) {
@@ -887,11 +910,12 @@ function updateLegend() {
     if (V.space === 'wire') {
       const ov = st.ov, b = V.S.bundle, av = (n) => b.has(n);
       const line = (c, name, dash) => `<div><span class="ln" style="border-color:${c};${dash ? 'border-top-style:dashed' : ''}"></span>${name}</div>`;
-      if (ov.tracks && av('tracks2d/points')) html += line(th.track, 'reco tracks');
-      if (ov.showers && av('showers2d/points')) html += line(th.shower, 'shower cones');
-      if (ov.truth && av('mc2d/points')) html += line(th.mctrack, 'true trajectories', true);
+      const sf = sfx();
+      if (ov.tracks && av(`tracks2d${sf}/points`)) html += line(th.track, 'reco tracks');
+      if (ov.showers && av(`showers2d${sf}/points`)) html += line(th.shower, 'shower cones');
+      if (ov.truth && av(`mc2d${sf}/points`)) html += line(th.mctrack, 'true trajectories', true);
       if (ov.dep && av('dep/xyz')) html += `<div><span class="sw" style="background:${th.truth}"></span>true deposits</div>`;
-      if (ov.vtx && av('vtx2d/hv')) html += `<div><span class="sw" style="background:${th.vertex}"></span>vertices (x D o)</div>`;
+      if ((ov.vtx || ov.pvtx) && av(`vtx2d${sf}/hv`)) html += `<div><span class="sw" style="background:${th.vertex}"></span>vertices (${[ov.pvtx ? 'x' : '', ov.vtx ? 'D o' : ''].filter(Boolean).join(' ')})</div>`;
     }
   }
   if (html !== V.lastLegend) { V.legend.innerHTML = html; V.lastLegend = html; }
@@ -916,7 +940,7 @@ function region(p, px, py) {
 }
 
 function zoomAt(p, px, py, fx, fy) {
-  const vs = V.views[V.space], v = vs[p];
+  const vs = V.views[vk()], v = vs[p];
   const [dx, dy] = toData(p, px, py);
   const lim = (view, f, h) => Math.min(view.init[h] * 30, Math.max(view.init[h] / 2000, f));
   if (fx !== 1) {
@@ -952,7 +976,7 @@ function bindPointer() {
     if (!V.S) return;
     const [px, py] = pos(e);
     if (V.drag) {
-      const d = V.drag, r = V.rects[d.p], vs = V.views[V.space], v = vs[d.p];
+      const d = V.drag, r = V.rects[d.p], vs = V.views[vk()], v = vs[d.p];
       const dx = px - d.px, dy = py - d.py; d.px = px; d.py = py;
       v.cx -= dx / r.pw * 2 * v.hx; v.cy += dy / r.ph * 2 * v.hy;
       interacting(); syncLinked(d.p);
@@ -1010,7 +1034,7 @@ function nearestHit(L, p, hx, hy, rx, ry) {
 function updateHover(px, py, e) {
   const p = panelAt(px, py);
   if (p < 0 || region(p, px, py) !== 'plot') { if (V.hover) { V.hover = null; schedule(false, true); } hideTip(); return; }
-  const L = layout(), v = V.views[V.space][p], r = V.rects[p];
+  const L = layout(), v = V.views[vk()][p], r = V.rects[p];
   const [hx, hy] = toData(p, px, py);
   const rad = 7;   // px
   const i = nearestHit(L, p, hx, hy, rad / r.pw * 2 * v.hx, rad / r.ph * 2 * v.hy);
@@ -1053,6 +1077,7 @@ function setEvent(bundle) {
   if (bundle) {
     V.S = { bundle, res: [], layouts: {}, stats: new Map(), cats: new Map(), sets: {}, labelPts: null };
     V.bar.sel.value = V.space;
+    V.bar.mg.value = ['view', 'none'].includes(V.app.state.merge2d) ? V.app.state.merge2d : 'orientation';
     const t0 = performance.now();
     ensureViews();
     V.lastBuildMs = performance.now() - t0;
@@ -1069,7 +1094,12 @@ function onState(state, changed) {
     if (s !== V.space) { V.space = s; V.hover = null; hideTip(); if (V.S) { ensureViews(); computeRects(); } }
     V.bar.sel.value = V.space;
   }
-  if (['color', 'scale', 'cmap', 'theme', 'ov', 'space2d'].some((k) => changed.has(k))) { if (V.S) updateLegend(); schedule(true, true); }
+  if (changed.has('merge2d')) {
+    V.bar.mg.value = ['view', 'none'].includes(state.merge2d) ? state.merge2d : 'orientation';
+    V.hover = null; hideTip();
+    if (V.S) { ensureViews(); computeRects(); }
+  }
+  if (['color', 'scale', 'cmap', 'theme', 'ov', 'space2d', 'merge2d'].some((k) => changed.has(k))) { if (V.S) updateLegend(); schedule(true, true); }
 }
 
 function setVisible(vis) {
@@ -1097,5 +1127,5 @@ export default {
   /** test hook: synchronous render with GPU sync; returns ms */
   debugRender() { const t = performance.now(); renderGL(); V.gl.finish(); return performance.now() - t; },
   debugHitPx(p, k) { const L = layout(), i = L.ranges[p][0] + k; return toPx(p, L.pos.data[2 * i], L.pos.data[2 * i + 1]); },
-  debugState() { return { views: V.views, rects: V.rects, space: V.space, lastRenderMs: V.lastRenderMs }; },
+  debugState() { return { views: V.views, rects: V.rects, space: V.space, key: vk(), lastRenderMs: V.lastRenderMs }; },
 };

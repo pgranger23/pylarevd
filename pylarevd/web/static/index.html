@@ -15,6 +15,11 @@
     <button id="btn-next" title="next event (right arrow)">&#9654;</button>
     <label>go to <input id="inp-jump" type="number" min="0" step="1" title="event index in the file (0-based), Enter to jump"></label>
   </div>
+  <div class="group" id="open-group">
+    <label>open <input id="inp-open" type="text" spellcheck="false" placeholder="/path/to/file.root" title="absolute path of a .root file on the server, Enter to open"></label>
+    <button id="btn-open" title="absolute path of a .root file on the server, Enter to open">open</button>
+    <span id="open-msg" class="open-msg" hidden></span>
+  </div>
   <div class="group">
     <label>hits <select id="sel-hits"></select></label>
     <label>flash <select id="sel-flash"></select></label>
@@ -27,6 +32,8 @@
         <option value="light">Light</option>
         <option value="charge+light">Charge+Light</option>
         <option value="2d+3d">2D+3D</option>
+        <option value="optical">Optical (PDS)</option>
+        <option value="flash3d">Flashes 3D (PDS)</option>
       </select>
     </label>
     <label>colour by
@@ -41,6 +48,7 @@
         <option value="pfparticle">pfparticle</option>
         <option value="cluster">cluster</option>
         <option value="slice">slice</option>
+        <option value="chisq">chisq (space points)</option>
         <option value="pdg">truth pdg</option>
       </select>
     </label>
@@ -58,7 +66,8 @@
     <label><input type="checkbox" data-ov="dep"> deposits</label>
     <label><input type="checkbox" data-ov="tracks"> tracks</label>
     <label><input type="checkbox" data-ov="showers"> showers</label>
-    <label><input type="checkbox" data-ov="vtx"> vertices</label>
+    <label title="Pandora interaction vertex"><input type="checkbox" data-ov="pvtx"> interaction vtx</label>
+    <label title="primary-daughter and secondary vertices"><input type="checkbox" data-ov="vtx"> vertices</label>
     <label><input type="checkbox" data-ov="labels"> labels</label>
     <label><input type="checkbox" data-ov="pd"> PD</label>
   </div>
@@ -72,6 +81,7 @@
   <section class="panel" id="panel-3d"></section>
   <section class="panel" id="panel-2d"></section>
   <section class="panel" id="panel-light"></section>
+  <section class="panel" id="panel-optical"></section>
 </main>
 <section id="summary-bar" class="collapsed">
   <button id="sum-toggle" title="show/hide the full event summary">&#9656; <span id="sum-head">summary</span></button>
