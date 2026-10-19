@@ -10,6 +10,9 @@ time) and draws reconstructed hits in physical coordinates.
     ev.display().save("event0.png")        # static
     ev.display().save_html("event0.html")  # interactive
 
+    from pylarevd import display_light
+    display_light(ev).save_animation("light0.gif")   # PDS hits vs time
+
 Detector geometry comes from a ``.npz`` exported once per geometry by
 :mod:`pylarevd.export_geometry`, which is the only component that needs
 LArSoft.
@@ -33,14 +36,21 @@ _PYLARIO_EXPORTS = {
 _DISPLAY_EXPORTS = {
     "EventDisplay", "Display3D", "OpticalDisplay", "FlashDisplay3D",
     "display", "display_3d", "display_optical", "display_flashes_3d",
+    "display_light", "display_charge_light",
 }
 
-__all__ = sorted(list(_PYLARIO_EXPORTS) + list(_DISPLAY_EXPORTS))
+_LIGHT_EXPORTS = {"LightAnimation", "ChargeLightAnimation",
+                  "PhotonDetectorWalls"}
+
+__all__ = sorted(list(_PYLARIO_EXPORTS) + list(_DISPLAY_EXPORTS)
+                 + list(_LIGHT_EXPORTS))
 
 
 def __getattr__(name: str):
     from importlib import import_module
 
+    if name in _LIGHT_EXPORTS:
+        return getattr(import_module(".light", __name__), name)
     if name in _DISPLAY_EXPORTS:
         disp = import_module(".display", __name__)
         return getattr(disp, name)

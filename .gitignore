@@ -15,3 +15,6 @@ dist/
 samples/
 *.gif
 
+
+# generated EVDB sample bundles (rebuild with python -m pylarevd.web.export)
+pylarevd/web/static/samples/

@@ -643,24 +643,36 @@ class _TruthInfo:
 
         from pylario.physics import particle_symbol, particle_latex
 
-        # 1. Match Reco Tracks
+        # 1. Match Reco Tracks: the true particle whose trajectory passes
+        # closest, on average, to ~15 points sampled along the track.
+        # Vectorised: a ProtoDUNE-SP event matched 165 tracks against 20k
+        # trajectories one pair at a time -- 3.3M numpy calls, 135 s. Only a
+        # particle with a point inside the track's bounding box padded by
+        # _PAD can pass the 15 cm cut (otherwise every sample is > _PAD away),
+        # so only those are scored, exactly as before.
+        _PAD, _CUT = 60.0, 15.0
         if self.tracks is not None and mc is not None and len(mc):
+            lens = np.array([len(p) for p in mc.points], dtype=np.int64)
+            allp = (np.concatenate([np.asarray(p, float) for p in mc.points if len(p)])
+                    if lens.sum() else np.zeros((0, 3)))
+            owner = np.repeat(np.arange(len(mc)), lens)
             for i, pts in enumerate(self.tracks.points):
-                if len(pts) == 0:
+                if len(pts) == 0 or not len(allp):
                     continue
-                s = pts[::max(1, len(pts) // 15)]
-                best_m = None
-                min_d = float("inf")
-                for m in range(len(mc)):
-                    mp = mc.points[m]
-                    if len(mp) == 0:
-                        continue
-                    diff = s[:, None, :] - mp[None, :, :]
-                    d = float(np.mean(np.min(np.sqrt(np.sum(diff**2, axis=-1)), axis=-1)))
-                    if d < min_d:
-                        min_d = d
-                        best_m = m
-                if best_m is not None and min_d < 15.0:
+                smp = np.asarray(pts[::max(1, len(pts) // 15)], float)
+                lo, hi = smp.min(0) - _PAD, smp.max(0) + _PAD
+                inbox = np.all((allp >= lo) & (allp <= hi), axis=1)
+                cand = np.unique(owner[inbox])
+                if not len(cand):
+                    continue
+                sel = np.isin(owner, cand)
+                q, qo = allp[sel], owner[sel]
+                d = np.sqrt(((smp[:, None, :] - q[None, :, :]) ** 2).sum(-1))
+                starts = np.flatnonzero(np.r_[True, qo[1:] != qo[:-1]])
+                per = np.minimum.reduceat(d, starts, axis=1).mean(axis=0)
+                k = int(np.argmin(per))
+                min_d, best_m = float(per[k]), int(qo[starts[k]])
+                if min_d < _CUT:
                     tid = int(mc.track_id[best_m])
                     pdg = int(mc.pdg[best_m])
                     sym = particle_symbol(pdg)
@@ -678,21 +690,17 @@ class _TruthInfo:
                         "latex": lat,
                     })
 
-        # 2. Match Reco Showers
+        # 2. Match Reco Showers: the true particle starting nearest the shower
         if self.showers is not None and len(self.showers) and mc is not None and len(mc):
+            has = np.array([len(p) > 0 for p in mc.points])
+            firsts = np.array([np.asarray(p[0], float) if len(p) else (np.nan,) * 3
+                               for p in mc.points])
             for j in range(len(self.showers)):
-                st = self.showers.start[j]
-                best_m = None
-                min_d = float("inf")
-                for m in range(len(mc)):
-                    mp = mc.points[m]
-                    if len(mp) == 0:
-                        continue
-                    d = float(np.linalg.norm(mp[0] - st))
-                    if d < min_d:
-                        min_d = d
-                        best_m = m
-                if best_m is not None and min_d < 25.0:
+                st = np.asarray(self.showers.start[j], float)
+                dist = np.where(has, np.linalg.norm(firsts - st, axis=1), np.inf)
+                best_m = int(np.argmin(dist))
+                min_d = float(dist[best_m])
+                if min_d < 25.0:
                     tid = int(mc.track_id[best_m])
                     pdg = int(mc.pdg[best_m])
                     sym = particle_symbol(pdg)
@@ -1119,6 +1127,8 @@ class EventDisplay(_TruthInfo):
             note = self.event.pandora_selection_note()
             if note:
                 lines.append(f"  {note}")
+        if getattr(self, "truth_note", ""):
+            lines.append(f"  {self.truth_note}")
         hx, hy, xlabel, ylabel = self._axes
         unit = "" if self.space == "readout" else " cm"
         xs, ys = xlabel.split(" [")[0], ylabel.split(" [")[0]
@@ -1832,7 +1842,7 @@ class Display3D(_TruthInfo):
             if note:
                 lines.append(f"  {note}")
         if self.mc is not None and len(self.mc):
-            lines.append(f"  {len(self.mc)} true trajectories")
+            lines.append(f"  {getattr(self, 'truth_note', '') or str(len(self.mc)) + ' true trajectories'}")
         lines.append(f"  coloured by {self.colour_by}; framing: {self.focus}")
         return "\n".join(lines)
 
@@ -2278,6 +2288,32 @@ class Display3D(_TruthInfo):
         return buf.getvalue()
 
 
+def _light_centre(op) -> float | None:
+    """Time to centre a default optical window on, in us.
+
+    The onset of the brightest burst of OpHit light when there are hits,
+    otherwise the brightest flash. Keying on flashes alone fails exactly when
+    it matters: a flash finder can drop the interaction's flash (LArSoft
+    OpFlashFinder's late-light removal does, on a few percent of events), and
+    the window then centred on a radiological flash microseconds away -- on
+    the FD-HD sample, a 1.4 kPE flash 19 us after a 23 kPE interaction that
+    had no flash at all.
+    """
+    from .light import hit_time_quantum, light_onset
+    if not len(op):
+        return None
+    hits = ~np.asarray(op.is_flash)
+    if hits.any():
+        t, pe = np.asarray(op.time)[hits], np.asarray(op.pe)[hits]
+        onset = light_onset(t, pe, hit_time_quantum(t))
+        if onset is not None:
+            return float(onset)
+    fl = np.asarray(op.is_flash)
+    if fl.any():
+        return float(np.asarray(op.time)[np.argmax(np.where(fl, op.pe, -np.inf))])
+    return float(np.asarray(op.time)[np.argmax(op.pe)])
+
+
 class FlashDisplay3D(_TruthInfo):
     """Reconstructed optical flashes in the detector volume.
 
@@ -2308,20 +2344,20 @@ class FlashDisplay3D(_TruthInfo):
 
     @property
     def window(self):
-        """(lo, hi) time window, defaulting around the brightest flash.
+        """(lo, hi) time window, defaulting around the brightest light burst.
 
         The readout is milliseconds wide and dominated by radiological light;
         without a default window the brightest 200 flashes are drawn from the
-        whole of it and the physics flash is just one bar among them. Same rule
-        as the 2-D optical view, so the two agree on what they are showing.
+        whole of it and the physics flash is just one bar among them. Centred
+        by :func:`_light_centre`, the same rule as the 2-D optical view and
+        the light animation, so all three agree on what they are showing.
         """
         if self.time_range is not None:
             return tuple(self.time_range)
         o = self.op
         if not len(o) or not o.is_flash.any():
             return None
-        brightest = int(np.argmax(np.where(o.is_flash, o.pe, -np.inf)))
-        centre = float(o.time[brightest])
+        centre = _light_centre(o)
         return (centre - 50.0, centre + 50.0)
 
     @cached_property
@@ -2378,7 +2414,21 @@ class FlashDisplay3D(_TruthInfo):
             lines.append(head)
         if not len(f):
             lines.append("  no flashes in the time window")
+            o = self.op
+            win = self.window
+            hits = ~np.asarray(o.is_flash)
+            if win is not None and hits.any():
+                m = hits & (o.time >= win[0]) & (o.time <= win[1])
+                if o.pe[m].sum() >= 100:
+                    lines.append(
+                        f"  ! but {o.pe[m].sum():,.0f} PE of optical hits are "
+                        f"in it: {o.label.split(' + ')[0]} reconstructed no "
+                        f"flash for this light (see the light animation, or "
+                        f"another flash producer)")
             return "\n".join(lines)
+        if getattr(self, "repaired", 0):
+            lines.append(f"  {self.repaired} flashes had no usable (y, z) from "
+                         "the flash finder; recomputed from per-detector PE")
         lines.append(f"  drift position: "
                      + ("reconstructed" if self.op.has_x else
                         "NOT reconstructed by this flash finder - drawn as a "
@@ -2480,7 +2530,13 @@ class FlashDisplay3D(_TruthInfo):
 
     # ---- interactive (plotly) ------------------------------------------
 
-    def plotly_figure(self):
+    def plotly_figure(self, *, height: int | None = None):
+        """Interactive 3-D view. ``height=None`` fills the container.
+
+        Takes ``height`` like the other displays: the browser app passes it to
+        every view, and this signature lacking it made the Flashes-3D mode
+        raise TypeError on every render.
+        """
         import plotly.graph_objects as go
         t = self.theme
         fig = go.Figure()
@@ -2561,6 +2617,7 @@ class FlashDisplay3D(_TruthInfo):
             legend=dict(bgcolor=t.legend_bg, bordercolor=t.legend_edge,
                         borderwidth=1, font=dict(color=t.fg)),
             uirevision="flash3d",      # keep the camera across event steps
+            height=height,
             margin=dict(l=0, r=0, t=50, b=0))
         return fig
 
@@ -2597,7 +2654,7 @@ class OpticalDisplay(_TruthInfo):
 
     @property
     def _window(self):
-        """(lo, hi) time window, defaulting to a span around the brightest flash.
+        """(lo, hi) time window, defaulting to a span around the brightest light.
 
         The full readout is milliseconds wide and dominated by radiological
         activity; the physics flash is nanoseconds wide. Showing everything by
@@ -2605,12 +2662,9 @@ class OpticalDisplay(_TruthInfo):
         """
         if self.time_range is not None:
             return tuple(self.time_range)
-        o = self.op
-        if not len(o):
+        centre = _light_centre(self.op)
+        if centre is None:
             return None
-        brightest = int(np.argmax(np.where(o.is_flash, o.pe, -np.inf))) \
-            if o.is_flash.any() else int(np.argmax(o.pe))
-        centre = float(o.time[brightest])
         return (centre - 50.0, centre + 50.0)
 
     def _flash_y_range(self) -> tuple[float, float]:
@@ -2661,6 +2715,9 @@ class OpticalDisplay(_TruthInfo):
         if nonpos:
             lines.append(f"  {nonpos} entries have PE <= 0 (baseline undershoot); "
                          "they sit at the bottom of the log colour scale")
+        if getattr(self, "repaired", 0):
+            lines.append(f"  {self.repaired} flashes had no usable (y, z) from "
+                         "the flash finder; recomputed from per-detector PE")
         window = self._window
         if window:
             lines.append(f"  showing t in [{window[0]:.1f}, {window[1]:.1f}] us "
@@ -2828,6 +2885,32 @@ class OpticalDisplay(_TruthInfo):
         self.plotly_figure(**kwargs).show(config=_PLOTLY_CONFIG)
 
 
+#: More true trajectories than this are thinned to the longest ones. A
+#: ProtoDUNE-SP event carries ~900k (cosmic showers and radiologicals), which
+#: drawn in full made a 100 MB interactive figure taking 23 s to build.
+MAX_TRUE_TRAJECTORIES = 20000
+
+
+def _cap_truth(mc):
+    """(mc, note): at most MAX_TRUE_TRAJECTORIES, the longest by path."""
+    if mc is None or len(mc) <= MAX_TRUE_TRAJECTORIES:
+        return mc, ""
+    pts = mc.points
+    n = np.array([len(p) for p in pts])
+    allp = np.concatenate([np.asarray(p, float) for p in pts]) if n.sum() else np.zeros((0, 3))
+    seg = np.linalg.norm(np.diff(allp, axis=0), axis=1)
+    ends = np.cumsum(n)
+    seg[ends[:-1] - 1] = 0.0                # no segment across two particles
+    starts = np.concatenate([[0], ends[:-1]])
+    seg = np.append(seg, 0.0)
+    length = np.add.reduceat(seg, starts) if len(seg) else np.zeros(len(n))
+    length[n < 2] = 0.0
+    keep = np.sort(np.argsort(-length, kind="stable")[:MAX_TRUE_TRAJECTORIES])
+    note = (f"{len(mc)} true trajectories; drawing the {MAX_TRUE_TRAJECTORIES} "
+            "longest (hide radiologicals to see only the interaction)")
+    return mc[keep], note
+
+
 def display(event, tag: str | None = None, *, truth: bool = False,
             reco: bool = False, tracks: bool | None = None,
             vertices: bool | None = None, showers: bool | None = None,
@@ -2869,7 +2952,8 @@ def display(event, tag: str | None = None, *, truth: bool = False,
             got["mc"] = None
     if truth and not radiologicals:
         deposits, got["mc"] = event._drop_radiologicals(deposits, got.get("mc"))
-    return EventDisplay(event, hits=event.hits(tag), truth=deposits,
+    got["mc"], truth_note = _cap_truth(got.get("mc"))
+    d = EventDisplay(event, hits=event.hits(tag), truth=deposits,
                         radiologicals=radiologicals,
                         tracks=got.get("tracks"), vertices=got.get("vertices"),
                         showers=got.get("showers"), mc=got.get("mc"),
@@ -2878,11 +2962,52 @@ def display(event, tag: str | None = None, *, truth: bool = False,
                         secondary_vertices=secondary_vertices,
                         particle_symbols=particle_symbols,
                         **kwargs)
+    d.truth_note = truth_note
+    return d
 
 
-def display_flashes_3d(event, **kwargs) -> FlashDisplay3D:
-    """Reconstructed flashes in the detector volume (:class:`FlashDisplay3D`)."""
-    return FlashDisplay3D(event, event.optical(), **kwargs)
+def display_flashes_3d(event, tag: str | None = None, **kwargs) -> FlashDisplay3D:
+    """Reconstructed flashes in the detector volume (:class:`FlashDisplay3D`).
+
+    ``tag`` picks the flash producer (``opflash``, ``opslicer``, ...).
+    """
+    from .light import repair_flash_positions
+    optical, n = repair_flash_positions(event, event.optical(tag))
+    d = FlashDisplay3D(event, optical, **kwargs)
+    d.repaired = n
+    return d
+
+
+def display_light(event, tag: str | None = None, **kwargs):
+    """Photon-detector hits and flashes as they arrive in time.
+
+    Returns a :class:`pylarevd.light.LightAnimation`; ``tag`` picks the flash
+    producer. Save it with ``.save_animation("x.gif")``, ``.save_html(...)``
+    or, for one frame, ``.save("x.png", frame=k)``.
+    """
+    from .light import LightAnimation
+    return LightAnimation(event, flash_tag=tag, **kwargs)
+
+
+def display_charge_light(event, tag: str | None = None, *,
+                         spacepoint_tag: str | None = None, truth: bool = False,
+                         tracks: bool = True, vertices: bool = True,
+                         showers: bool = True, radiologicals: bool = True,
+                         elev: float = 20.0, azim: float = -60.0, **kwargs):
+    """The 3-D charge and the light arriving on the photon detectors, together.
+
+    Returns a :class:`pylarevd.light.ChargeLightAnimation`: space points (and
+    tracks, vertices, truth as for :func:`display_3d`) next to the light
+    animation of :func:`display_light`. ``tag`` picks the flash producer;
+    other keyword arguments go to the light animation.
+    """
+    from .light import ChargeLightAnimation
+    style = {k: kwargs[k] for k in ("theme", "colormap", "preset") if k in kwargs}
+    charge = display_3d(event, spacepoint_tag, truth=truth, tracks=tracks,
+                        vertices=vertices, showers=showers,
+                        radiologicals=radiologicals, **style)
+    return ChargeLightAnimation(event, charge, flash_tag=tag, elev=elev,
+                                azim=azim, **kwargs)
 
 
 def display_optical(event, tag: str | None = None, **kwargs) -> OpticalDisplay:
@@ -2894,7 +3019,11 @@ def display_optical(event, tag: str | None = None, **kwargs) -> OpticalDisplay:
         if "opflash" in (exc.args[0] if exc.args else ""):
             hint = " -- this file probably carries raw waveforms only, not reco"
         raise type(exc)(f"{exc}{hint}") from exc
-    return OpticalDisplay(event, optical=optical, **kwargs)
+    from .light import repair_flash_positions
+    optical, n = repair_flash_positions(event, optical)
+    d = OpticalDisplay(event, optical=optical, **kwargs)
+    d.repaired = n
+    return d
 
 
 def display_3d(event, spacepoint_tag: str | None = None, *, truth: bool = False,
@@ -2934,7 +3063,8 @@ def display_3d(event, spacepoint_tag: str | None = None, *, truth: bool = False,
             mc = None
     if truth and not radiologicals:
         deposits, mc = event._drop_radiologicals(deposits, mc)
-    return Display3D(event, spacepoints=event.spacepoints(spacepoint_tag),
+    mc, truth_note = _cap_truth(mc)
+    d = Display3D(event, spacepoints=event.spacepoints(spacepoint_tag),
                      truth=deposits, tracks=polylines, mc=mc,
                      radiologicals=radiologicals,
                      pandora_vertex=pandora_vertex,
@@ -2943,6 +3073,8 @@ def display_3d(event, spacepoint_tag: str | None = None, *, truth: bool = False,
                      show_tracks=tracks, show_showers=showers,
                      particle_symbols=particle_symbols, **extra,
                      **kwargs)
+    d.truth_note = truth_note
+    return d
 
 
 import sys as _sys

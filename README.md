@@ -19,7 +19,61 @@ compiled extension — just `uproot` + `numpy` + `plotly`/`matplotlib`.
 > Already have it? `python -m pylarevd --check` reports what is installed, what
 > is missing and how to install it.
 
-## The interactive browser (start here)
+## The web viewer (new)
+
+A faster browser viewer: each event is decoded once in Python into a compact
+binary bundle, and everything after that (colour, scale, overlays, theme, light
+animation, camera) runs in the browser with WebGL, so controls respond
+immediately and the 3-D camera is never reset. Plain ES modules, no build step.
+
+```bash
+python -m pylarevd.web reco.root [more.root ...] --port 8050 [--precompute] [--workers N]
+ssh -N -L 8050:localhost:8050 <your-host>      # on your laptop, then open http://localhost:8050
+```
+
+The server binds to loopback only, like the Dash app. `--workers N` sets the
+decoder processes (default min(8, cores)); the next two events are decoded in
+the background while you look at one; `--precompute` also fills the cache for
+the whole file in the background.
+
+**Views** (selector in the toolbar):
+
+| view | shows |
+|---|---|
+| 2D | one panel per wire plane, hits and projected overlays; `space` switch between physical (wire, x) and readout (channel, tick) |
+| 3D | space points, tracks, shower cones, vertices, true trajectories, deposits, TPC boxes, photon-detector walls |
+| Light | PD walls face-on, time strip, flash ellipses, play/pause, slider, log or linear clock |
+| Charge+Light | the 3-D view with the PD walls lit by the same time state as the Light panel |
+| 2D+3D | the two side by side |
+
+**Controls.** File, event (prev/next buttons, left/right arrow keys, or type an
+index in "go to" and press Enter), hit product, flash producer, colour by
+(charge, amplitude, tick, multiplicity, x/y/z, track, shower, pfparticle,
+cluster, slice, truth pdg), scale (auto/log/linear), colormap, dark/light
+theme, overlay checkboxes (truth, radiologicals, deposits, tracks, showers,
+vertices, labels, PD), reset view, screenshot (PNG of the visible panels) and
+link. Mouse: 3-D drag to rotate, right-drag to pan, wheel to zoom; 2-D wheel
+to zoom, drag to pan, double click to reset; hover shows hit info. The summary
+line under the panels expands to the full event summary on click.
+
+**URL sharing.** Every control, including the open file and entry, is in the
+query string and restored on load; "link" copies it. The camera is not saved.
+`?sample=fd` or `?sample=pdsp` opens a bundled static sample without a server.
+
+**Cache.** Decoded events are cached in `~/.cache/pylarevd` (override with the
+environment variable `PYLAREVD_CACHE`), keyed on file path, mtime and size, so
+a revisited event opens instantly and several people can share one cache. To
+decode a whole file up front, in parallel:
+
+```bash
+python -m pylarevd.web.export reco.root -j 32          # also: -e 0-9, --hits TAG, --flash TAG
+```
+
+Design and format notes are in [docs/WEB_VIEWER.md](docs/WEB_VIEWER.md). The
+original Dash app (`python -m pylarevd.app`, next section) still exists and is
+unchanged.
+
+## The Dash browser app
 
 This is how most people use pylarevd. It is a small web app: you run it **on the
 machine that has the files**, and view it **in the browser on your laptop**
@@ -62,8 +116,8 @@ If port 8050 is taken (a colleague on a shared machine, or your own earlier
 session), use `--port 8051` and change both numbers in the tunnel to match.
 
 Once it is up: step through events with the ◀ ▶ buttons or the **left/right
-arrow keys**, switch between 2-D physical, 2-D readout, 3-D, optical and 3-D
-flash views, colour hits by charge or by the object that owns them, toggle truth
+arrow keys**, switch between 2-D physical, 2-D readout, 3-D, optical, 3-D
+flash and animated light views, colour hits by charge or by the object that owns them, toggle truth
 and reco overlays, and switch theme and colormap. Every control is mirrored into
 the URL, so you can paste a link to exactly what you are looking at — see
 [Browser reference](#browser-reference) for the details, including opening files
@@ -296,6 +350,7 @@ log₁₀ and relabels the ticks — the hover box still reports the real value.
 | `pylario` | `pylario/event.py` | `EventFile` / `Event` / `Hits` user API |
 | `pylario` | `pylario/physics.py` | PDG names, interaction modes, kinematics |
 | `pylarevd` | `pylarevd/display.py` | panels, 2-D/3-D/optical rendering (matplotlib + plotly) |
+| `pylarevd` | `pylarevd/light.py` | photon-detector hits and flashes animated in time |
 | `pylarevd` | `pylarevd/theme.py` | themes, colormaps, and marker cycles |
 | `pylarevd` | `pylarevd/cli.py` | `python -m pylarevd` batch rendering |
 | `pylarevd` | `pylarevd/app.py` | `python -m pylarevd.app` interactive browser (Dash) |
@@ -384,7 +439,9 @@ preferred.
 [Running it](#the-interactive-browser-start-here) is at the top of this file.
 It steps through events without regenerating anything: file/event selection with
 prev/next, hit product, colour-by (including by owning object) and scale,
-2D physical / 2D readout / 3D / optical, panel grouping, and truth and
+2D physical / 2D readout / 3D / optical / flashes 3D / light vs time /
+charge + light, panel
+grouping, the flash producer and light-animation settings, and truth and
 reco overlays. Controls a view ignores are greyed out — including the truth and
 reco checkboxes, which only apply to the physical views. Binds to localhost only
 unless you pass `--host`.
@@ -427,8 +484,8 @@ so a link carrying the event identity still lands correctly when pointed at
 another reconstruction pass of the same data. If the file does not contain that
 event, the link falls back to `entry` rather than failing.
 
-The CLI covers the same ground: `--mode {2d,readout,3d,optical}`, `--reco`,
-and the full `--colour-by` set.
+The CLI covers the same ground: `--mode {2d,readout,3d,optical,flash3d,light,chargelight}`,
+`--reco`, `--flash-tag`, and the full `--colour-by` set.
 
 ## True neutrino interaction
 
@@ -544,10 +601,94 @@ position along it is unknown. If a sample does reconstruct x, flashes are drawn
 as points instead. `OpticalActivity.has_x` says which, and the summary states it
 outright.
 
-The time window defaults to +-50 us around the brightest flash, matching the 2-D
-optical view; the whole readout is milliseconds wide and dominated by
-radiological light. Both the window and any cap on the number drawn are stated
-in the title rather than silently applied.
+The time window defaults to +-50 us around the brightest burst of OpHit light,
+matching the 2-D optical view and the light animation; the whole readout is
+milliseconds wide and dominated by radiological light. It used to centre on the
+brightest *flash*, which fails exactly when the flash finder dropped the
+interaction's flash (see below). Both the window and any cap on the number drawn
+are stated in the title rather than silently applied. `--flash-tag opslicer`
+(or `display_flashes_3d(ev, "opslicer")`) picks another flash producer.
+
+## Light vs time (animated PDS view)
+
+```bash
+python -m pylarevd reco.root -e 0 --mode light            # GIF + static map
+python -m pylarevd reco.root -e 0 --mode light --html     # + interactive page
+```
+
+```python
+from pylarevd import display_light
+a = display_light(ev)                  # or display_light(ev, "opslicer")
+a.save_animation("light.gif")          # .mp4 too, if ffmpeg is on PATH
+a.save_html("light.html")              # play button + time slider
+a.save("light.png")                    # static: PE collected over the window
+a.save("t.png", frame=20)              # one frame
+print(a.summary())
+```
+
+Every photon detector is a tile on the wall it is mounted on (beam z across, y
+up; one panel per APA plane, so three for the full FD-HD module). Tiles light
+up as their OpHits arrive, and reconstructed flashes appear as their +-1 sigma
+(y, z) ellipse at their own time, bright when new and fading to a ghost. A strip
+underneath shows the PE arriving in each frame, split into hits that belong to a
+flash and hits that belong to none, with every flash as a stem at its time and a
+playhead. The true vertex is a star. In the browser pick **Light vs time
+(PDS)**; the **animated GIF** button then exports this animation.
+
+**The clock.** By default frames are log-spaced after `t0`, the onset of the
+brightest OpHit light burst: a short linear pre-roll, then one 16 ns hit
+quantum per frame while the prompt light spreads out from the vertex, then
+geometric growth to ~0.4 us per frame by +10 us for the slow component and
+later flashes (Michel electrons). On the FD-HD sample the prompt light reaches
+detectors 2-4 m from the vertex ~70 ns after the onset and those beyond 8 m
+after ~250 ns, so a uniform clock would show it in a single frame.
+`--light-clock linear` (or `time_scale="linear"`) gives a uniform one;
+`--window LO,HI` and `--t0` override the defaults.
+
+**The tiles.** `afterglow` (default) keeps 70 % of a tile's PE from frame to
+frame, so an arrival flares up and fades -- that is what makes arrivals
+visible; `cumulative` accumulates instead. A tile that receives light in the
+current frame is outlined. The colour range is fixed for the whole animation,
+so frames compare. Tiles are cells of the detector grid, not the sensor
+outline.
+
+**Flash-hit links** come from the `OpFlash`<->`OpHit` association and are
+checked, not trusted: every flash's PE must equal the summed PE of its hits.
+On the FD-HD sample `opflash` passes exactly; `opslicer`'s association links
+its brightest flash to 1853 hits spread over the whole 4.5 ms readout, fails,
+and is not used (the strip then shows total OpHit PE).
+
+**Charge and light together.** `--mode chargelight` (browser: **Charge + light
+(3D + PDS)**, python: `display_charge_light(ev)`) puts the same animation beside
+the 3-D charge: space points (grey, brightness ~ log charge -- the light owns
+the colour map), tracks, vertices and truth as in the 3-D view, with the
+photon-detector wall drawn where it is on the anode plane, lighting up frame by
+frame, and each flash a bar across the drift at its (y, z). The charge itself is
+static -- it is deposited within nanoseconds and read out over milliseconds of
+drift, so there is no shared clock to animate it on. In the browser the 3-D
+panel is a normal plotly scene: rotate and zoom it while it plays, or between
+steps of the slider, and the view is kept. (plotly on its own put the camera
+back on every frame unless the drag ended inside the 3-D canvas; a small script
+in the page and in saved HTML, `KEEP_VIEW_JS`, stops that.) The GIF uses a
+fixed camera (`elev`, `azim`), and draws the charge on the viewer's side of the
+wall over the tiles and the rest under them.
+
+```bash
+python -m pylarevd reco.root -e 0 --mode chargelight --truth --html
+```
+
+**Missing and misplaced flashes.** Two failures this view makes visible, both on
+the FD-HD atmospheric sample:
+
+- `opflash` sometimes has **no flash at the interaction at all** -- 23 kPE of
+  hits at t0 and nothing reconstructed (the `RemoveLateLight` divide-by-width
+  bug in LArSoft's `OpFlashAlg`). The summary says so and names the other flash
+  producers in the file; `opslicer` finds that flash (26 kPE).
+- `opslicer` stores **negative widths and a centre pinned to one detector** for
+  every flash. Wherever a flash's width is negative or not a number, its centre
+  and width are recomputed as the PE-weighted mean and RMS of the detectors in
+  `fPEperOpDet` -- which reproduces `opflash`'s stored centres to 1e-12 cm --
+  and the summary counts them. All three optical views apply this.
 
 ## Hit disambiguation
 
