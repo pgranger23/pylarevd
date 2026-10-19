@@ -199,3 +199,23 @@ Order: A and C in parallel (C starts from a fixture written to this spec),
 then B, D and E in parallel, then integration, browser tests
 (Playwright + SwiftShader, recipe in setup-log I10) and performance
 measurements against the targets above.
+
+## WP-A implementation notes
+
+Implemented in `web/bundle.py`, `export.py`, `cache.py`. Additions and deviations from the contract above:
+
+- Strict JSON header: non-finite floats in `meta` are written as `null`. Bool arrays are stored as `u8`.
+- Cache file name: `<entry>_<hits|auto>_<flash|auto>.evdb`, plus `geometry.evdb`, in `~/.cache/pylarevd/<key>/` (override the root with env `PYLAREVD_CACHE`).
+- `meta` extras: `timing` (seconds per section), `notes` (why a section is missing), `mc_processes`, `label_texts`, `label_kinds` (`["track","shower","mc"]`), `panels_readout` (one entry per plane for the channel-vs-tick mode, indexed by `hits/chan_view`), `truth.{has_split, n_mc, n_from_interaction, mc2d_scope, vertex2d}`. `truth.vertex2d` is per panel `[h,v]` or null. If no true vertex exists, `mc/from_interaction` and `dep/from_interaction` are 1 everywhere and `truth.has_split` is false.
+- `meta.hit_tag` / `flash_tag` hold the tag actually used (also when the request left it null). `meta.optical` additionally has `n_frames, time_scale, persistence, n_flashes, n_ophits, n_walls`; `pe_floor` is `light.PE_FLOOR`; `window`/`t0` are `LightAnimation` defaults (absolute us).
+- Panels: `meta.panels[i]` adds `key, view, drift_sign, n_hits` and `faces`: list of `{dir:[d0,d1], boxes:[[xmin,ymin,zmin,xmax,ymax,zmax],...]}`. This is the exact `EventDisplay.project_points` rule so the client can project any 3-D point itself: the first face with a box containing the point claims it, `h = d0*y + d1*z`, `v = x` (use no clipping for the true vertex / showers). `hrange/vrange` are the hit extents (plus anodes and drift edges for v) padded by 3%.
+- `hits/panel` is 255 for hits in no panel (unresolved WireID). Extra hit arrays: `hits/view` i8 (U/V/Z of the WireID, -1 unresolved), `hits/chan_view` i8 (plane from the channel alone; the key for readout mode), `hits/drift_sign` i8. Groups: `hits/group/{track,shower,pfparticle,cluster,slice}` i32, and `meta.groups[kind]` the object count. If the requested hit tag is not the default one but has the same hit count, alignment with the default collection is assumed (noted in `meta.notes`); otherwise groups are omitted.
+- Extra reco arrays: `sp/amplitude`, `sp/tick`, `tracks/chi2`, `showers/id`, `vtx/id`. Vertex roles: 1 interaction, 2 primary daughter, 3 secondary (0 never occurs in practice).
+- Projected overlays: `tracks2d/{points,offsets,panel,track}`, `showers2d/{points,offsets,panel,shower}` (closed cone outline), `vtx2d/{hv,panel,index}`, `mc2d/{points,offsets,panel,index}` (`index` is an index into `mc/*`). Every row of `offsets` is one drawn run (a trajectory broken at a face gap or a step > 20 cm becomes several runs).
+- `mc2d` covers all trajectories unless the event has more than 400k trajectory points; then only `from_interaction==1` particles are projected (`truth.mc2d_scope == "from_interaction"`, noted). Projecting all 1.8M points of a ProtoDUNE-SP event took 18 s.
+- Deposits are NOT pre-projected (13 bytes/deposit/panel was 12 MB on the FD sample): use `panels[i].faces`. Extra: `dep/pdg`. `dep/from_interaction` matches on `abs(track_id)`.
+- Labels: `labels/{pos (n,3) f32, text u32 (index into meta.label_texts), kind u8 (0 reco track, 1 reco shower, 2 true particle), index i32 (tracks / showers / mc row, -1 if unknown), track_id, pdg}`. For events with more than 100k true particles the reco objects are matched against `from_interaction` particles only (noted; this was 13 s otherwise).
+- Optical: `oph/*` is the unfiltered OpHit list; `oph/flash` indexes `flash/*`, which lists ALL flashes of the product in product order (not capped, not brightest-first). `flash/yw, flash/zw` use 30 cm where the finder gave no usable width (as `LightAnimation.flashes`); `flash/x` is NaN where unset. `flash/wall_share` is the fraction of each flash's PE per wall (all ones if links are missing or there is one wall). `light/edges` is the default log clock (120 frames).
+- Geometry bundle extra: `meta.projected`, `meta.notes`. Without PD positions the `pd/*` arrays are absent.
+- Failures are per section: `available.*` false plus a line in `meta.notes`. ProtoDUNE-SP: no deposits, `showers` fail in pylario (TVector3 not subscriptable), and the default hit product is `gaushit` (not disambiguated); pass `hit_tag="hitpdune"`.
+- CLI: `python -m pylarevd.web.export FILE [-e all|N|A-B|A,B] [-j N] [--hits TAG] [--flash TAG]`; `cache.get_or_build_event(path, entry, hit_tag, flash_tag)` reuses one `EventFile` per process.
