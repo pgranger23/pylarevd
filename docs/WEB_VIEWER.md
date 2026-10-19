@@ -219,3 +219,12 @@ Implemented in `web/bundle.py`, `export.py`, `cache.py`. Additions and deviation
 - Geometry bundle extra: `meta.projected`, `meta.notes`. Without PD positions the `pd/*` arrays are absent.
 - Failures are per section: `available.*` false plus a line in `meta.notes`. ProtoDUNE-SP: no deposits, `showers` fail in pylario (TVector3 not subscriptable), and the default hit product is `gaushit` (not disambiguated); pass `hit_tag="hitpdune"`.
 - CLI: `python -m pylarevd.web.export FILE [-e all|N|A-B|A,B] [-j N] [--hits TAG] [--flash TAG]`; `cache.get_or_build_event(path, entry, hit_tag, flash_tag)` reuses one `EventFile` per process.
+
+## WP-B implementation notes
+
+- `python -m pylarevd.web FILE... [--port --host --workers --prefetch --allow-remote-open --precompute]`; code in `web/server.py` (`make_server`, `App`, `Handler`).
+- Builds run in a forkserver `ProcessPoolExecutor`; the worker writes the raw bundle and `<entry>.evdb.gz` (level 3) into the cache and the request thread reads the file. Gzip clients get the `.gz` (Content-Encoding: gzip), others the raw file; Content-Length always set.
+- Default tags: hit `hitfd` > `hitpdune` > first disambiguated non-`gaushit` > first non-`gaushit`; flash `opflash` > first. Requests without `hits=`/`flash=` resolve to these before the cache lookup, so cache file names always carry explicit tags.
+- Prefetch after serving i: i+1, i+2, i-1, at most `--prefetch` (default 2, capped at workers-1) concurrent, never started while an explicit request is in flight; each new explicit request replaces the queue. `--precompute` fills a lower-priority backlog.
+- `root://` paths are rejected (the cache keys on os.stat). `/api/status`: workers, in_flight, queued_prefetch, counters {builds, hits, joined, errors}, recent timings, per-file cached entries.
+- Errors: JSON `{error}` with 400 (bad entry/tag/body), 403 (open disabled), 404 (unknown file/route/static), 500 (decode failure).
