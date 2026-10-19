@@ -1119,6 +1119,8 @@ class EventDisplay(_TruthInfo):
             note = self.event.pandora_selection_note()
             if note:
                 lines.append(f"  {note}")
+        if getattr(self, "truth_note", ""):
+            lines.append(f"  {self.truth_note}")
         hx, hy, xlabel, ylabel = self._axes
         unit = "" if self.space == "readout" else " cm"
         xs, ys = xlabel.split(" [")[0], ylabel.split(" [")[0]
@@ -1832,7 +1834,7 @@ class Display3D(_TruthInfo):
             if note:
                 lines.append(f"  {note}")
         if self.mc is not None and len(self.mc):
-            lines.append(f"  {len(self.mc)} true trajectories")
+            lines.append(f"  {getattr(self, 'truth_note', '') or str(len(self.mc)) + ' true trajectories'}")
         lines.append(f"  coloured by {self.colour_by}; framing: {self.focus}")
         return "\n".join(lines)
 
@@ -2875,6 +2877,32 @@ class OpticalDisplay(_TruthInfo):
         self.plotly_figure(**kwargs).show(config=_PLOTLY_CONFIG)
 
 
+#: More true trajectories than this are thinned to the longest ones. A
+#: ProtoDUNE-SP event carries ~900k (cosmic showers and radiologicals), which
+#: drawn in full made a 100 MB interactive figure taking 23 s to build.
+MAX_TRUE_TRAJECTORIES = 20000
+
+
+def _cap_truth(mc):
+    """(mc, note): at most MAX_TRUE_TRAJECTORIES, the longest by path."""
+    if mc is None or len(mc) <= MAX_TRUE_TRAJECTORIES:
+        return mc, ""
+    pts = mc.points
+    n = np.array([len(p) for p in pts])
+    allp = np.concatenate([np.asarray(p, float) for p in pts]) if n.sum() else np.zeros((0, 3))
+    seg = np.linalg.norm(np.diff(allp, axis=0), axis=1)
+    ends = np.cumsum(n)
+    seg[ends[:-1] - 1] = 0.0                # no segment across two particles
+    starts = np.concatenate([[0], ends[:-1]])
+    seg = np.append(seg, 0.0)
+    length = np.add.reduceat(seg, starts) if len(seg) else np.zeros(len(n))
+    length[n < 2] = 0.0
+    keep = np.sort(np.argsort(-length, kind="stable")[:MAX_TRUE_TRAJECTORIES])
+    note = (f"{len(mc)} true trajectories; drawing the {MAX_TRUE_TRAJECTORIES} "
+            "longest (hide radiologicals to see only the interaction)")
+    return mc[keep], note
+
+
 def display(event, tag: str | None = None, *, truth: bool = False,
             reco: bool = False, tracks: bool | None = None,
             vertices: bool | None = None, showers: bool | None = None,
@@ -2916,7 +2944,8 @@ def display(event, tag: str | None = None, *, truth: bool = False,
             got["mc"] = None
     if truth and not radiologicals:
         deposits, got["mc"] = event._drop_radiologicals(deposits, got.get("mc"))
-    return EventDisplay(event, hits=event.hits(tag), truth=deposits,
+    got["mc"], truth_note = _cap_truth(got.get("mc"))
+    d = EventDisplay(event, hits=event.hits(tag), truth=deposits,
                         radiologicals=radiologicals,
                         tracks=got.get("tracks"), vertices=got.get("vertices"),
                         showers=got.get("showers"), mc=got.get("mc"),
@@ -2925,6 +2954,8 @@ def display(event, tag: str | None = None, *, truth: bool = False,
                         secondary_vertices=secondary_vertices,
                         particle_symbols=particle_symbols,
                         **kwargs)
+    d.truth_note = truth_note
+    return d
 
 
 def display_flashes_3d(event, tag: str | None = None, **kwargs) -> FlashDisplay3D:
@@ -3024,7 +3055,8 @@ def display_3d(event, spacepoint_tag: str | None = None, *, truth: bool = False,
             mc = None
     if truth and not radiologicals:
         deposits, mc = event._drop_radiologicals(deposits, mc)
-    return Display3D(event, spacepoints=event.spacepoints(spacepoint_tag),
+    mc, truth_note = _cap_truth(mc)
+    d = Display3D(event, spacepoints=event.spacepoints(spacepoint_tag),
                      truth=deposits, tracks=polylines, mc=mc,
                      radiologicals=radiologicals,
                      pandora_vertex=pandora_vertex,
@@ -3033,6 +3065,8 @@ def display_3d(event, spacepoint_tag: str | None = None, *, truth: bool = False,
                      show_tracks=tracks, show_showers=showers,
                      particle_symbols=particle_symbols, **extra,
                      **kwargs)
+    d.truth_note = truth_note
+    return d
 
 
 import sys as _sys
