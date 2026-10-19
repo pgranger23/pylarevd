@@ -75,6 +75,9 @@
     <label title="what hovering / clicking a hit, space point or track selects; hold Shift to use the other one; none disables highlighting">select by
       <select id="sel-by"><option value="particle">particle</option><option value="slice">slice</option><option value="none">none</option></select>
     </label>
+    <label title="brightness of everything outside the highlighted particle / slice (0 hides it, 100 leaves it unchanged)">others
+      <input type="range" id="sel-dim" min="0" max="100" step="1" value="30" style="width:80px;vertical-align:middle"> <span id="sel-dim-v" class="muted">30%</span>
+    </label>
     <label title="highlight the whole hierarchy of the particle: its top-level parent and all daughters (key f)"><input type="checkbox" id="cb-family"> family</label>
   </div>
   <div class="group">

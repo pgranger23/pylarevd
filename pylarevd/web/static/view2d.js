@@ -86,7 +86,7 @@ void main() {
 const POINT_FS = `#version 300 es
 precision mediump float;
 in vec3 vColor; flat in float vShape; flat in float vSelF;
-uniform float uAlpha; uniform vec3 uRing;
+uniform float uAlpha, uDim; uniform vec3 uRing;
 out vec4 o;
 void main() {
   vec2 q = gl_PointCoord * 2.0 - 1.0; q.y = -q.y;
@@ -98,7 +98,7 @@ void main() {
   else { q.y = -q.y; ok = q.y > -0.8 && abs(q.x) <= (0.9 - q.y) * 0.53; }
   if (!ok) discard;
   vec3 col = vColor; float a = uAlpha;
-  if (vSelF < -0.5) a *= 0.15;
+  if (vSelF < -0.5) a *= uDim;
   else if (vSelF > 0.5) { a = 1.0; if (dot(q, q) > 0.45) col = uRing; }
   o = vec4(col, a);
 }`;
@@ -130,11 +130,11 @@ void main() {
 const LINE_FS = `#version 300 es
 precision highp float;
 in vec3 vColor; in float vCum; in float vSelF;
-uniform float uAlpha, uDash, uPxPerCm, uPeriod;
+uniform float uAlpha, uDash, uPxPerCm, uPeriod, uDim;
 out vec4 o;
 void main() {
   if (uDash > 0.5 && fract(vCum * uPxPerCm / uPeriod) > 0.55) discard;
-  o = vec4(vColor, vSelF < -0.5 ? uAlpha * 0.12 : (vSelF > 0.5 ? 1.0 : uAlpha));
+  o = vec4(vColor, vSelF < -0.5 ? uAlpha * uDim * 0.8 : (vSelF > 0.5 ? 1.0 : uAlpha));
 }`;
 const FILL_VS = `#version 300 es
 precision highp float;
@@ -151,8 +151,8 @@ void main() {
 }`;
 const FILL_FS = `#version 300 es
 precision mediump float;
-uniform vec3 uColor; uniform float uAlpha; in float vSelF; out vec4 o;
-void main() { o = vec4(uColor, vSelF < -0.5 ? uAlpha * 0.2 : (vSelF > 0.5 ? uAlpha * 2.2 : uAlpha)); }`;
+uniform vec3 uColor; uniform float uAlpha, uDim; in float vSelF; out vec4 o;
+void main() { o = vec4(uColor, vSelF < -0.5 ? uAlpha * min(1.0, uDim * 1.33) : (vSelF > 0.5 ? uAlpha * 2.2 : uAlpha)); }`;
 
 class Prog {
   constructor(gl, vs, fs, attribs) {
@@ -750,6 +750,7 @@ function renderGL() {
   const L = layout(), cs = colorSpec();
   // selection: group ids per hit (bound as aSel) + flag texture indexed by id
   const selv = ensureSelTex(), gk = selv ? selv.groupKind : null;
+  const dimv = V.app.selDim ? V.app.selDim() : 0.15;   // visibility of non-selected objects
   let selHits = null;
   if (selv) { const g = S.bundle.get(`hits/group/${gk}`); if (g) selHits = layoutBuf(L, `g:${gk}`, () => gather(g, L.orig)); }
   const hi = rgb(th.name === 'light' ? '#c2410c' : '#fde047');
@@ -794,7 +795,7 @@ function renderGL() {
       const P = V.progs.fill.use(); P.v2('uCenter', v.cx, v.cy); P.v2('uHalf', v.hx, v.hy); P.v3('uColor', rgb(th.shower)); P.f('uAlpha', 0.22);
       for (let i = 2; i < 5; i++) { gl.disableVertexAttribArray(i); gl.vertexAttribDivisor(i, 0); }
       const fpid = selv && ov.showers ? pidBuf(sh.fill, 'showers', gk) : null;
-      P.f('uSelOn', fpid ? 1 : 0); gl.uniform1i(P.l('uSelTex'), 1);
+      P.f('uSelOn', fpid ? 1 : 0); P.f('uDim', dimv); gl.uniform1i(P.l('uSelTex'), 1);
       if (fpid) attrF(gl, 1, fpid, 1, sh.fill.ranges[p][0] * 4); else attrOff(gl, 1, -1);
       attrF(gl, 0, sh.fill.pos, 2, sh.fill.ranges[p][0] * 8);
       gl.drawArrays(gl.TRIANGLES, 0, sh.fill.ranges[p][1]);
@@ -812,7 +813,7 @@ function renderGL() {
       if (valRes) attrF(gl, 1, valRes, 1, hs * 4); else attrOff(gl, 1, 0);
       if (catRes) attrF(gl, 2, catRes, 1, hs * 4); else attrOff(gl, 2, 0);
       attrOff(gl, 3, 1);
-      P.f('uSelOn', selHits ? 1 : 0); gl.uniform1i(P.l('uSelTex'), 1); P.v3('uRing', hi);
+      P.f('uSelOn', selHits ? 1 : 0); P.f('uDim', dimv); gl.uniform1i(P.l('uSelTex'), 1); P.v3('uRing', hi);
       if (selHits) attrF(gl, 4, selHits, 1, hs * 4); else attrOff(gl, 4, -1);
       gl.drawArrays(gl.POINTS, 0, he - hs);
       gl.disable(gl.DEPTH_TEST);
@@ -833,13 +834,13 @@ function renderGL() {
       attrF(gl, 0, set.seg, 2, set.ranges[p][0] * 16);
       attrF(gl, 1, set.ext, 2, set.ranges[p][0] * 16);
       const pid = selv && o.selName ? pidBuf(set, o.selName, gk) : null;
-      P.f('uSelOn', pid ? 1 : 0); P.f('uSelPass', o.pass ? 1 : 0); gl.uniform1i(P.l('uSelTex'), 1);
+      P.f('uSelOn', pid ? 1 : 0); P.f('uDim', dimv); P.f('uSelPass', o.pass ? 1 : 0); gl.uniform1i(P.l('uSelTex'), 1);
       if (pid) attrF(gl, 2, pid, 1, set.ranges[p][0] * 8); else attrOff(gl, 2, -1);
       if (o.pass && !pid) return;
       const n = Math.max(1, Math.round(o.width * dpr)), passes = [[0, 0], [1, 0], [0, 1], [1, 1]].slice(0, Math.min(4, n === 3 ? 3 : n));
       for (const [ox, oy] of passes) { P.v2('uOff', ox * 2 / w, oy * 2 / h); gl.drawArrays(gl.LINES, 0, 2 * set.ranges[p][1]); }
     };
-    line(sets.mc, { width: 1, alpha: selv ? 0.18 : 0.7, color: th.mctrack, mode: st.color === 'pdg' ? 2 : 0, dash: true, hasFlag: sets.mc && sets.mc.hasFlag });
+    line(sets.mc, { width: 1, alpha: selv ? Math.min(0.7, 1.2 * dimv) : 0.7, color: th.mctrack, mode: st.color === 'pdg' ? 2 : 0, dash: true, hasFlag: sets.mc && sets.mc.hasFlag });
     line(sh, { width: 1, alpha: 0.8, color: th.shower, mode: 0, selName: 'showers' });
     line(sets.tracks, { width: 2, alpha: 0.9, color: th.track, mode: st.color === 'track' ? 1 : 0, selName: 'tracks' });
     if (selv) {          // emphasis: the selected tracks / shower outlines again, thicker, in the highlight colour
@@ -907,7 +908,7 @@ function renderOv() {
           const role = roles && ix ? roles[ix[k]] : 3;
           ((hasSel && ix && !V.app.vertexSelected(ix[k]) ? dim : by)[role === 1 ? 'x' : role === 2 ? 'D' : 'o']).push(x, y);
         }
-        if (hasSel) { g.globalAlpha = 0.2; for (const kind of ['o', 'D', 'x']) drawMarkers(g, kind, dim[kind], th.vertex, th.axes_bg); g.globalAlpha = 1; }
+        if (hasSel) { g.globalAlpha = Math.min(1, 1.33 * V.app.selDim()); for (const kind of ['o', 'D', 'x']) drawMarkers(g, kind, dim[kind], th.vertex, th.axes_bg); g.globalAlpha = 1; }
         for (const kind of ['o', 'D', 'x']) drawMarkers(g, kind, by[kind], th.vertex, th.axes_bg);
       }
       // true vertex
@@ -1235,7 +1236,7 @@ function onState(state, changed) {
     V.hover = null; hideTip();
     if (V.S) { ensureViews(); computeRects(); }
   }
-  if (['color', 'scale', 'cmap', 'theme', 'ov', 'space2d', 'merge2d'].some((k) => changed.has(k))) { if (V.S) updateLegend(); schedule(true, true); }
+  if (['color', 'scale', 'cmap', 'theme', 'ov', 'space2d', 'merge2d', 'dim'].some((k) => changed.has(k))) { if (V.S) updateLegend(); schedule(true, true); }
 }
 
 function setVisible(vis) {

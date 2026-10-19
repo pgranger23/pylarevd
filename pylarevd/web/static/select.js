@@ -45,6 +45,7 @@ export function initSelection(app) {
   app.registerParam('fam', '0');
   app.registerParam('pfp', '');
   app.registerParam('slice', '');
+  app.registerParam('dim', '30');      // visibility of non-selected objects, percent
 
   let T = null;               // tables of the current bundle
   let hoverTimer = 0, clearTimer = 0, pendKey = '';
@@ -131,6 +132,8 @@ export function initSelection(app) {
   const sameSel = (a, b) => a === b || (a && b && a.kind === b.kind && a.id === b.id && a.pinned === b.pinned && a.family === b.family);
   const familyOn = () => state.fam === '1';
   const selOff = () => state.selby === 'none';
+  /** Visibility (0..1) of everything outside the selection: URL/toolbar `dim`, in percent. */
+  app.selDim = () => { const d = parseFloat(state.dim); return Number.isFinite(d) ? Math.min(1, Math.max(0, d / 100)) : 0.3; };
   const byKind = (shift) => (selOff() ? null : (state.selby === 'slice') !== !!shift ? 'slice' : 'pfp');
   const selbyValue = (v) => (v === 'slice' || v === 'none' ? v : 'particle');
 
@@ -226,14 +229,19 @@ export function initSelection(app) {
     const by = $('sel-by'), cb = $('cb-family');
     if (by) by.value = selbyValue(state.selby);
     if (cb) { cb.checked = familyOn(); cb.disabled = (!!T && !T.hasPfp) || selOff(); }
+    const dm = $('sel-dim'), dv = $('sel-dim-v');
+    if (dm) { dm.value = String(Math.round(app.selDim() * 100)); dm.disabled = selOff(); }
+    if (dv) dv.textContent = `${Math.round(app.selDim() * 100)}%`;
     const grp = $('sel-group');
     if (grp) grp.hidden = !T || (!T.groupsPfp && !T.groupsSlice);
   }
   function bindToolbar() {
     const by = $('sel-by'), cb = $('cb-family');
     if (by) by.addEventListener('change', () => { app.setState({ selby: selbyValue(by.value) }); app.clearSelection(); });
+    const dm = $('sel-dim');
+    if (dm) dm.addEventListener('input', () => app.setState({ dim: dm.value }));
     if (cb) cb.addEventListener('change', () => { app.setState({ fam: cb.checked ? '1' : '0' }); refamily(); });
-    app.on('state', (s, ch) => { if (ch.has('selby') || ch.has('fam')) syncToolbar(); if (ch.has('view')) renderCard(); });
+    app.on('state', (s, ch) => { if (ch.has('selby') || ch.has('fam') || ch.has('dim')) syncToolbar(); if (ch.has('view')) renderCard(); });
     syncToolbar();
   }
   function refamily() {

@@ -51,7 +51,7 @@ void main() {
 const SELGLSL = /* glsl */`
 // selection (select.js): flag texture indexed by group id, 1024 ids per row
 uniform sampler2D uSelTex;
-uniform float uSelOn, uSelH;
+uniform float uSelOn, uSelH, uDim;
 float selFlag(float id) {
   if (id < -0.5) return 0.0;
   float row = floor((id + 0.5) / 1024.0);
@@ -90,7 +90,7 @@ void main() {
   vSel = 0.0;
   if (uSelOn > 0.5) {                         // highlight: selected points big + outlined, the rest faded into the background
     if (selFlag(aSel) > 0.5) { vSel = 1.0; gl_PointSize = max(uSize * 1.8, 5.0) * uPx; }
-    else { vSel = -1.0; vColor = mix(uBg, vColor, 0.16); }
+    else { vSel = -1.0; vColor = mix(uBg, vColor, uDim); }
   }
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }`;
@@ -139,8 +139,8 @@ void main() {
   } else if (uMode > 1.5) {
     vColor = uPal[int(mod(aMeta, 8.0))];
   }
-  if (uSelOn > 0.5) vColor = selFlag(aSel) > 0.5 ? uHi : mix(uBg, vColor, 0.14);
-  if (uDimAll > 0.5) vColor = mix(uBg, vColor, 0.2);
+  if (uSelOn > 0.5) vColor = selFlag(aSel) > 0.5 ? uHi : mix(uBg, vColor, uDim * 0.9);
+  if (uDimAll > 0.5) vColor = mix(uBg, vColor, min(1.0, uDim * 1.33));
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   if (flag < 0.5 && uShowRad < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
 }`;
@@ -248,7 +248,7 @@ function mkUniforms() {
     uLut: { value: null }, uPal: { value: pal }, uPdg: { value: pdg },
     uCmapLo: { value: 0 }, uCmapHi: { value: 1 }, uShowRad: { value: 0 }, uPx: { value: 1 },
     // selection highlight, shared by space points / tracks / showers (uSelOn is per material)
-    uSelTex: { value: null }, uSelH: { value: 1 }, uBg: { value: new THREE.Vector3() }, uHi: { value: new THREE.Vector3(1, 0.9, 0.2) },
+    uSelTex: { value: null }, uSelH: { value: 1 }, uDim: { value: 0.15 }, uBg: { value: new THREE.Vector3() }, uHi: { value: new THREE.Vector3(1, 0.9, 0.2) },
   };
 }
 
@@ -328,7 +328,7 @@ function buildMaterials() {
   const lineUni = () => ({
     uMode: { value: 0 }, uHasFlag: { value: 0 }, uShowRad: u.uShowRad, uColor: { value: new THREE.Vector3() },
     uPdg: u.uPdg, uPal: u.uPal,
-    uSelTex: u.uSelTex, uSelH: u.uSelH, uBg: u.uBg, uHi: u.uHi, uSelOn: { value: 0 }, uDimAll: { value: 0 },
+    uSelTex: u.uSelTex, uSelH: u.uSelH, uDim: u.uDim, uBg: u.uBg, uHi: u.uHi, uSelOn: { value: 0 }, uDimAll: { value: 0 },
   });
   M.mc = new THREE.ShaderMaterial({ vertexShader: LINE_VERT, fragmentShader: FRAG_FLAT, uniforms: { ...lineUni(), uHasFlag: { value: 1 } } });
   M.tracks = new THREE.ShaderMaterial({ vertexShader: LINE_VERT, fragmentShader: FRAG_FLAT, uniforms: lineUni() });
@@ -932,6 +932,7 @@ function onState(state, changed) {
     applyOverlays();
     if (V.bundle) applyColors();   // legend depends on truth visibility and on the flash bars
   }
+  if (changed.has('dim')) { V.uni.uDim.value = V.app.selDim ? V.app.selDim() : 0.15; requestRender(); }
   if (changed.has('view')) applySelection();
   requestRender();
 }
@@ -962,6 +963,7 @@ function selAttrFor(what, gk) {
 
 function applySelection() {
   if (!V.ready) return;
+  V.uni.uDim.value = V.app.selDim ? V.app.selDim() : 0.15;
   const sel = V.app.selection, fm = V.app.state.view === 'flash3d';
   const on = !!sel && !fm && !!V.bundle;
   if (on) {
