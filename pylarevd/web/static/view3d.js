@@ -48,14 +48,29 @@ void main() {
   gl_FragColor = vec4(vColor, 1.0);
 }`;
 
+const SELGLSL = /* glsl */`
+// selection (select.js): flag texture indexed by group id, 1024 ids per row
+uniform sampler2D uSelTex;
+uniform float uSelOn, uSelH;
+float selFlag(float id) {
+  if (id < -0.5) return 0.0;
+  float row = floor((id + 0.5) / 1024.0);
+  float col = id + 0.5 - row * 1024.0;
+  return texture2D(uSelTex, vec2(col / 1024.0, (row + 0.5) / uSelH)).r;
+}
+`;
+
 const SP_VERT = /* glsl */`
 attribute float aValue;
 attribute float aCat;
+attribute float aSel;
 uniform float uSize, uPx, uMode, uLog, uLo, uInv, uFloor, uAxis, uCmapLo, uCmapHi;
 uniform sampler2D uLut;
 uniform vec3 uPal[8];
-uniform vec3 uUnassoc, uUniform;
+uniform vec3 uUnassoc, uUniform, uBg;
 varying vec3 vColor;
+varying float vSel;
+${SELGLSL}
 void main() {
   float t;
   if (uMode < 0.5) {            // value through the LUT
@@ -72,7 +87,23 @@ void main() {
     vColor = uUniform;
   }
   gl_PointSize = uSize * uPx;
+  vSel = 0.0;
+  if (uSelOn > 0.5) {                         // highlight: selected points big + outlined, the rest faded into the background
+    if (selFlag(aSel) > 0.5) { vSel = 1.0; gl_PointSize = max(uSize * 1.8, 5.0) * uPx; }
+    else { vSel = -1.0; vColor = mix(uBg, vColor, 0.16); }
+  }
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+const SP_FRAG = /* glsl */`
+varying vec3 vColor;
+varying float vSel;
+uniform vec3 uHi;
+void main() {
+  vec2 c = gl_PointCoord - 0.5;
+  float r2 = dot(c, c);
+  if (r2 > 0.25) discard;
+  gl_FragColor = vec4(vSel > 0.5 && r2 > 0.12 ? uHi : vColor, 1.0);
 }`;
 
 const DEP_VERT = /* glsl */`
@@ -90,11 +121,15 @@ void main() {
 // Lines: aMeta is cls + 16*flag for truth (modes 0/1), the object id for tracks (mode 2).
 const LINE_VERT = /* glsl */`
 attribute float aMeta;
+attribute float aSel;
 uniform float uMode, uHasFlag, uShowRad;
 uniform vec3 uColor;
 uniform vec3 uPdg[9];
 uniform vec3 uPal[8];
+uniform vec3 uBg, uHi;
+uniform float uDimAll;
 varying vec3 vColor;
+${SELGLSL}
 void main() {
   vColor = uColor;
   float flag = 1.0;
@@ -104,6 +139,8 @@ void main() {
   } else if (uMode > 1.5) {
     vColor = uPal[int(mod(aMeta, 8.0))];
   }
+  if (uSelOn > 0.5) vColor = selFlag(aSel) > 0.5 ? uHi : mix(uBg, vColor, 0.14);
+  if (uDimAll > 0.5) vColor = mix(uBg, vColor, 0.2);
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   if (flag < 0.5 && uShowRad < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
 }`;
@@ -197,6 +234,7 @@ const V = {
   flashes: null, flashWin: null, flashTime: null, fbox: null,
   labels: [], labelPool: [], labelLayer: null, axisLabels: [],
   legend: null, title: null,
+  selAttrs: new Map(), selTexObj: null, showerPos: null, pk: null, pkRaf: 0, mouse: null, pickMs: [], lastPickObj: null,
   renderQueued: false, animating: false, fitKey: '', pixelRatio: 1, camKey: new Float32Array(9),
   scratch: new THREE.Vector3(),
 };
@@ -209,6 +247,8 @@ function mkUniforms() {
   return {
     uLut: { value: null }, uPal: { value: pal }, uPdg: { value: pdg },
     uCmapLo: { value: 0 }, uCmapHi: { value: 1 }, uShowRad: { value: 0 }, uPx: { value: 1 },
+    // selection highlight, shared by space points / tracks / showers (uSelOn is per material)
+    uSelTex: { value: null }, uSelH: { value: 1 }, uBg: { value: new THREE.Vector3() }, uHi: { value: new THREE.Vector3(1, 0.9, 0.2) },
   };
 }
 
@@ -241,7 +281,7 @@ function init(container, app) {
   V.controls = new OrbitControls(V.camera, renderer.domElement);
   V.controls.enableDamping = false;
   V.controls.screenSpacePanning = true;
-  V.controls.addEventListener('change', requestRender);
+  V.controls.addEventListener('change', () => { requestRender(); schedulePrewarm(); });
 
   V.uni = mkUniforms();
   V.uni.uPx.value = V.pixelRatio;
@@ -263,6 +303,8 @@ function init(container, app) {
   V.fbox.firstChild.addEventListener('change', (e) => app.setState({ fbars: e.target.checked ? '1' : '0' }));
   container.appendChild(V.fbox);
   buildMaterials();
+  app.on('selection', () => { applySelection(); });
+  bindPicking(renderer.domElement);
   const ro = new ResizeObserver(() => resize());
   ro.observe(container);
   V.ready = true;
@@ -273,9 +315,9 @@ let M = {};   // materials
 function buildMaterials() {
   const u = V.uni;
   M.sp = new THREE.ShaderMaterial({
-    vertexShader: SP_VERT, fragmentShader: FRAG_DISC,
+    vertexShader: SP_VERT, fragmentShader: SP_FRAG,
     uniforms: {
-      ...u, uSize: { value: 2.5 }, uMode: { value: 0 }, uLog: { value: 1 }, uLo: { value: 0 }, uInv: { value: 1 },
+      ...u, uSelOn: { value: 0 }, uSize: { value: 2.5 }, uMode: { value: 0 }, uLog: { value: 1 }, uLo: { value: 0 }, uInv: { value: 1 },
       uFloor: { value: 1e-3 }, uAxis: { value: 0 }, uUnassoc: { value: new THREE.Vector3() }, uUniform: { value: new THREE.Vector3(0.6, 0.6, 0.6) },
     },
   });
@@ -286,6 +328,7 @@ function buildMaterials() {
   const lineUni = () => ({
     uMode: { value: 0 }, uHasFlag: { value: 0 }, uShowRad: u.uShowRad, uColor: { value: new THREE.Vector3() },
     uPdg: u.uPdg, uPal: u.uPal,
+    uSelTex: u.uSelTex, uSelH: u.uSelH, uBg: u.uBg, uHi: u.uHi, uSelOn: { value: 0 }, uDimAll: { value: 0 },
   });
   M.mc = new THREE.ShaderMaterial({ vertexShader: LINE_VERT, fragmentShader: FRAG_FLAT, uniforms: { ...lineUni(), uHasFlag: { value: 1 } } });
   M.tracks = new THREE.ShaderMaterial({ vertexShader: LINE_VERT, fragmentShader: FRAG_FLAT, uniforms: lineUni() });
@@ -305,7 +348,7 @@ function buildMaterials() {
     },
   });
   M.tpc = new THREE.LineBasicMaterial({ color: 0x64748b });
-  M.shower = new THREE.LineBasicMaterial({ color: 0xc084fc });
+  M.shower = new THREE.ShaderMaterial({ vertexShader: LINE_VERT, fragmentShader: FRAG_FLAT, uniforms: lineUni() });
 }
 
 // ------------------------------------------------------------------ geometry helpers
@@ -451,6 +494,7 @@ function setPdColors(rgb, alpha) {
 function clearEvent() {
   for (const k of ['sp', 'tracks', 'showers', 'markers', 'mc', 'dep', 'flashes']) { disposeObj(V[k]); V[k] = null; }
   V.spCat.clear(); V.spVal.clear(); V.stats.clear(); V.trackCat = null;
+  V.selAttrs.clear(); V.pk = null; V.showerPos = null; V.lastPickObj = null;
   V.labels = [];
   for (const l of V.labelPool) l.el.style.display = 'none';
 }
@@ -471,6 +515,13 @@ function setEvent(bundle, geometry) {
   buildFlashes(bundle);
   V.title.textContent = (bundle.meta.truth && bundle.meta.truth.headline) || '';
   applyAll();
+  applySelection();
+  // upload the per-object group ids with the first paint so the first hover does not pay for it
+  for (const [obj, what] of [[V.sp, 'sp'], [V.tracks, 'tracks'], [V.showers, 'showers']]) {
+    const a = obj && !obj.geometry.attributes.aSel ? selAttrFor(what, 'pfparticle') : null;
+    if (a) obj.geometry.setAttribute('aSel', a);
+  }
+  schedulePrewarm();
   render();   // first paint, synchronous
 }
 
@@ -518,6 +569,7 @@ function buildShowers(b) {
       k += 6;
     }
   }
+  V.showerPos = pos;
   const g = new THREE.BufferGeometry(); g.setAttribute('position', attr(pos, 3));
   V.showers = addObj(new THREE.LineSegments(g, M.shower), 1);
 }
@@ -699,7 +751,8 @@ function applyTheme() {
   if (!V.ready) return;
   const t = V.app.theme;
   V.renderer.setClearColor(new THREE.Color(t.axes_bg), 1);
-  M.tpc.color.set(t.wire); M.shower.color.set(t.shower);
+  M.tpc.color.set(t.wire); setVec(M.shower.uniforms.uColor.value, t.shower);
+  setVec(V.uni.uBg.value, t.axes_bg); setVec(V.uni.uHi.value, t.name === 'light' ? '#c2410c' : '#fde047');
   setVec(M.tracks.uniforms.uColor.value, t.track);
   setVec(M.mc.uniforms.uColor.value, t.mctrack);
   setVec(M.dep.uniforms.uUniform.value, t.truth);
@@ -731,7 +784,7 @@ function applyOverlays() {
     let any = false;
     for (let i = 0; i < u.nv; i++) {
       const on = !fm && (u.role && u.role[i] === 1 ? showP : showD);
-      a[i] = on ? base[i] : 0; any = any || on;
+      a[i] = on ? base[i] * (V.app.selection ? (V.app.vertexSelected(i) ? 1.4 : 0.35) : 1) : 0; any = any || on;   // selection: other vertices shrink
     }
     if (u.hasTrue) { const on = fm || ov.truth; a[u.nv] = on ? base[u.nv] : 0; any = any || on; }
     V.markers.geometry.attributes.aSize.needsUpdate = true;
@@ -879,8 +932,245 @@ function onState(state, changed) {
     applyOverlays();
     if (V.bundle) applyColors();   // legend depends on truth visibility and on the flash bars
   }
-  if (changed.has('view') || changed.has('cmap')) { /* flash colours follow the shared LUT texture */ }
+  if (changed.has('view')) applySelection();
   requestRender();
+}
+
+
+// ------------------------------------------------------------------ selection highlight (select.js)
+/** group id attribute (float) of the selection's group kind, for 'sp' | 'tracks' | 'showers'; null if the data lacks it */
+function selAttrFor(what, gk) {
+  const key = what + ':' + gk;
+  if (V.selAttrs.has(key)) return V.selAttrs.get(key);
+  const b = V.bundle;
+  let a = null;
+  if (what === 'sp') {
+    const src = b.get(`sp/group/${gk}`);
+    a = src ? attr(Float32Array.from(src), 1) : null;
+  } else {
+    const own = b.get(what === 'tracks' ? 'tracks/pfp' : 'showers/pfp'), slice = b.get('pfp/slice');
+    if (own && (gk === 'pfparticle' || slice)) {
+      const per = new Float32Array(own.length);
+      for (let i = 0; i < per.length; i++) per[i] = gk === 'pfparticle' ? own[i] : (own[i] >= 0 ? slice[own[i]] : -1);
+      if (what === 'tracks') { const off = b.get('tracks/offsets'); a = attr(expandRagged(off, per), 1); }
+      else { const v = new Float32Array(per.length * 10); for (let i = 0; i < per.length; i++) v.fill(per[i], 10 * i, 10 * i + 10); a = attr(v, 1); }
+    }
+  }
+  V.selAttrs.set(key, a);
+  return a;
+}
+
+function applySelection() {
+  if (!V.ready) return;
+  const sel = V.app.selection, fm = V.app.state.view === 'flash3d';
+  const on = !!sel && !fm && !!V.bundle;
+  if (on) {
+    const W = 1024, H = Math.max(1, Math.ceil(sel.n / W));
+    const data = new Uint8Array(W * H); for (let i = 0; i < sel.mask.length; i++) data[i] = sel.mask[i] ? 255 : 0;   // R8 is normalised: 1 would read as 1/255
+    const tex = new THREE.DataTexture(data, W, H, THREE.RedFormat, THREE.UnsignedByteType);
+    tex.minFilter = tex.magFilter = THREE.NearestFilter; tex.needsUpdate = true;
+    if (V.selTexObj) V.selTexObj.dispose();
+    V.selTexObj = tex; V.uni.uSelTex.value = tex; V.uni.uSelH.value = H;
+  }
+  const set = (obj, mat, what) => {
+    if (!obj) return;
+    const a = on ? selAttrFor(what, sel.groupKind) : null;
+    if (a) obj.geometry.setAttribute('aSel', a);
+    mat.uniforms.uSelOn.value = a ? 1 : 0;
+  };
+  set(V.sp, M.sp, 'sp'); set(V.tracks, M.tracks, 'tracks'); set(V.showers, M.shower, 'showers');
+  M.mc.uniforms.uDimAll.value = on ? 1 : 0;           // true trajectories fade too
+  if (V.markers) applyOverlays();                      // vertex marker sizes follow the selection
+  requestRender();
+}
+
+/** Recentre the orbit target on the selected object; the camera keeps its distance and direction. */
+function focusSelection() {
+  const sel = V.app.selection, b = V.bundle;
+  if (!sel || !b) return;
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  const add = (x, y, z) => { if (!Number.isFinite(x + y + z)) return; lo[0] = Math.min(lo[0], x); hi[0] = Math.max(hi[0], x); lo[1] = Math.min(lo[1], y); hi[1] = Math.max(hi[1], y); lo[2] = Math.min(lo[2], z); hi[2] = Math.max(hi[2], z); };
+  const xyz = b.get('sp/xyz'), g = b.get(`sp/group/${sel.groupKind}`);
+  if (xyz && g) for (let i = 0; i < g.length; i++) { const id = g[i]; if (id >= 0 && id < sel.n && sel.mask[id]) add(xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]); }
+  if (!(lo[0] <= hi[0])) {
+    const a = selAttrFor('tracks', sel.groupKind), pts = b.get('tracks/points');
+    if (a && pts) { const ids = a.array; for (let i = 0; i < ids.length; i++) if (ids[i] >= 0 && sel.mask[ids[i]]) add(pts[3 * i], pts[3 * i + 1], pts[3 * i + 2]); }
+  }
+  if (!(lo[0] <= hi[0])) return;
+  const c = sceneOf((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2, new THREE.Vector3());
+  const d = c.clone().sub(V.controls.target);
+  V.controls.target.add(d); V.camera.position.add(d);
+  V.controls.update();
+  requestRender();
+}
+
+// ------------------------------------------------------------------ picking (CPU, screen space)
+// Space points: projected once per camera/size change into an 8 px bucket grid (only points that
+// belong to some PFParticle/slice), then each mouse move is a 3x3 cell lookup; the frontmost point
+// within 6 px wins. Track and shower segments: projected once, then a point-segment distance scan.
+const CELL = 8, R_SP = 6, R_LINE = 5;
+
+function pickState() {
+  const b = V.bundle;
+  if (!b) return null;
+  if (V.pk && V.pk.bundle === b) return V.pk;
+  const xyz = b.get('sp/xyz'), gp = b.get('sp/group/pfparticle'), gs = b.get('sp/group/slice');
+  const cand = [];
+  if (xyz && (gp || gs)) {
+    const n = xyz.length / 3;
+    for (let i = 0; i < n; i++) if ((gp && gp[i] >= 0) || (gs && gs[i] >= 0)) cand.push(i);
+  }
+  const tp = b.get('tracks/points'), to = b.get('tracks/offsets'), tpfp = b.get('tracks/pfp');
+  const sp = V.showerPos, spfp = b.get('showers/pfp');
+  V.pk = {
+    bundle: b, xyz, gp, gs, cand: Int32Array.from(cand),
+    sx: new Float32Array(cand.length), sy: new Float32Array(cand.length), sz: new Float32Array(cand.length),
+    tp, to, tpfp, tx: tp ? new Float32Array(tp.length / 3) : null, ty: tp ? new Float32Array(tp.length / 3) : null,
+    shp: sp, spfp, hx: sp ? new Float32Array(sp.length / 3) : null, hy: sp ? new Float32Array(sp.length / 3) : null,
+    key: new Float64Array(10).fill(NaN), grid: null, gw: 0, gh: 0, mat: new THREE.Matrix4(),
+  };
+  return V.pk;
+}
+
+function projectAll(P) {
+  const c = V.camera, p = c.position, q = c.quaternion, t = V.controls.target;
+  const w = V.container.clientWidth, h = V.container.clientHeight, k = P.key;
+  if (k[0] === p.x && k[1] === p.y && k[2] === p.z && k[3] === q.x && k[4] === q.y && k[5] === q.z && k[6] === q.w && k[7] === w && k[8] === h && k[9] === c.fov) return;
+  k[0] = p.x; k[1] = p.y; k[2] = p.z; k[3] = q.x; k[4] = q.y; k[5] = q.z; k[6] = q.w; k[7] = w; k[8] = h; k[9] = c.fov;
+  c.updateMatrixWorld(); V.root.updateMatrixWorld(true);
+  const e = P.mat.multiplyMatrices(c.projectionMatrix, c.matrixWorldInverse).multiply(V.root.matrixWorld).elements;
+  const hw = 0.5 * w, hh = 0.5 * h;
+  const proj = (x, y, z, ox, oy, oz, i) => {
+    const cw = e[3] * x + e[7] * y + e[11] * z + e[15];
+    if (!(cw > 1e-6)) { ox[i] = NaN; return; }
+    ox[i] = (e[0] * x + e[4] * y + e[8] * z + e[12]) / cw * hw + hw;
+    oy[i] = h - ((e[1] * x + e[5] * y + e[9] * z + e[13]) / cw * hh + hh);
+    if (oz) oz[i] = (e[2] * x + e[6] * y + e[10] * z + e[14]) / cw;
+  };
+  const cand = P.cand, xyz = P.xyz;
+  const gw = Math.ceil(w / CELL) + 1, gh = Math.ceil(h / CELL) + 1;
+  const cellOf = new Int32Array(cand.length), start = new Int32Array(gw * gh + 1);
+  for (let j = 0; j < cand.length; j++) {
+    const i = cand[j];
+    proj(xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2], P.sx, P.sy, P.sz, j);
+    const x = P.sx[j], y = P.sy[j];
+    if (x >= 0 && x < w && y >= 0 && y < h) { const cc = Math.floor(y / CELL) * gw + Math.floor(x / CELL); cellOf[j] = cc; start[cc + 1]++; } else cellOf[j] = -1;
+  }
+  for (let i = 0; i < gw * gh; i++) start[i + 1] += start[i];
+  const fill = start.slice(0, gw * gh), items = new Int32Array(start[gw * gh]);
+  for (let j = 0; j < cand.length; j++) if (cellOf[j] >= 0) items[fill[cellOf[j]]++] = j;
+  P.grid = { start, items }; P.gw = gw; P.gh = gh;
+  if (P.tp) for (let i = 0, n = P.tx.length; i < n; i++) proj(P.tp[3 * i], P.tp[3 * i + 1], P.tp[3 * i + 2], P.tx, P.ty, null, i);
+  if (P.shp) for (let i = 0, n = P.hx.length; i < n; i++) proj(P.shp[3 * i], P.shp[3 * i + 1], P.shp[3 * i + 2], P.hx, P.hy, null, i);
+}
+
+function segDist2(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  let t = l2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  const ex = ax + t * dx - px, ey = ay + t * dy - py;
+  return ex * ex + ey * ey;
+}
+
+/** -> {pfp, slice, what, d} for the reco object under the cursor (css px relative to the canvas), or null */
+function pickAt(mx, my) {
+  const P = pickState();
+  if (!P || !V.visible || V.app.state.view === 'flash3d') return null;
+  projectAll(P);
+  let best = null, bd = Infinity;
+  if (V.sp && V.sp.visible && P.grid) {
+    const { start, items } = P.grid, gw = P.gw, gh = P.gh;
+    const c0 = Math.max(0, Math.floor((mx - R_SP) / CELL)), c1 = Math.min(gw - 1, Math.floor((mx + R_SP) / CELL));
+    const r0 = Math.max(0, Math.floor((my - R_SP) / CELL)), r1 = Math.min(gh - 1, Math.floor((my + R_SP) / CELL));
+    let bz = Infinity, bj = -1;
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+      const cc = r * gw + c;
+      for (let a = start[cc]; a < start[cc + 1]; a++) {
+        const j = items[a], dx = P.sx[j] - mx, dy = P.sy[j] - my;
+        if (dx * dx + dy * dy <= R_SP * R_SP && P.sz[j] < bz) { bz = P.sz[j]; bj = j; }
+      }
+    }
+    if (bj >= 0) {
+      const i = P.cand[bj], dx = P.sx[bj] - mx, dy = P.sy[bj] - my;
+      bd = Math.sqrt(dx * dx + dy * dy);
+      best = { pfp: P.gp ? P.gp[i] : -1, slice: P.gs ? P.gs[i] : -1, what: 'sp', d: bd };
+    }
+  }
+  const sliceOf = (pfp) => { const s = V.bundle.get('pfp/slice'); return pfp >= 0 && s ? s[pfp] : -1; };
+  if (V.tracks && V.tracks.visible && P.tp && P.tpfp) {
+    const off = P.to, tx = P.tx, ty = P.ty;
+    let tb = R_LINE * R_LINE, ti = -1;
+    for (let t = 0; t + 1 < off.length; t++) {
+      if (P.tpfp[t] < 0) continue;
+      for (let j = off[t]; j < off[t + 1] - 1; j++) {
+        const ax = tx[j], ay = ty[j], bx = tx[j + 1], by = ty[j + 1];
+        if (ax !== ax || bx !== bx) continue;
+        if ((ax < mx - R_LINE && bx < mx - R_LINE) || (ax > mx + R_LINE && bx > mx + R_LINE) || (ay < my - R_LINE && by < my - R_LINE) || (ay > my + R_LINE && by > my + R_LINE)) continue;
+        const d2 = segDist2(mx, my, ax, ay, bx, by);
+        if (d2 < tb) { tb = d2; ti = t; }
+      }
+    }
+    if (ti >= 0 && Math.sqrt(tb) + 1 < bd) { bd = Math.sqrt(tb); best = { pfp: P.tpfp[ti], slice: sliceOf(P.tpfp[ti]), what: 'track', d: bd }; }
+  }
+  if (V.showers && V.showers.visible && P.shp && P.spfp) {
+    const hx = P.hx, hy = P.hy;
+    let sb = R_LINE * R_LINE, si = -1;
+    for (let s = 0; s < P.spfp.length; s++) {
+      if (P.spfp[s] < 0) continue;
+      for (let k = 0; k < 5; k++) {
+        const a = 10 * s + 2 * k, b2 = a + 1;
+        if (hx[a] !== hx[a] || hx[b2] !== hx[b2]) continue;
+        const d2 = segDist2(mx, my, hx[a], hy[a], hx[b2], hy[b2]);
+        if (d2 < sb) { sb = d2; si = s; }
+      }
+    }
+    if (si >= 0 && Math.sqrt(sb) + 1 < bd) { bd = Math.sqrt(sb); best = { pfp: P.spfp[si], slice: sliceOf(P.spfp[si]), what: 'shower', d: bd }; }
+  }
+  return best;
+}
+
+/** project in the background shortly after the camera settles, so a hover never pays for it */
+function schedulePrewarm() {
+  clearTimeout(V.pkTimer);
+  V.pkTimer = setTimeout(() => {
+    if (!V.visible || !V.bundle) return;
+    const P = pickState(); if (P) projectAll(P);
+  }, 150);
+}
+
+function bindPicking(el) {
+  const rel = (e) => { const r = el.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  const run = () => {
+    V.pkRaf = 0;
+    const m = V.mouse; if (!m) return;
+    const t0 = performance.now();
+    const res = pickAt(m.x, m.y);
+    V.app.hoverObject(res, m.shift);
+    V.pickMs.push(performance.now() - t0); if (V.pickMs.length > 200) V.pickMs.shift();
+  };
+  el.addEventListener('pointermove', (e) => {
+    if (e.buttons) return;                                  // orbiting / panning
+    const [x, y] = rel(e);
+    V.mouse = { x, y, shift: e.shiftKey };
+    if (!V.pkRaf) V.pkRaf = requestAnimationFrame(run);
+  });
+  el.addEventListener('pointerleave', () => { V.mouse = null; V.app.hoverObject(null); });
+  let down = null;
+  el.addEventListener('pointerdown', (e) => { const [x, y] = rel(e); down = e.button === 0 ? { x, y } : null; });
+  el.addEventListener('pointerup', (e) => {
+    if (!down) return;
+    const [x, y] = rel(e), d = Math.hypot(x - down.x, y - down.y);
+    down = null;
+    if (d >= 4) return;
+    const res = pickAt(x, y);
+    V.lastPickObj = res;
+    V.app.clickObject(res, e.shiftKey);
+  });
+  el.addEventListener('dblclick', () => {
+    // the two clicks of a double click pinned and unpinned: pin again, then centre on it
+    if (!V.app.selection && V.lastPickObj) V.app.clickObject(V.lastPickObj, false);
+    focusSelection();
+  });
 }
 
 // ------------------------------------------------------------------ rendering
@@ -966,7 +1256,10 @@ function getCanvas() { render(); return V.renderer.domElement; }
 export default {
   name: 'view3d',
   init, setGeometry, setEvent, onState, setVisible, resize, getCanvas,
-  setPdColors, setAnimating, requestRender, resetView, benchmark, setFlashTime, cameraInfo,
+  setPdColors, setAnimating, requestRender, resetView, benchmark, setFlashTime, cameraInfo, focusSelection,
+  /** test hook: pick at css px (x, y) of the canvas -> {res, ms} */
+  debugPick(x, y) { const t = performance.now(); const res = pickAt(x, y); return { res, ms: performance.now() - t }; },
+  get pickMs() { return V.pickMs; },
   get flashWindow() { return V.flashWin; },
   get pdTileCount() { return V.pdN; },
   get camera() { return V.camera; },

@@ -52,13 +52,14 @@ const V = {
 // ---------------------------------------------------------------------------- shaders
 const POINT_VS = `#version 300 es
 precision highp float;
-in vec2 aPos; in float aVal; in float aCat; in float aFlag;
+in vec2 aPos; in float aVal; in float aCat; in float aFlag; in float aSel;
 uniform vec2 uCenter, uHalf;
-uniform float uSize, uMode, uLog, uLo, uInv, uFloor, uCmapLo, uCmapHi, uShowRad;
+uniform float uSize, uMode, uLog, uLo, uInv, uFloor, uCmapLo, uCmapHi, uShowRad, uSelOn;
 uniform sampler2D uLut;
+uniform highp sampler2D uSelTex;
 uniform vec3 uPal[8];
 uniform vec3 uUnassoc, uUniform;
-out vec3 vColor; flat out float vShape;
+out vec3 vColor; flat out float vShape; flat out float vSelF;
 void main() {
   vec2 n = (aPos - uCenter) / uHalf;
   float z = 0.0; vShape = 0.0;
@@ -72,13 +73,20 @@ void main() {
     else { vColor = uPal[int(mod(aCat, 8.0))]; vShape = mod(aCat, 5.0); }
   } else { vColor = uUniform; }
   gl_PointSize = uSize;
+  vSelF = 0.0;
+  if (uSelOn > 0.5) {                          // selection: GPU-side lookup of the group id in a flag texture
+    float inS = 0.0;
+    if (aSel > -0.5) { int id = int(aSel + 0.5); inS = texelFetch(uSelTex, ivec2(id & 1023, id >> 10), 0).r; }
+    vSelF = inS > 0.5 ? 1.0 : -1.0;
+    if (inS > 0.5) { z = -0.95; gl_PointSize = max(uSize * 1.8, 7.0); } else z = 0.95;
+  }
   gl_Position = vec4(n, z, 1.0);
   if (aFlag < 0.5 && uShowRad < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
 }`;
 const POINT_FS = `#version 300 es
 precision mediump float;
-in vec3 vColor; flat in float vShape;
-uniform float uAlpha;
+in vec3 vColor; flat in float vShape; flat in float vSelF;
+uniform float uAlpha; uniform vec3 uRing;
 out vec4 o;
 void main() {
   vec2 q = gl_PointCoord * 2.0 - 1.0; q.y = -q.y;
@@ -89,16 +97,20 @@ void main() {
   else if (s < 3.5) ok = abs(q.x) + abs(q.y) <= 1.0;
   else { q.y = -q.y; ok = q.y > -0.8 && abs(q.x) <= (0.9 - q.y) * 0.53; }
   if (!ok) discard;
-  o = vec4(vColor, uAlpha);
+  vec3 col = vColor; float a = uAlpha;
+  if (vSelF < -0.5) a *= 0.15;
+  else if (vSelF > 0.5) { a = 1.0; if (dot(q, q) > 0.45) col = uRing; }
+  o = vec4(col, a);
 }`;
 
 const LINE_VS = `#version 300 es
 precision highp float;
-in vec2 aPos; in vec2 aExtra;
+in vec2 aPos; in vec2 aExtra; in float aSel;
 uniform vec2 uCenter, uHalf, uOff;
-uniform float uMode, uHasFlag, uShowRad;
+uniform float uMode, uHasFlag, uShowRad, uSelOn, uSelPass;
+uniform highp sampler2D uSelTex;
 uniform vec3 uColor, uPal[8], uPdg[9], uUnassoc;
-out vec3 vColor; out float vCum;
+out vec3 vColor; out float vCum; out float vSelF;
 void main() {
   gl_Position = vec4((aPos - uCenter) / uHalf + uOff, 0.0, 1.0);
   float cls = mod(aExtra.y, 16.0);
@@ -107,24 +119,40 @@ void main() {
   else vColor = uPdg[int(cls)];
   if (uHasFlag > 0.5 && aExtra.y > 15.5 && uShowRad < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
   vCum = aExtra.x;
+  vSelF = 0.0;
+  if (uSelOn > 0.5) {
+    float inS = 0.0;
+    if (aSel > -0.5) { int id = int(aSel + 0.5); inS = texelFetch(uSelTex, ivec2(id & 1023, id >> 10), 0).r; }
+    vSelF = inS > 0.5 ? 1.0 : -1.0;
+    if (uSelPass > 0.5 && inS < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);   // emphasis pass: selected only
+  }
 }`;
 const LINE_FS = `#version 300 es
 precision highp float;
-in vec3 vColor; in float vCum;
+in vec3 vColor; in float vCum; in float vSelF;
 uniform float uAlpha, uDash, uPxPerCm, uPeriod;
 out vec4 o;
 void main() {
   if (uDash > 0.5 && fract(vCum * uPxPerCm / uPeriod) > 0.55) discard;
-  o = vec4(vColor, uAlpha);
+  o = vec4(vColor, vSelF < -0.5 ? uAlpha * 0.12 : (vSelF > 0.5 ? 1.0 : uAlpha));
 }`;
 const FILL_VS = `#version 300 es
 precision highp float;
-in vec2 aPos; uniform vec2 uCenter, uHalf, uOff;
-void main() { gl_Position = vec4((aPos - uCenter) / uHalf + uOff, 0.0, 1.0); }`;
+in vec2 aPos; in float aSel; uniform vec2 uCenter, uHalf, uOff; uniform float uSelOn;
+uniform highp sampler2D uSelTex; out float vSelF;
+void main() {
+  gl_Position = vec4((aPos - uCenter) / uHalf + uOff, 0.0, 1.0);
+  vSelF = 0.0;
+  if (uSelOn > 0.5) {
+    float inS = 0.0;
+    if (aSel > -0.5) { int id = int(aSel + 0.5); inS = texelFetch(uSelTex, ivec2(id & 1023, id >> 10), 0).r; }
+    vSelF = inS > 0.5 ? 1.0 : -1.0;
+  }
+}`;
 const FILL_FS = `#version 300 es
 precision mediump float;
-uniform vec3 uColor; uniform float uAlpha; out vec4 o;
-void main() { o = vec4(uColor, uAlpha); }`;
+uniform vec3 uColor; uniform float uAlpha; in float vSelF; out vec4 o;
+void main() { o = vec4(uColor, vSelF < -0.5 ? uAlpha * 0.2 : (vSelF > 0.5 ? uAlpha * 2.2 : uAlpha)); }`;
 
 class Prog {
   constructor(gl, vs, fs, attribs) {
@@ -178,9 +206,9 @@ function initGL() {
   const gl = V.glc.getContext('webgl2', { antialias: false, alpha: false, depth: true, preserveDrawingBuffer: false });
   if (!gl) throw new Error('WebGL2 unavailable');
   V.gl = gl;
-  V.progs.point = new Prog(gl, POINT_VS, POINT_FS, ['aPos', 'aVal', 'aCat', 'aFlag']);
-  V.progs.line = new Prog(gl, LINE_VS, LINE_FS, ['aPos', 'aExtra']);
-  V.progs.fill = new Prog(gl, FILL_VS, FILL_FS, ['aPos']);
+  V.progs.point = new Prog(gl, POINT_VS, POINT_FS, ['aPos', 'aVal', 'aCat', 'aFlag', 'aSel']);
+  V.progs.line = new Prog(gl, LINE_VS, LINE_FS, ['aPos', 'aExtra', 'aSel']);
+  V.progs.fill = new Prog(gl, FILL_VS, FILL_FS, ['aPos', 'aSel']);
   V.lutTex = gl.createTexture(); V.lutName = null;
   gl.bindTexture(gl.TEXTURE_2D, V.lutTex);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -235,6 +263,7 @@ function init(container, app) {
     try { initGL(); if (V.S) for (const r of V.S.res) { r.buf = null; } uploadLut(); schedule(true, true); } catch (e) { console.error(e); }
   });
   bindPointer();
+  app.on('selection', () => { schedule(true, false); });
   if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => { if (V.visible) resize(); }).observe(container);
   V.ready = true;
 }
@@ -388,6 +417,7 @@ function buildLines(pts, offs, panel, np, metaOf, closed) {
   for (let p = 0; p < np; p++) cnt[p + 1] += cnt[p];
   const tot = cnt[np], cur = cnt.slice(0, np);
   const seg = new Float32Array(4 * tot), ext = new Float32Array(4 * tot);   // ext: (cum, meta) per vertex
+  const segRow = new Uint32Array(tot);                                       // owning row of each segment (selection)
   for (let r = 0; r < nr; r++) {
     const p = panel[r]; if (p >= np) continue;
     const a = offs[r], e = offs[r + 1];
@@ -396,6 +426,7 @@ function buildLines(pts, offs, panel, np, metaOf, closed) {
     let cum = 0;
     const push = (i, j) => {
       const k = cur[p]++;
+      segRow[k] = r;
       const x0 = pts[2 * i], y0 = pts[2 * i + 1], x1 = pts[2 * j], y1 = pts[2 * j + 1];
       seg[4 * k] = x0; seg[4 * k + 1] = y0; seg[4 * k + 2] = x1; seg[4 * k + 3] = y1;
       ext[4 * k] = cum; ext[4 * k + 1] = m;
@@ -406,7 +437,7 @@ function buildLines(pts, offs, panel, np, metaOf, closed) {
     if (closed) push(e - 1, a);
   }
   const ranges = []; for (let p = 0; p < np; p++) ranges.push([cnt[p], cnt[p + 1] - cnt[p]]);
-  const set = { seg: new Res(seg), ext: new Res(ext), ranges, total: tot };
+  const set = { seg: new Res(seg), ext: new Res(ext), ranges, total: tot, segRow, pid: {} };
   V.S.res.push(set.seg, set.ext);
   return set;
 }
@@ -415,7 +446,7 @@ function buildFans(pts, offs, panel, np) {
   const nr = offs.length - 1, cnt = new Uint32Array(np + 1);
   for (let r = 0; r < nr; r++) { const p = panel[r]; if (p < np && offs[r + 1] - offs[r] > 2) cnt[p + 1] += 3 * (offs[r + 1] - offs[r]); }
   for (let p = 0; p < np; p++) cnt[p + 1] += cnt[p];
-  const cur = cnt.slice(0, np), out = new Float32Array(2 * cnt[np]);
+  const cur = cnt.slice(0, np), out = new Float32Array(2 * cnt[np]), triRow = new Uint32Array(cnt[np]);
   for (let r = 0; r < nr; r++) {
     const p = panel[r]; if (p >= np) continue;
     const a = offs[r], e = offs[r + 1], n = e - a;
@@ -425,12 +456,12 @@ function buildFans(pts, offs, panel, np) {
     cx /= n; cy /= n;
     for (let i = 0; i < n; i++) {
       const i0 = a + i, i1 = a + (i + 1) % n;
-      let k = cur[p]; cur[p] += 3; k *= 2;
+      let k = cur[p]; cur[p] += 3; triRow[k] = triRow[k + 1] = triRow[k + 2] = r; k *= 2;
       out[k] = cx; out[k + 1] = cy; out[k + 2] = pts[2 * i0]; out[k + 3] = pts[2 * i0 + 1]; out[k + 4] = pts[2 * i1]; out[k + 5] = pts[2 * i1 + 1];
     }
   }
   const ranges = []; for (let p = 0; p < np; p++) ranges.push([cnt[p], cnt[p + 1] - cnt[p]]);
-  const set = { pos: new Res(out), ranges };
+  const set = { pos: new Res(out), ranges, triRow, pid: {} };
   V.S.res.push(set.pos);
   return set;
 }
@@ -523,6 +554,70 @@ function depositSet() {
   }
   S.sets[skey] = set;
   return set;
+}
+
+// ---- selection (select.js): group id per object + a small id -> flag texture ---------------------------
+/** group id (of the selection's kind) owning a drawn track / shower row, -1 if none */
+function rowOwner(kindName, r, groupKind) {
+  const b = V.S.bundle;
+  let pfp = -1;
+  if (kindName === 'tracks') {
+    const t = b.get(`tracks2d${sfx()}/track`), m = b.get('tracks/pfp');
+    pfp = t && m ? m[t[r]] : -1;
+  } else {
+    const t = b.get(`showers2d${sfx()}/shower`), m = b.get('showers/pfp');
+    pfp = t && m ? m[t[r]] : -1;
+  }
+  if (groupKind === 'pfparticle') return pfp;
+  const sl = b.get('pfp/slice');
+  return pfp >= 0 && sl ? sl[pfp] : -1;
+}
+/** per-vertex selection id buffer of a line set (lazy, per group kind) */
+function pidBuf(set, kindName, groupKind) {
+  if (!set) return null;
+  let r = set.pid[groupKind];
+  if (r === undefined) {
+    const b = V.S.bundle, have = kindName === 'tracks' ? b.get('tracks/pfp') : b.get('showers/pfp');
+    if (!have || (groupKind === 'slice' && !b.get('pfp/slice'))) r = null;
+    else {
+      const rows = set.segRow || set.triRow, perV = set.segRow ? 2 : 1;
+      const d = new Float32Array(rows.length * perV);
+      const cache = new Map();
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        let id = cache.get(row);
+        if (id === undefined) { id = rowOwner(kindName, row, groupKind); cache.set(row, id); }
+        if (perV === 2) { d[2 * i] = id; d[2 * i + 1] = id; } else d[i] = id;
+      }
+      r = new Res(d); V.S.res.push(r);
+    }
+    set.pid[groupKind] = r;
+  }
+  return r;
+}
+
+function ensureSelTex() {
+  const gl = V.gl, sel = V.app.selection;
+  if (!gl) return null;
+  if (!sel) return null;
+  if (V.selStamp === sel.stamp && V.selCtx === gl) return sel;
+  const W = 1024, H = Math.max(1, Math.ceil(sel.n / W));
+  if (!V.selTex || V.selCtx !== gl) {
+    V.selTex = gl.createTexture(); V.selCtx = gl;
+    gl.bindTexture(gl.TEXTURE_2D, V.selTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+  if (!V.selBuf || V.selBuf.length < W * H) V.selBuf = new Uint8Array(W * H);
+  V.selBuf.fill(0); for (let i = 0; i < sel.mask.length; i++) V.selBuf[i] = sel.mask[i] ? 255 : 0;   // R8 is normalised: 1 would read as 1/255
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, V.selTex);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, W, H, 0, gl.RED, gl.UNSIGNED_BYTE, V.selBuf.subarray(0, W * H));
+  gl.activeTexture(gl.TEXTURE0);
+  V.selStamp = sel.stamp;
+  return sel;
 }
 
 // ---------------------------------------------------------------------------- views (zoom/pan)
@@ -653,6 +748,12 @@ function renderGL() {
   const views = ensureViews(); if (V.rects.length !== views.length) computeRects();
   uploadLut();
   const L = layout(), cs = colorSpec();
+  // selection: group ids per hit (bound as aSel) + flag texture indexed by id
+  const selv = ensureSelTex(), gk = selv ? selv.groupKind : null;
+  let selHits = null;
+  if (selv) { const g = S.bundle.get(`hits/group/${gk}`); if (g) selHits = layoutBuf(L, `g:${gk}`, () => gather(g, L.orig)); }
+  const hi = rgb(th.name === 'light' ? '#c2410c' : '#fde047');
+  if (selv) { gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, V.selTex); gl.activeTexture(gl.TEXTURE0); }
   gl.disable(gl.SCISSOR_TEST); gl.viewport(0, 0, V.W, V.H);
   const bg = rgb(th.fig_bg), ax = rgb(th.axes_bg);
   gl.clearColor(bg[0], bg[1], bg[2], 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -682,7 +783,8 @@ function renderGL() {
       P.v2('uCenter', v.cx, v.cy); P.v2('uHalf', v.hx, v.hy); P.f('uAlpha', 0.35);
       P.f('uShowRad', ov.rad ? 1 : 0);
       pointsUniforms(P, 2, null, Math.max(1, 1.2 * dpr), th); P.v3('uUniform', rgb(th.truth));
-      attrF(gl, 0, dep.pos[p], 2); attrOff(gl, 1, 0); attrOff(gl, 2, 0); attrF(gl, 3, dep.flag[p], 1);
+      P.f('uSelOn', 0); P.f('uAlpha', 0.35); gl.uniform3f(P.l('uRing'), 1, 1, 1);
+      attrF(gl, 0, dep.pos[p], 2); attrOff(gl, 1, 0); attrOff(gl, 2, 0); attrF(gl, 3, dep.flag[p], 1); attrOff(gl, 4, -1);
       gl.drawArrays(gl.POINTS, 0, V.interact ? Math.ceil(dep.n[p] * 0.12) : dep.n[p]);
     }
     // 2. shower fill
@@ -690,7 +792,10 @@ function renderGL() {
     gl.disable(gl.DEPTH_TEST);
     if (sh && sh.fill && sh.fill.ranges[p][1]) {
       const P = V.progs.fill.use(); P.v2('uCenter', v.cx, v.cy); P.v2('uHalf', v.hx, v.hy); P.v3('uColor', rgb(th.shower)); P.f('uAlpha', 0.22);
-      for (let i = 1; i < 4; i++) { gl.disableVertexAttribArray(i); gl.vertexAttribDivisor(i, 0); }
+      for (let i = 2; i < 5; i++) { gl.disableVertexAttribArray(i); gl.vertexAttribDivisor(i, 0); }
+      const fpid = selv && ov.showers ? pidBuf(sh.fill, 'showers', gk) : null;
+      P.f('uSelOn', fpid ? 1 : 0); gl.uniform1i(P.l('uSelTex'), 1);
+      if (fpid) attrF(gl, 1, fpid, 1, sh.fill.ranges[p][0] * 4); else attrOff(gl, 1, -1);
       attrF(gl, 0, sh.fill.pos, 2, sh.fill.ranges[p][0] * 8);
       gl.drawArrays(gl.TRIANGLES, 0, sh.fill.ranges[p][1]);
     }
@@ -707,6 +812,8 @@ function renderGL() {
       if (valRes) attrF(gl, 1, valRes, 1, hs * 4); else attrOff(gl, 1, 0);
       if (catRes) attrF(gl, 2, catRes, 1, hs * 4); else attrOff(gl, 2, 0);
       attrOff(gl, 3, 1);
+      P.f('uSelOn', selHits ? 1 : 0); gl.uniform1i(P.l('uSelTex'), 1); P.v3('uRing', hi);
+      if (selHits) attrF(gl, 4, selHits, 1, hs * 4); else attrOff(gl, 4, -1);
       gl.drawArrays(gl.POINTS, 0, he - hs);
       gl.disable(gl.DEPTH_TEST);
     }
@@ -725,12 +832,20 @@ function renderGL() {
       if (o.mode === 2) { const pd = new Float32Array(27); PDG_CLASSES.forEach((c, i) => pd.set(rgb(c[th.name]), 3 * i)); gl.uniform3fv(P.l('uPdg[0]'), pd); }
       attrF(gl, 0, set.seg, 2, set.ranges[p][0] * 16);
       attrF(gl, 1, set.ext, 2, set.ranges[p][0] * 16);
+      const pid = selv && o.selName ? pidBuf(set, o.selName, gk) : null;
+      P.f('uSelOn', pid ? 1 : 0); P.f('uSelPass', o.pass ? 1 : 0); gl.uniform1i(P.l('uSelTex'), 1);
+      if (pid) attrF(gl, 2, pid, 1, set.ranges[p][0] * 8); else attrOff(gl, 2, -1);
+      if (o.pass && !pid) return;
       const n = Math.max(1, Math.round(o.width * dpr)), passes = [[0, 0], [1, 0], [0, 1], [1, 1]].slice(0, Math.min(4, n === 3 ? 3 : n));
       for (const [ox, oy] of passes) { P.v2('uOff', ox * 2 / w, oy * 2 / h); gl.drawArrays(gl.LINES, 0, 2 * set.ranges[p][1]); }
     };
-    line(sets.mc, { width: 1, alpha: 0.7, color: th.mctrack, mode: st.color === 'pdg' ? 2 : 0, dash: true, hasFlag: sets.mc && sets.mc.hasFlag });
-    line(sh, { width: 1, alpha: 0.8, color: th.shower, mode: 0 });
-    line(sets.tracks, { width: 2, alpha: 0.9, color: th.track, mode: st.color === 'track' ? 1 : 0 });
+    line(sets.mc, { width: 1, alpha: selv ? 0.18 : 0.7, color: th.mctrack, mode: st.color === 'pdg' ? 2 : 0, dash: true, hasFlag: sets.mc && sets.mc.hasFlag });
+    line(sh, { width: 1, alpha: 0.8, color: th.shower, mode: 0, selName: 'showers' });
+    line(sets.tracks, { width: 2, alpha: 0.9, color: th.track, mode: st.color === 'track' ? 1 : 0, selName: 'tracks' });
+    if (selv) {          // emphasis: the selected tracks / shower outlines again, thicker, in the highlight colour
+      line(sh, { width: 3, alpha: 1, color: th.name === 'light' ? '#c2410c' : '#fde047', mode: 0, selName: 'showers', pass: 1 });
+      line(sets.tracks, { width: 3, alpha: 1, color: th.name === 'light' ? '#c2410c' : '#fde047', mode: 0, selName: 'tracks', pass: 1 });
+    }
   }
   gl.disable(gl.SCISSOR_TEST);
   V.lastRenderMs = performance.now() - t0;
@@ -782,7 +897,7 @@ function renderOv() {
       // vertices
       if ((ov.vtx || ov.pvtx) && S.bundle.get(`vtx2d${sf}/hv`)) {
         const hv = S.bundle.get(`vtx2d${sf}/hv`), pa = S.bundle.get(`vtx2d${sf}/panel`), ix = S.bundle.get(`vtx2d${sf}/index`);
-        const by = { x: [], D: [], o: [] };
+        const by = { x: [], D: [], o: [] }, dim = { x: [], D: [], o: [] }, hasSel = !!V.app.selection;
         for (let k = 0; k < pa.length; k++) {
           if (pa[k] !== p) continue;
           const rl = roles && ix ? roles[ix[k]] : 3;
@@ -790,8 +905,9 @@ function renderOv() {
           const [x, y] = toPx(p, hv[2 * k], hv[2 * k + 1]);
           if (x < r.px - 10 || x > r.px + r.pw + 10 || y < r.py - 10 || y > r.py + r.ph + 10) continue;
           const role = roles && ix ? roles[ix[k]] : 3;
-          by[role === 1 ? 'x' : role === 2 ? 'D' : 'o'].push(x, y);
+          ((hasSel && ix && !V.app.vertexSelected(ix[k]) ? dim : by)[role === 1 ? 'x' : role === 2 ? 'D' : 'o']).push(x, y);
         }
+        if (hasSel) { g.globalAlpha = 0.2; for (const kind of ['o', 'D', 'x']) drawMarkers(g, kind, dim[kind], th.vertex, th.axes_bg); g.globalAlpha = 1; }
         for (const kind of ['o', 'D', 'x']) drawMarkers(g, kind, by[kind], th.vertex, th.axes_bg);
       }
       // true vertex
@@ -970,7 +1086,7 @@ function bindPointer() {
   c.addEventListener('pointerdown', (e) => {
     if (!V.S || e.button !== 0) return;
     const [px, py] = pos(e), p = panelAt(px, py); if (p < 0 || region(p, px, py) === 'none') return;
-    V.drag = { p, px, py }; c.setPointerCapture(e.pointerId); c.style.cursor = 'grabbing'; hideTip();
+    V.drag = { p, px, py, sx: px, sy: py, moved: 0 }; c.setPointerCapture(e.pointerId); c.style.cursor = 'grabbing'; hideTip();
   });
   c.addEventListener('pointermove', (e) => {
     if (!V.S) return;
@@ -978,6 +1094,7 @@ function bindPointer() {
     if (V.drag) {
       const d = V.drag, r = V.rects[d.p], vs = V.views[vk()], v = vs[d.p];
       const dx = px - d.px, dy = py - d.py; d.px = px; d.py = py;
+      d.moved = Math.max(d.moved, Math.hypot(px - d.sx, py - d.sy));
       v.cx -= dx / r.pw * 2 * v.hx; v.cy += dy / r.ph * 2 * v.hy;
       interacting(); syncLinked(d.p);
       V.hover = null; schedule(true, true);
@@ -985,9 +1102,14 @@ function bindPointer() {
     }
     updateHover(px, py, e);
   });
-  const end = (e) => { if (V.drag) { V.drag = null; c.style.cursor = 'crosshair'; try { c.releasePointerCapture(e.pointerId); } catch (x) { /* none */ } } };
+  const end = (e) => {
+    if (V.drag && e.type === 'pointerup' && V.drag.moved < 4 && V.S) {      // a click, not a pan: pin / unpin
+      const [px, py] = pos(e), hit = hitAtPx(px, py);
+      V.app.clickObject(hit ? objectsOf(hit.o) : null, e.shiftKey);
+    }
+    if (V.drag) { V.drag = null; c.style.cursor = 'crosshair'; try { c.releasePointerCapture(e.pointerId); } catch (x) { /* none */ } } };
   c.addEventListener('pointerup', end); c.addEventListener('pointercancel', end);
-  c.addEventListener('pointerleave', () => { if (V.hover) { V.hover = null; schedule(false, true); } hideTip(); });
+  c.addEventListener('pointerleave', () => { if (V.hover) { V.hover = null; schedule(false, true); } hideTip(); V.app.hoverObject(null); });
   c.addEventListener('dblclick', () => resetViews());
 }
 
@@ -1031,15 +1153,29 @@ function nearestHit(L, p, hx, hy, rx, ry) {
   return best;
 }
 
-function updateHover(px, py, e) {
+/** {p, i, o} for the hit under the cursor (layout slot, original hit index) or null */
+function hitAtPx(px, py) {
   const p = panelAt(px, py);
-  if (p < 0 || region(p, px, py) !== 'plot') { if (V.hover) { V.hover = null; schedule(false, true); } hideTip(); return; }
+  if (p < 0 || region(p, px, py) !== 'plot') return null;
   const L = layout(), v = V.views[vk()][p], r = V.rects[p];
   const [hx, hy] = toData(p, px, py);
   const rad = 7;   // px
   const i = nearestHit(L, p, hx, hy, rad / r.pw * 2 * v.hx, rad / r.ph * 2 * v.hy);
-  if (i < 0) { if (V.hover) { V.hover = null; schedule(false, true); } hideTip(); return; }
-  const o = L.orig[i], b = V.S.bundle, wire = V.space === 'wire';
+  return i < 0 ? null : { p, i, o: L.orig[i] };
+}
+
+/** ids of the reco objects of an original hit, for the selection model */
+function objectsOf(o) {
+  const b = V.S.bundle, gp = b.get('hits/group/pfparticle'), gs = b.get('hits/group/slice');
+  return { pfp: gp ? gp[o] : -1, slice: gs ? gs[o] : -1 };
+}
+
+function updateHover(px, py, e) {
+  const hit = hitAtPx(px, py);
+  if (!hit) { if (V.hover) { V.hover = null; schedule(false, true); } hideTip(); V.app.hoverObject(null); return; }
+  const L = layout(), { p, i, o } = hit;
+  V.app.hoverObject(objectsOf(o), e.shiftKey);
+  const b = V.S.bundle, wire = V.space === 'wire';
   const at = (n) => { const a = b.get(n); return a ? a[o] : null; };
   const hh = L.pos.data[2 * i], vv = L.pos.data[2 * i + 1];
   V.hover = { p, h: hh, v: vv };

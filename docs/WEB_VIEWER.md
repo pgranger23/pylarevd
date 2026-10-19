@@ -364,3 +364,69 @@ style.css, view2d.js, export.py), G (view3d.js, new viewoptical.js), H
   LightAnimation / ChargeLightAnimation save_animation), passing the relevant
   state (colour, scale, cmap, theme, overlays, merge2d, light params, camera).
 - `POST /api/open` already exists (WP-B); F adds the "open by path" box.
+
+## WP-G notes
+
+Files: `static/viewoptical.js` (new), `static/view3d.js`.
+
+- **Optical view** (`viewoptical.js`): one WebGL2 canvas (viewport+scissor per panel, one `gl.POINTS` draw each) under a Canvas2D overlay (axes, colour bars, dashed true-vertex z, dotted t0, hover ring, pointer events). Times are uploaded once per event as float32 relative to `meta.optical.t0`; pan/zoom only changes uniforms. Hits panel: z of the tile (`oph/tile` -> `pd/xyz`), channel index fallback; fixed log PE range 1..3e5, brightest drawn on top. Flash panel: size ~ log PE, colour = y over the TPC y extent. Wheel zooms time about the cursor, drag pans, double click / "reset" restores; param `owin` (half-width us or `all`, select in the panel header). Tooltips for hits and flashes; header shows counts in the window, brightest flash, `meta.optical.notes`. Test hooks: `app.views.viewoptical.benchmark(n)`, `.debugState()`. Timings (llvmpipe, 73.9k hits): setEvent ~100 ms, full redraw ~35 ms.
+- **Flashes 3-D** (`view3d.js`): bars are screen-space-width quads (WebGL lines are 1 px); window t0 +- 50 us, 200 brightest, built once per event; colour = time on the cmap, width/opacity ~ log PE, square dot if `flash/x` finite. In `flash3d` charge, tracks, showers, truth, deposits, labels and reco vertices are hidden, PD tiles drawn faint (alpha 0.1), true vertex always shown. In Charge+Light a "flashes" checkbox (own DOM in the 3-D panel, param `fbars=1`) draws the same bars.
+- **`view3d.setFlashTime(t_us | null)`**: show only flashes with time <= t (ABSOLUTE us, the clock of `oph/time` and `meta.optical.t0`); null = all of the window. Uniform only. viewlight can call it per frame (`t0 + frame time`); bars appear only when flash3d or the `fbars` box is active. `view3d.flashWindow` = `{t0, lo, hi, shown, total}`.
+- **Vertices**: `ov.pvtx` (missing = on) -> role 1; `ov.vtx` -> roles 2/3; handled through per-vertex `aSize` (0 = clipped), no rebuild. Change: the true vertex marker now follows `ov.truth` (as in 2-D) instead of `ov.vtx`.
+- **chisq**: `color=chisq` uses `sp/chisq`; if absent the legend title says it falls back to charge (same note for other missing columns).
+- **`view3d.cameraInfo()`** -> `{position, target, up, fov, aspect}` in detector cm. view3d maps detector (x,y,z) to three.js scene (z, y, -x), so detector x = -scene.z, y = scene.y, z = scene.x. `up` is detector +y, `fov` is the vertical FOV in degrees.
+
+## WP-F notes
+
+- Exporter: `GROUPINGS` builds one extra `EventDisplay(merge="view"|"none")` each; shipped per suffix `_view`/`_none`: `meta.panels<sfx>` (same fields as `panels`, incl. `faces`), `hits/panel<sfx>`, `tracks2d<sfx>/`, `showers2d<sfx>/`, `mc2d<sfx>/` (same `mc2d_scope` rule), `vtx2d<sfx>/`, `meta.truth.vertex2d<sfx>`. Deposits/labels are projected client side with the chosen set's `faces`. Also `sp/chisq` f32.
+- Cost (FD entry 1 / PDSP entry 3): +2.1 MB raw (13.4 -> 15.6 MB; gz 8.2 MB) and about +2.3 s (of 8.8 s total); PDSP +2.4 MB (45 -> 47.4 MB), about +0.2 s (mc2d is already from_interaction-only there).
+- view2d: `merge2d` param (`orientation|view|none`), falls back to orientation if the bundle lacks the set; layouts/zoom/overlays are cached per grouping. 2-D `ov.pvtx` = vtx role 1, `ov.vtx` = roles 2,3. `chisq` falls back to charge with a legend note.
+- main.js: `pvtx` added to OVERLAYS/OV_DEFAULT (old `ov=` URLs lacking `pvtx` turn it off); views `optical` (`#panel-optical`, viewoptical) and `flash3d` (`#panel-3d`, view3d); open-by-path box uses `/api/status.allow_open` and shows `{error}` inline (hidden in `?sample=` mode).
+
+## WP-H notes
+
+Exports (`pylarevd/web/render.py`, `GET /api/export` in `server.py`, `static/exports.js`).
+
+- Query: `file entry hits flash kind=pdf|png|gif view=2d|3d|light|charge+light|2d+3d|optical|flash3d`
+  plus `color scale cmap theme ov=<comma list incl. pvtx>`, `merge2d`, `space2d`, light params
+  (`lclock lfill lframes lfps lpers lwlo lwhi lt0 lt`; window is relative to t0 as in the viewer, `lt`
+  = frame number for a static light PDF, `all`/empty = whole window), camera (`campos=x,y,z`,
+  `camtgt=x,y,z`, `camup`, detector cm, from `view3d.cameraInfo()`), `rotstep` (deg per frame, 3 default,
+  the button sends 4) and `rotfps`. Bad values -> 400 JSON `{error}`; unknown file 404.
+- Rendering runs in the server's ProcessPoolExecutor (`render.render_export`); response has
+  `Content-Disposition: attachment; filename="pylarevd_run{R}_sub{S}_ev{E}_{view}.pdf"` (`_rotation.gif`,
+  `_{flashtag}.gif` for light), `X-Export-Seconds`, and `X-Export-Note` (for 2d+3d: "exports the 2-D
+  panels only"). Nothing is cached. PDF = 300 dpi, Type 42 fonts; PNG = 150 dpi.
+- Camera -> matplotlib: view vector v = position - target in detector (x,y,z); matplotlib axes are
+  (z,x,y), so elev = asin(v.y/|v|), azim = atan2(v.x, v.z); zoom = clip(1.15 * 1.45*D/|v|, 0.65, 1.8)
+  with D the TPC bounding diagonal (1.45 D is the viewer's initial distance). Roll (`up`) is ignored.
+  For charge+light the same elev/azim go to the charge panel.
+- Colour fallbacks: `charge`->`integral`; 2-D falls back to integral for x/y/z/chisq/pdg; 3-D for pdg.
+  `dep` and `truth` both switch the Python truth overlay on (it draws deposits and trajectories together).
+- GIF buttons are enabled for 3d, light, charge+light only; static sample mode disables both buttons.
+
+## WP-I notes (reco-object highlighting: particle / slice selection)
+
+Files: `export.py` (`_export_reco_objects`), `static/select.js` (new: model + info card), `main.js`, `index.html`, `style.css`, `view2d.js`, `view3d.js`; tests in `tests/test_web_export.py`.
+
+**Data** (`available.pfp`, `available.slice`, `meta.pfp`, `meta.slice`). All ids below are ROWS of the tables, i.e. the same ids as `hits/group/pfparticle` (PFParticle collection index) and `hits/group/slice` (Slice collection index).
+- `pfp/{id (Pandora Self), pdg (13 track-like, 11 shower-like, 12/14/16 neutrino), parent (row or -1), top (top-level ancestor row), daughter_offsets + daughters (rows), slice (row or -1; a descendant without its own link inherits its top-level one), track (row of tracks/* or -1), shower (row of showers/* or -1), n_hits, n_hits_plane (n,3: U,V,Z from hits/chan_view), n_sp, score (TrackScore, NaN if none), vertex (row of vtx/* or -1), true_mc (row of mc/* or -1), true_pdg, true_tid}`; `tracks/pfp`, `showers/pfp` (owning PFParticle row of each exported track / shower; the best-match filter and the shower placeholder filter are replayed so rows line up with the exported `tracks/*`, `showers/*`).
+- `slice/{id, n_hits, n_hits_plane, n_sp, n_pfp, top (top-level PFParticle row), nu (1 if that is a 12/14/16 neutrino), vertex (n,3; vertex of the top-level PFParticle, NaN if none), true_mc, true_pdg, true_tid}`. FD Slice centres are unset (FLT_MAX) in these files, so no slice centre is exported.
+- `sp/group/<kind>` for every kind that has a hit grouping (hit -> space point association, as `Display3D._colour_values`); `pfparticle` is also filled from the PFParticle -> SpacePoint association where the hit route gives nothing, `slice` is derived from the PFParticle's slice if absent. Missing `hits/group/slice` is likewise derived from PFParticle -> Slice.
+- True-particle match: no hit -> true-particle association is read. `pfp/true_*` reuse `labels/*` (reco track / shower -> nearest true trajectory, the rule of the particle labels): a shower-like PFParticle (|pdg| 11) tries its shower label first, others their track label first. Slices take the match of their PFParticle with most hits. On ProtoDUNE-SP the labels are matched to `from_interaction` particles only (see WP-A notes), so only 1 of 551 PFParticles has a match; no true energy is exported (MCParticles carries none).
+- Degrades per step: if PFParticles are unreadable `available.pfp=false` with a `pfp:` note and the hit/space-point/slice groups are still exported; the viewer then builds a minimal table from the group ids ("Group n" card, no hierarchy). Slices unreadable but grouped: ids only.
+- Sample cost: FD +0.25 MB, PDSP +1.1 MB raw; +0.02 s (FD) / +0.27 s (PDSP) of build time. The static samples were regenerated.
+
+**Selection model** (`select.js`, wired from `main.js`). `app.state.sel = {kind:'pfp'|'slice', id, pinned, family}` or null; `app.selection` is the resolved form `{kind, groupKind:'pfparticle'|'slice', mask:Uint8Array (by group id), n, count, id, root, stamp}` and `app.on('selection', fn)` fires on every change. API: `app.select(sel)`, `app.clearSelection()`, `app.hoverObject({pfp, slice}|null, shift)`, `app.clickObject(ids, shift)`, `app.selectionTables()`, `app.vertexSelected(v)`, `app.emit(type, ...)`. `main.js` calls `app.resetSelection(bundle)` after `app.bundle` changes and before the views' `setEvent`.
+- Hover: debounced 30 ms; clearing waits 120 ms after the pointer leaves every object (so it can reach the info card, which holds the hover). Click pins; clicking the same object, empty space, or Esc unpins. A pinned selection ignores hover. "select by" particle|slice (toolbar, `selby`, default particle); holding Shift while hovering/clicking uses the other one. Hits/points with no PFParticle select nothing in particle mode.
+- Family (toolbar checkbox or `f`, `fam=1`): from the top-level ancestor down through all daughters. Keys (pinned particle): `[` parent, `]` first daughter, `,`/`.` previous/next sibling.
+- URL: only a pinned selection: `pfp=<row>` or `slice=<row>` (plus `selby`, `fam` when not default). It is restored on the first loaded event if the row exists; on later events the selection is cleared.
+- Info card (`#sel-card`, bottom-left, `⇄` moves it right; visible in 2d, 3d, 2d+3d, charge+light): particle: Self id, type, track score, slice link, parent -> daughters (clickable, pin), hits per plane U/V/Z, space points, track length / shower length + opening angle, matched true particle; family count. Slice: neutrino hypothesis flag, hits per plane, space points, particle count by type, neutrino / top-level PFParticle, vertex, members (clickable -> switches to particle selection), matched truth. Buttons: pin, focus (3-D), side, close.
+
+**2-D** (`view2d.js`): per-hit group id of the selection's kind is a lazily built attribute (`aSel`, gathered in layout order); a 1024-wide R8 flag texture (`uSelTex`, 255 = selected, indexed by group id) is rebuilt per selection change (a few hundred bytes). Selected hits: enlarged, opaque, ringed in the highlight colour, drawn in front; others 15 % alpha; true trajectories 18 %. Tracks and shower outlines/fills use the same lookup through a per-vertex id buffer built from `tracks/pfp` / `showers/pfp` (slice mode goes through `pfp/slice`); selected ones are re-drawn thicker in the highlight colour. Non-selected reco vertices are dimmed. Hover/click use the existing hit grid (7 px). No buffer is rebuilt on selection change.
+
+**3-D** (`view3d.js`): space points, track and shower lines get `aSel` + the same flag texture (`DataTexture`, R8); selected points are 1.8x / >= 5 px with an outline, the rest is mixed 84 % into the background colour (opaque, no blending), selected lines take the highlight colour, true trajectories fade, non-selected vertex markers shrink. Highlight colour yellow (dark) / orange (light). The camera never moves on selection; the card's `focus` button or double-click recentres the orbit target on the selection (distance and direction kept; `view3d.focusSelection()`). Picking is CPU, screen space: candidate space points (those with a PFParticle or slice) are projected into an 8 px bucket grid, re-projected in the background 150 ms after the camera settles (13 ms on 110k points; 18 ms the first time), each mouse move (rAF-coalesced, not while a button is down) is a 3x3 cell lookup, frontmost point within 6 px; tracks and shower cone segments are point-segment tests within 5 px. A line wins over a point only if it is more than 1 px closer.
+
+**Measured** (headless Chromium, ANGLE on llvmpipe, FD entry 1 and PDSP entry 3): 2-D pointermove handler (nearest hit + hoverObject) median 0.3 ms, p95 0.4 ms, max 1.1 ms; 3-D pick median 0.2 ms, max 0.4 ms (2.6 ms and 0.9 ms observed end-to-end per rAF pick); a selection change costs 0.2 ms median CPU (max 2.3 ms) before the scheduled redraw. 3-D steady-state frame 36 ms with or without a selection (the first frame after the first selection of a page costs ~110 ms extra, a one-off llvmpipe shader-variant compile). Test hooks: `view3d.debugPick(x, y)`, `view3d.pickMs`.
+
+**Gaps**: selected 3-D track lines are 1 px (colour only, WebGL lines); the selected PFParticle's true-trajectory is not emphasised separately from the other fading truth; no 2-D hover on the track/shower lines themselves (only on hits) and no pick of PD tiles / vertices; 3-D picks only objects whose space points belong to a PFParticle or slice; on a hit-product mismatch (`hits/group/*` absent) the 2-D hits cannot be highlighted (the PFParticle table and 3-D space points still work); the FD `hits/group/shower` index space (pylario) can differ from `showers/*` when a placeholder shower was dropped, so `showers/pfp` (not the group) is used for the line overlays; `Esc`/`f`/`[ ] , .` are ignored while a form control has focus.

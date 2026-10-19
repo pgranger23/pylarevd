@@ -1,4 +1,4 @@
-"""On-disk bundle cache: ``~/.cache/pylarevd/<sha1(path,mtime,size)>/...``.
+"""On-disk bundle cache: ``~/.cache/pylarevd/<sha1(path,mtime,size,version)>/...``.
 
 Writes are atomic (temp file + ``os.replace``), so concurrent builders of the
 same entry are safe: both build, the last rename wins, readers never see a
@@ -12,6 +12,9 @@ import tempfile
 
 _EVENT_FILES: dict = {}     # per-process: path -> EventFile (workers reuse it)
 
+# Bump whenever the bundle contents change, so stale caches are not served.
+BUNDLE_VERSION = 2
+
 
 def _root() -> str:
     return os.environ.get("PYLAREVD_CACHE") or os.path.join(
@@ -22,7 +25,7 @@ def cache_dir(path) -> str:
     """Cache directory for a data file (created on demand)."""
     p = os.path.abspath(os.fspath(path))
     st = os.stat(p)
-    key = hashlib.sha1(f"{p}|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()
+    key = hashlib.sha1(f"{p}|{st.st_mtime_ns}|{st.st_size}|v{BUNDLE_VERSION}".encode()).hexdigest()
     d = os.path.join(_root(), key)
     os.makedirs(d, exist_ok=True)
     return d

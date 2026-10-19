@@ -48,6 +48,7 @@ import view2d from './view2d.js';
 import viewlight from './viewlight.js';
 import viewoptical from './viewoptical.js';
 import './exports.js';
+import { initSelection } from './select.js';
 
 const OVERLAYS = ['truth', 'rad', 'dep', 'tracks', 'showers', 'pvtx', 'vtx', 'labels', 'pd'];
 const OV_DEFAULT = ['truth', 'tracks', 'showers', 'pvtx', 'vtx', 'pd'];
@@ -68,7 +69,7 @@ const params = new URLSearchParams(location.search);
 const sampleName = params.get('sample');
 const api = sampleName ? sampleApi(sampleName) : serverApi();
 
-const listeners = { state: [], event: [], geometry: [] };
+const listeners = { state: [], event: [], geometry: [], selection: [] };
 const extraParams = {};   // name -> default (string)
 
 const state = { ...DEFAULTS, ov: Object.fromEntries(OVERLAYS.map((o) => [o, OV_DEFAULT.includes(o)])) };
@@ -79,6 +80,9 @@ export const app = {
   views: { view3d, view2d, viewlight, viewoptical },
   get theme() { return THEMES[state.theme] || THEMES.dark; },
   setState, registerParam, status, requestLayout,
+  emit(type, ...args) {
+    for (const fn of (listeners[type] || []).slice()) { try { fn(...args); } catch (e) { console.error(`listener ${type}:`, e); } }
+  },
   on(type, fn) {
     listeners[type].push(fn);
     return () => { const i = listeners[type].indexOf(fn); if (i >= 0) listeners[type].splice(i, 1); };
@@ -350,6 +354,7 @@ async function loadEvent() {
     if (tok !== loadToken) return;
     const t1 = performance.now();
     app.bundle = bundle;
+    guard(app, 'resetSelection', bundle);       // selection.js: new tables, drop/restore the selection
     updateEventLabel();
     const meta = bundle.meta;
     fillSelect($('sel-hits'), (meta.hit_tags || []).map((t) => [t, t]), meta.hit_tag || state.hits);
@@ -454,5 +459,6 @@ async function boot() {
 }
 
 registerParam('sum', '0');   // summary bar open (1) / collapsed (0)
+initSelection(app);          // selection model + info card (select.js); registers selby/fam/pfp/slice
 boot();
 window.__evd = app;   // debugging / tests

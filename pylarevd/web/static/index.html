@@ -71,6 +71,12 @@
     <label><input type="checkbox" data-ov="labels"> labels</label>
     <label><input type="checkbox" data-ov="pd"> PD</label>
   </div>
+  <div class="group" id="sel-group" hidden>
+    <label title="what hovering / clicking a hit, space point or track selects; hold Shift to use the other one">select by
+      <select id="sel-by"><option value="particle">particle</option><option value="slice">slice</option></select>
+    </label>
+    <label title="highlight the whole hierarchy of the particle: its top-level parent and all daughters (key f)"><input type="checkbox" id="cb-family"> family</label>
+  </div>
   <div class="group">
     <button id="btn-reset" title="reset the 3D camera">reset view</button>
     <button id="btn-shot" title="save a PNG of the visible panels">screenshot</button>
@@ -82,6 +88,7 @@
   <section class="panel" id="panel-2d"></section>
   <section class="panel" id="panel-light"></section>
   <section class="panel" id="panel-optical"></section>
+  <aside id="sel-card" hidden></aside>
 </main>
 <section id="summary-bar" class="collapsed">
   <button id="sum-toggle" title="show/hide the full event summary">&#9656; <span id="sum-head">summary</span></button>

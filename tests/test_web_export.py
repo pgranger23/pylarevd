@@ -265,3 +265,101 @@ def test_pdsp_event_degrades_gracefully():
     assert "dep/xyz" not in a
     assert a["mc/from_interaction"].sum() == m["truth"]["n_from_interaction"]
     assert len(a["mc/pdg"]) > 100_000
+
+
+# ---- reconstructed-particle / slice tables (selection and highlighting) --------
+
+def _check_pfp_tables(h, a, n_hits, n_sp):
+    m = h["meta"]
+    assert m["available"]["pfp"] and m["available"]["slice"]
+    n = len(a["pfp/id"])
+    for k in ("pdg", "parent", "top", "slice", "track", "shower", "n_hits", "n_sp", "vertex",
+              "true_mc", "true_pdg", "true_tid", "score"):
+        assert len(a[f"pfp/{k}"]) == n, k
+    assert a["pfp/n_hits_plane"].shape == (n, 3)
+    g = a["hits/group/pfparticle"]
+    assert len(g) == n_hits and g.max() < n
+    assert a["pfp/n_hits"].sum() == (g >= 0).sum()
+    assert a["pfp/n_hits_plane"].sum() <= a["pfp/n_hits"].sum()
+    # parent <-> daughter symmetry
+    off, dau, par = a["pfp/daughter_offsets"].astype(int), a["pfp/daughters"], a["pfp/parent"]
+    assert len(off) == n + 1 and off[-1] == len(dau)
+    for p in range(n):
+        for d in dau[off[p]:off[p + 1]]:
+            assert par[d] == p
+    for c in range(n):
+        if par[c] >= 0:
+            assert c in dau[off[par[c]]:off[par[c] + 1]]
+        assert par[a["pfp/top"][c]] == -1
+    # tracks / showers map to PFParticles that point back at them
+    for what in ("track", "shower"):
+        key = f"{what}s/pfp"
+        if key in a:
+            for i, p in enumerate(a[key]):
+                assert p < n
+                if p >= 0:
+                    assert a[f"pfp/{what}"][p] >= 0
+        row = a[f"pfp/{what}"]
+        if key in a:
+            assert (row[row >= 0] < len(a[key])).all()
+    # space-point groups
+    sp = a["sp/group/pfparticle"]
+    assert len(sp) == n_sp and sp.max() < n
+    assert a["pfp/n_sp"].sum() == (sp >= 0).sum()
+    # slices
+    ns = len(a["slice/id"])
+    assert a["hits/group/slice"].max() < ns and a["sp/group/slice"].max() < ns
+    assert a["slice/n_hits"].sum() == (a["hits/group/slice"] >= 0).sum()
+    assert a["slice/n_hits_plane"].shape == (ns, 3) and a["slice/vertex"].shape == (ns, 3)
+    assert (a["pfp/slice"] < ns).all()
+    assert a["slice/n_pfp"].sum() == (a["pfp/slice"] >= 0).sum()
+    top = a["slice/top"]
+    assert (top[top >= 0] < n).all() and (par[top[top >= 0]] == -1).all()
+
+
+@needs_fd
+def test_fd_pfp_and_slice_tables(fd_event):
+    f, (h, a) = fd_event
+    _check_pfp_tables(h, a, len(a["hits/h"]), len(a["sp/xyz"]))
+    # the FD neutrino hypothesis is the top-level particle of the slice
+    pdg = a["pfp/pdg"]
+    assert abs(pdg[a["slice/top"][0]]) in (12, 14, 16) and a["slice/nu"][0] == 1
+    # every exported track maps to a track-like PFParticle row
+    assert (a["tracks/pfp"] >= 0).all()
+    assert (a["pfp/n_hits"][a["tracks/pfp"]] > 0).all()
+    assert h["meta"]["pfp"]["n"] == len(pdg)
+
+
+@needs_pd
+def test_pdsp_pfp_and_slice_tables():
+    from pylario import EventFile
+    from pylarevd.web.export import event_bundle
+    f = EventFile(PD)
+    h, a = read_bundle(event_bundle(f[3], hit_tag="hitpdune"))
+    _check_pfp_tables(h, a, len(a["hits/h"]), len(a["sp/xyz"]))
+    assert len(a["pfp/id"]) > 500
+    assert "showers/pfp" not in a                  # PDSP showers are unreadable
+    assert (a["tracks/pfp"] >= 0).all()
+
+
+def test_pfp_tables_degrade_without_pfparticles(monkeypatch):
+    """Hit/space-point group ids survive when the PFParticle collection cannot be read."""
+    from pylario import EventFile
+    from pylarevd.web import export
+    if not os.path.exists(FD):
+        pytest.skip("FD sample missing")
+    f = EventFile(FD)
+    ev = f[1]
+    orig = type(ev)._pick
+
+    def pick(self, classname, tag, prefer=()):
+        if classname == "recob::PFParticle":
+            raise RuntimeError("unreadable")
+        return orig(self, classname, tag, prefer)
+    monkeypatch.setattr(type(ev), "_pick", pick)
+    h, a = read_bundle(export.event_bundle(ev, hit_tag="hitfd"))
+    assert not h["meta"]["available"]["pfp"]
+    assert any(n.startswith("pfp:") for n in h["meta"]["notes"])
+    assert "pfp/id" not in a
+    assert "hits/group/pfparticle" in a and "hits/group/slice" in a
+    assert h["meta"]["available"]["slice"] and len(a["slice/id"]) >= 1
