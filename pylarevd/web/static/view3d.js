@@ -18,6 +18,18 @@
 //   requestRender()       schedule one render
 //   resetView()           refit the camera to the detector
 //   pdTileCount           number of PD tiles (0 if no geometry)
+//   setFlashTime(t_us|null)  flash bars (view 'flash3d', or Charge+Light with the "flashes"
+//                         box ticked): show only flashes with time <= t_us (ABSOLUTE us, the
+//                         clock of oph/time and meta.optical.t0); null = all flashes of the window.
+//                         Only a uniform changes (no rebuild). Bars cover the default window
+//                         t0 +- 50 us, the 200 brightest, colour = time on the cmap.
+//   cameraInfo()          {position,target,up,fov,aspect} in DETECTOR coordinates (cm):
+//                         scene (sx,sy,sz) = (z, y, -x)  =>  detector x = -sz, y = sy, z = sx.
+//                         The camera looks from position to target, `up` is detector +y,
+//                         fov is the vertical field of view in degrees.
+// Views: 'flash3d' draws FlashDisplay3D (bars across the drift, PD tiles faint, true vertex,
+// charge/reco hidden). Vertices: ov.pvtx = Pandora interaction vertex (role 1), ov.vtx =
+// roles 2/3 (a missing pvtx counts as on); the true vertex follows ov.truth.
 import * as THREE from './vendor/three.module.js';
 import { OrbitControls } from './vendor/OrbitControls.js';
 import {
@@ -108,6 +120,7 @@ void main() {
   vColor = aColor;
   gl_PointSize = aSize * uPx;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  if (aSize <= 0.0) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
 }`;
 const MARK_FRAG = /* glsl */`
 varying vec3 vColor;
@@ -138,6 +151,39 @@ void main() {
   gl_FragColor = vec4(c, e > 0.9 ? min(1.0, uAlpha + 0.3) : uAlpha);
 }`;
 
+// Flash bars: screen-space-width quads (WebGL lines are 1 px). Each flash is 4 vertices: two ends
+// x two sides. aInfo = (time rel. to t0 [us], width [css px], alpha, end 0/1).
+const FLASH_VERT = /* glsl */`
+attribute vec3 aOther;
+attribute float aSide;
+attribute vec4 aInfo;
+uniform vec2 uRes;
+uniform float uPx, uTLo, uTHi, uTMax, uCmapLo, uCmapHi;
+uniform sampler2D uLut;
+varying vec3 vColor;
+varying float vAlpha;
+void main() {
+  vec4 a = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec4 b = projectionMatrix * modelViewMatrix * vec4(aOther, 1.0);
+  vec2 d = (b.xy / b.w - a.xy / a.w) * uRes * 0.5;
+  float len = length(d);
+  vec2 dir = len > 1e-3 ? d / len : vec2(1.0, 0.0);
+  vec2 nrm = vec2(-dir.y, dir.x);
+  float sgn = len > 1e-3 ? -1.0 : (aInfo.w < 0.5 ? -1.0 : 1.0);     // square caps
+  float w = aInfo.y * uPx;
+  vec2 off = (nrm * aSide + dir * sgn) * w * 0.5;
+  gl_Position = a;
+  gl_Position.xy += off / (uRes * 0.5) * a.w;
+  float t = clamp((aInfo.x - uTLo) / (uTHi - uTLo), 0.0, 1.0);
+  vColor = texture2D(uLut, vec2(mix(uCmapLo, uCmapHi, t), 0.5)).rgb;
+  vAlpha = aInfo.z;
+  if (aInfo.x > uTMax || aInfo.x < uTLo) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+}`;
+const FLASH_FRAG = /* glsl */`
+varying vec3 vColor;
+varying float vAlpha;
+void main() { gl_FragColor = vec4(vColor, vAlpha); }`;
+
 // ------------------------------------------------------------------ module state
 const V = {
   ready: false, app: null, container: null, visible: true,
@@ -148,6 +194,7 @@ const V = {
   tpc: null, axes: null, pd: null, pdN: 0, pdAlpha: 0.28, pdCustom: false,
   sp: null, spCat: new Map(), spVal: new Map(), stats: new Map(), spMode: 'value',
   tracks: null, trackCat: null, showers: null, markers: null, mc: null, dep: null,
+  flashes: null, flashWin: null, flashTime: null, fbox: null,
   labels: [], labelPool: [], labelLayer: null, axisLabels: [],
   legend: null, title: null,
   renderQueued: false, animating: false, fitKey: '', pixelRatio: 1, camKey: new Float32Array(9),
@@ -208,6 +255,13 @@ function init(container, app) {
   V.legend = document.createElement('div'); V.legend.className = 'hud-legend'; container.appendChild(V.legend);
   V.title = document.createElement('div'); V.title.className = 'hud-title'; container.appendChild(V.title);
 
+  app.registerParam('fbars', '0');   // flash bars in Charge+Light (the 3-D panel's own checkbox)
+  V.fbox = document.createElement('label');
+  V.fbox.style.cssText = 'position:absolute;left:8px;top:26px;z-index:5;font-size:12px;color:var(--muted);display:none;cursor:pointer';
+  V.fbox.innerHTML = '<input type="checkbox" style="vertical-align:-2px"> flashes';
+  V.fbox.title = 'draw the reconstructed flashes as bars across the drift (window t0 \u00b1 50 \u00b5s)';
+  V.fbox.firstChild.addEventListener('change', (e) => app.setState({ fbars: e.target.checked ? '1' : '0' }));
+  container.appendChild(V.fbox);
   buildMaterials();
   const ro = new ResizeObserver(() => resize());
   ro.observe(container);
@@ -242,6 +296,13 @@ function buildMaterials() {
   M.pd = new THREE.ShaderMaterial({
     vertexShader: PD_VERT, fragmentShader: PD_FRAG, transparent: true, depthWrite: false, side: THREE.DoubleSide,
     uniforms: { uAlpha: { value: V.pdAlpha }, uEdge: { value: new THREE.Vector3() } },
+  });
+  M.flash = new THREE.ShaderMaterial({
+    vertexShader: FLASH_VERT, fragmentShader: FLASH_FRAG, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+    uniforms: {
+      uLut: u.uLut, uCmapLo: u.uCmapLo, uCmapHi: u.uCmapHi, uPx: u.uPx, uRes: { value: new THREE.Vector2(1, 1) },
+      uTLo: { value: -50 }, uTHi: { value: 50 }, uTMax: { value: 50 },
+    },
   });
   M.tpc = new THREE.LineBasicMaterial({ color: 0x64748b });
   M.shower = new THREE.LineBasicMaterial({ color: 0xc084fc });
@@ -388,7 +449,7 @@ function setPdColors(rgb, alpha) {
 
 // ------------------------------------------------------------------ event
 function clearEvent() {
-  for (const k of ['sp', 'tracks', 'showers', 'markers', 'mc', 'dep']) { disposeObj(V[k]); V[k] = null; }
+  for (const k of ['sp', 'tracks', 'showers', 'markers', 'mc', 'dep', 'flashes']) { disposeObj(V[k]); V[k] = null; }
   V.spCat.clear(); V.spVal.clear(); V.stats.clear(); V.trackCat = null;
   V.labels = [];
   for (const l of V.labelPool) l.el.style.display = 'none';
@@ -407,6 +468,7 @@ function setEvent(bundle, geometry) {
   buildDeposits(bundle);
   buildLabels(bundle);
   buildMarkers(bundle);
+  buildFlashes(bundle);
   V.title.textContent = (bundle.meta.truth && bundle.meta.truth.headline) || '';
   applyAll();
   render();   // first paint, synchronous
@@ -540,7 +602,85 @@ function buildMarkers(b) {
   g.setAttribute('aSize', attr(size, 1));
   V.markers = addObj(new THREE.Points(g, M.marker), 3);
   V.markers.userData.nv = nv; V.markers.userData.hasTrue = !!tv;
+  V.markers.userData.base = size.slice(); V.markers.userData.role = role || null;
   colorMarkers();
+}
+
+
+// Flash bars (FlashDisplay3D): each flash in the default window (t0 +- 50 us), the 200 brightest,
+// is a bar across the drift at its (y, z) -- a square dot if the finder set x. Built once per
+// event; the window / "up to time t" test is two uniforms in the vertex shader.
+function buildFlashes(b) {
+  V.flashWin = null;
+  const ft = b.get('flash/time'), fpe = b.get('flash/pe'), fy = b.get('flash/y'), fz = b.get('flash/z');
+  if (!ft || !ft.length || !fy || !fz) return;
+  const fx = b.get('flash/x');
+  const opm = b.meta.optical || {};
+  let t0 = Number.isFinite(opm.t0) ? opm.t0 : null;
+  if (t0 == null) { let k = 0; for (let i = 1; i < ft.length; i++) if (fpe[i] > fpe[k]) k = i; t0 = ft[k]; }
+  const lo = t0 - 50, hi = t0 + 50;
+  const sel = [];
+  for (let i = 0; i < ft.length; i++) if (Number.isFinite(fy[i]) && Number.isFinite(fz[i]) && ft[i] >= lo && ft[i] <= hi) sel.push(i);
+  sel.sort((p, q) => fpe[q] - fpe[p]);
+  const total = sel.length;
+  sel.length = Math.min(sel.length, 200);
+  sel.reverse();                                   // brightest drawn last
+  V.flashWin = { t0, lo, hi, shown: sel.length, total };
+  const bb = boundsOf(V.geometry);
+  const xlo = bb ? bb.lo[0] : -1, xhi = bb ? bb.hi[0] : 1;
+  const n = sel.length;
+  if (!n) return;
+  const pos = new Float32Array(n * 12), oth = new Float32Array(n * 12), side = new Float32Array(n * 4), info = new Float32Array(n * 16);
+  const idx = new Uint32Array(n * 6);
+  const p0 = 0, p1 = Math.log10(3e5);
+  sel.forEach((i, j) => {
+    const f = Math.min(1, Math.max(0, (Math.log10(Math.max(fpe[i], 1)) - p0) / (p1 - p0)));
+    const w = 2 + 6 * f, alpha = 0.5 + 0.45 * f;
+    const known = fx && Number.isFinite(fx[i]);
+    const e = [[known ? fx[i] : xlo, fy[i], fz[i]], [known ? fx[i] : xhi, fy[i], fz[i]]];
+    for (let end = 0; end < 2; end++) for (let s = 0; s < 2; s++) {
+      const v = 4 * j + 2 * end + s;
+      pos.set(e[end], 3 * v); oth.set(e[1 - end], 3 * v);
+      side[v] = s ? 1 : -1;
+      info.set([ft[i] - t0, w, alpha, end], 4 * v);
+    }
+    idx.set([4 * j, 4 * j + 1, 4 * j + 2, 4 * j + 1, 4 * j + 3, 4 * j + 2], 6 * j);
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', attr(pos, 3)); g.setAttribute('aOther', attr(oth, 3));
+  g.setAttribute('aSide', attr(side, 1)); g.setAttribute('aInfo', attr(info, 4));
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  V.flashes = addObj(new THREE.Mesh(g, M.flash), 4);
+  M.flash.uniforms.uTLo.value = -50; M.flash.uniforms.uTHi.value = 50;
+  applyFlashTime();
+}
+
+function applyFlashTime() {
+  const w = V.flashWin;
+  M.flash.uniforms.uTMax.value = (V.flashTime == null || !w) ? 50 : V.flashTime - w.t0;
+}
+
+/** Show flashes with time <= t (absolute us), or all of the window with null. */
+function setFlashTime(t) {
+  V.flashTime = (t == null || !Number.isFinite(t)) ? null : t;
+  applyFlashTime();
+  requestRender();
+}
+
+function flashesWanted() {
+  const st = V.app.state;
+  return st.view === 'flash3d' || (st.view === 'charge+light' && st.fbars === '1');
+}
+
+function flashLegend() {
+  const w = V.flashWin, t = V.app.theme;
+  if (!flashesWanted()) return '';
+  if (!w) return '<div>no flashes in this event</div>';
+  const cap = w.shown < w.total ? `, brightest ${w.shown} of ${w.total}` : '';
+  return `<div style="margin-top:6px">flash time [µs], ${w.shown} bars${cap}</div>` +
+    `<div class="bar" style="background:${cmapGradientCss(V.app.state.cmap, t.cmap_floor, t.cmap_ceiling)}"></div>` +
+    `<div class="ticks"><span>${fmt(w.lo)}</span><span>${fmt(w.hi)}</span></div>` +
+    '<div>width, opacity ~ log PE; x unmeasured = bar across drift</div>';
 }
 
 function colorMarkers() {
@@ -577,17 +717,37 @@ function applyTheme() {
 }
 
 function applyOverlays() {
-  const ov = V.app.state.ov;
-  if (V.tracks) V.tracks.visible = ov.tracks;
-  if (V.showers) V.showers.visible = ov.showers;
-  if (V.mc) V.mc.visible = ov.truth;
-  if (V.dep) V.dep.visible = ov.dep;
-  if (V.markers) V.markers.visible = ov.vtx;
+  const st = V.app.state, ov = st.ov;
+  const fm = st.view === 'flash3d';
+  if (V.sp) V.sp.visible = !fm;
+  if (V.tracks) V.tracks.visible = ov.tracks && !fm;
+  if (V.showers) V.showers.visible = ov.showers && !fm;
+  if (V.mc) V.mc.visible = ov.truth && !fm;
+  if (V.dep) V.dep.visible = ov.dep && !fm;
+  if (V.markers) {
+    // per-vertex show/hide through aSize (<= 0 is clipped in the shader): no rebuild
+    const u = V.markers.userData, a = V.markers.geometry.attributes.aSize.array, base = u.base;
+    const showP = ov.pvtx !== false, showD = !!ov.vtx;
+    let any = false;
+    for (let i = 0; i < u.nv; i++) {
+      const on = !fm && (u.role && u.role[i] === 1 ? showP : showD);
+      a[i] = on ? base[i] : 0; any = any || on;
+    }
+    if (u.hasTrue) { const on = fm || ov.truth; a[u.nv] = on ? base[u.nv] : 0; any = any || on; }
+    V.markers.geometry.attributes.aSize.needsUpdate = true;
+    V.markers.visible = any;
+  }
+  if (V.flashes) V.flashes.visible = flashesWanted();
   if (V.pd) V.pd.visible = ov.pd;
+  if (!V.pdCustom) M.pd.uniforms.uAlpha.value = fm ? 0.1 : V.pdAlpha;
   V.uni.uShowRad.value = ov.rad ? 1 : 0;
   applyMcRange();
-  for (const l of V.labels) l.shown = ov.labels;
-  for (const l of V.labelPool) if (!ov.labels) l.el.style.display = 'none';
+  for (const l of V.labels) l.shown = ov.labels && !fm;
+  for (const l of V.labelPool) if (!ov.labels || fm) l.el.style.display = 'none';
+  if (V.fbox) {
+    V.fbox.style.display = st.view === 'charge+light' ? '' : 'none';
+    V.fbox.firstChild.checked = st.fbars === '1';
+  }
   V.camKey[0] = NaN;   // force label refresh
 }
 
@@ -673,7 +833,8 @@ function applyColors() {
           const lo = s.lo > 0 ? s.lo : Math.max(s.hi * 1e-3, 1e-6);
           u.uFloor.value = lo; u.uLo.value = Math.log(lo); u.uInv.value = 1 / (Math.log(s.hi) - Math.log(lo));
         } else { u.uLo.value = s.lo; u.uInv.value = 1 / (s.hi - s.lo); }
-        legendBar(`${name}${log ? ' (log)' : ''}`, fmt(s.lo), fmt(s.hi), st.cmap);
+        const missing = (colour !== name && !(colour === 'pdg')) ? ` [no sp/${colour} in this event: showing charge]` : '';
+        legendBar(`${name}${log ? ' (log)' : ''}${missing}`, fmt(s.lo), fmt(s.hi), st.cmap);
       } else { u.uMode.value = 3; }
     }
   }
@@ -697,6 +858,8 @@ function applyColors() {
   if (pdgMode && V.mc && V.app.state.ov.truth) {
     leg.innerHTML += PDG_CLASSES.map((c) => `<div><span class="sw" style="background:${c[t.name]}"></span>${c.name}</div>`).join('');
   }
+  if (st.view === 'flash3d') leg.innerHTML = '';   // charge is hidden: the legend is the flash time bar
+  leg.innerHTML += flashLegend();
 }
 
 function legendBar(title, lo, hi, cmap) {
@@ -712,7 +875,11 @@ function onState(state, changed) {
   if (changed.has('theme')) { applyTheme(); }
   if (['theme', 'color', 'scale', 'cmap'].some((k) => changed.has(k))) { if (V.bundle) applyColors(); }
   if (changed.has('ov') || changed.has('theme')) applyOverlays();
-  if (changed.has('ov') && V.bundle) applyColors();   // legend depends on truth visibility
+  if (changed.has('view') || changed.has('fbars') || (changed.has('ov') && V.bundle)) {
+    applyOverlays();
+    if (V.bundle) applyColors();   // legend depends on truth visibility and on the flash bars
+  }
+  if (changed.has('view') || changed.has('cmap')) { /* flash colours follow the shared LUT texture */ }
   requestRender();
 }
 
@@ -768,6 +935,7 @@ function render() {
   V.controls.update();
   V.root.updateMatrixWorld(true);
   updateLabels();
+  if (V.flashes && V.flashes.visible) V.renderer.getDrawingBufferSize(M.flash.uniforms.uRes.value);
   try { V.renderer.render(V.scene, V.camera); } catch (e) {
     if (!V.renderer.getContext().isContextLost()) throw e;   // lost mid-draw: redraw after restore
   }
@@ -786,12 +954,20 @@ function benchmark(n = 10) {
   return (performance.now() - t0) / n;
 }
 
+/** Camera in DETECTOR coordinates (cm): scene (sx,sy,sz) = (z, y, -x), so x = -sz, y = sy, z = sx. */
+function cameraInfo() {
+  const c = V.camera, t = V.controls.target, u = c.up;
+  const det = (v) => [-v.z, v.y, v.x];
+  return { position: det(c.position), target: det(t), up: det(u), fov: c.fov, aspect: c.aspect };
+}
+
 function getCanvas() { render(); return V.renderer.domElement; }
 
 export default {
   name: 'view3d',
   init, setGeometry, setEvent, onState, setVisible, resize, getCanvas,
-  setPdColors, setAnimating, requestRender, resetView, benchmark,
+  setPdColors, setAnimating, requestRender, resetView, benchmark, setFlashTime, cameraInfo,
+  get flashWindow() { return V.flashWin; },
   get pdTileCount() { return V.pdN; },
   get camera() { return V.camera; },
   get scene() { return V.scene; },
