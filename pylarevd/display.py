@@ -643,24 +643,36 @@ class _TruthInfo:
 
         from pylario.physics import particle_symbol, particle_latex
 
-        # 1. Match Reco Tracks
+        # 1. Match Reco Tracks: the true particle whose trajectory passes
+        # closest, on average, to ~15 points sampled along the track.
+        # Vectorised: a ProtoDUNE-SP event matched 165 tracks against 20k
+        # trajectories one pair at a time -- 3.3M numpy calls, 135 s. Only a
+        # particle with a point inside the track's bounding box padded by
+        # _PAD can pass the 15 cm cut (otherwise every sample is > _PAD away),
+        # so only those are scored, exactly as before.
+        _PAD, _CUT = 60.0, 15.0
         if self.tracks is not None and mc is not None and len(mc):
+            lens = np.array([len(p) for p in mc.points], dtype=np.int64)
+            allp = (np.concatenate([np.asarray(p, float) for p in mc.points if len(p)])
+                    if lens.sum() else np.zeros((0, 3)))
+            owner = np.repeat(np.arange(len(mc)), lens)
             for i, pts in enumerate(self.tracks.points):
-                if len(pts) == 0:
+                if len(pts) == 0 or not len(allp):
                     continue
-                s = pts[::max(1, len(pts) // 15)]
-                best_m = None
-                min_d = float("inf")
-                for m in range(len(mc)):
-                    mp = mc.points[m]
-                    if len(mp) == 0:
-                        continue
-                    diff = s[:, None, :] - mp[None, :, :]
-                    d = float(np.mean(np.min(np.sqrt(np.sum(diff**2, axis=-1)), axis=-1)))
-                    if d < min_d:
-                        min_d = d
-                        best_m = m
-                if best_m is not None and min_d < 15.0:
+                smp = np.asarray(pts[::max(1, len(pts) // 15)], float)
+                lo, hi = smp.min(0) - _PAD, smp.max(0) + _PAD
+                inbox = np.all((allp >= lo) & (allp <= hi), axis=1)
+                cand = np.unique(owner[inbox])
+                if not len(cand):
+                    continue
+                sel = np.isin(owner, cand)
+                q, qo = allp[sel], owner[sel]
+                d = np.sqrt(((smp[:, None, :] - q[None, :, :]) ** 2).sum(-1))
+                starts = np.flatnonzero(np.r_[True, qo[1:] != qo[:-1]])
+                per = np.minimum.reduceat(d, starts, axis=1).mean(axis=0)
+                k = int(np.argmin(per))
+                min_d, best_m = float(per[k]), int(qo[starts[k]])
+                if min_d < _CUT:
                     tid = int(mc.track_id[best_m])
                     pdg = int(mc.pdg[best_m])
                     sym = particle_symbol(pdg)
@@ -678,21 +690,17 @@ class _TruthInfo:
                         "latex": lat,
                     })
 
-        # 2. Match Reco Showers
+        # 2. Match Reco Showers: the true particle starting nearest the shower
         if self.showers is not None and len(self.showers) and mc is not None and len(mc):
+            has = np.array([len(p) > 0 for p in mc.points])
+            firsts = np.array([np.asarray(p[0], float) if len(p) else (np.nan,) * 3
+                               for p in mc.points])
             for j in range(len(self.showers)):
-                st = self.showers.start[j]
-                best_m = None
-                min_d = float("inf")
-                for m in range(len(mc)):
-                    mp = mc.points[m]
-                    if len(mp) == 0:
-                        continue
-                    d = float(np.linalg.norm(mp[0] - st))
-                    if d < min_d:
-                        min_d = d
-                        best_m = m
-                if best_m is not None and min_d < 25.0:
+                st = np.asarray(self.showers.start[j], float)
+                dist = np.where(has, np.linalg.norm(firsts - st, axis=1), np.inf)
+                best_m = int(np.argmin(dist))
+                min_d = float(dist[best_m])
+                if min_d < 25.0:
                     tid = int(mc.track_id[best_m])
                     pdg = int(mc.pdg[best_m])
                     sym = particle_symbol(pdg)
