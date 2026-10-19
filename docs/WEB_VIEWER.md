@@ -228,3 +228,80 @@ Implemented in `web/bundle.py`, `export.py`, `cache.py`. Additions and deviation
 - Prefetch after serving i: i+1, i+2, i-1, at most `--prefetch` (default 2, capped at workers-1) concurrent, never started while an explicit request is in flight; each new explicit request replaces the queue. `--precompute` fills a lower-priority backlog.
 - `root://` paths are rejected (the cache keys on os.stat). `/api/status`: workers, in_flight, queued_prefetch, counters {builds, hits, joined, errors}, recent timings, per-file cached entries.
 - Errors: JSON `{error}` with 400 (bad entry/tag/body), 403 (open disabled), 404 (unknown file/route/static), 500 (decode failure).
+
+## WP-C implementation notes
+
+Files: `static/{index.html,style.css,main.js,data.js,colormaps.js,view3d.js}` plus no-op
+stubs `view2d.js` and `viewlight.js` (to be replaced by WP-D / WP-E, which own them).
+Everything is plain ES modules; no build step.
+
+### View module interface (also in the header comment of `main.js`)
+
+A view is a module whose default export is an object:
+
+```js
+export default {
+  name: 'view2d',
+  init(container, app) {},        // once at startup; container = its <section class="panel">
+  setGeometry(geometry) {},       // optional; geometry Bundle changed (new file); before setEvent
+  setEvent(bundle, geometry) {},  // new event Bundle; null = clear
+  onState(state, changed) {},     // any state change; `changed` = Set of keys; first call has all keys
+  setVisible(visible) {},         // optional; panel shown/hidden by the view selector
+  resize() {},                    // optional; container size changed (called after setVisible(true))
+  getCanvas() {},                 // optional; canvas the screenshot button composites
+};
+```
+
+`main.js` imports the three modules statically and calls the hooks inside try/catch (a
+broken view cannot take the app down). `app` (passed to `init`, also `window.__evd`):
+`state`, `setState(patch)`, `registerParam(name, default)` (extra string state key kept in
+the URL; call in `init`), `on('state'|'event'|'geometry', fn)`, `bundle`, `geometry`,
+`theme` (colour set from `colormaps.js` `THEMES`), `views` (registry: `app.views.view3d`
+etc.), `status(text, isError)`, `requestLayout()`.
+
+State keys: `file entry hits flash view color scale cmap theme ov{truth,rad,dep,tracks,
+showers,vtx,labels,pd}` plus registered params. Views must not rebuild data-derived geometry
+in `onState` unless a data-defining key changed.
+
+Layout: `#main[data-view]` is a CSS grid; `view` in `3d | 2d | light | charge+light | 2d+3d`
+decides which panels are displayed (`charge+light` = 3D panel + light panel, `2d+3d` = 2D +
+3D). Hidden panels get `setVisible(false)` and must not render.
+
+### Light hook into the 3-D view
+
+`app.views.view3d.setPdColors(Float32Array rgb|null, alpha?)`: `rgb` is `n_tiles*3`, 0..1
+sRGB, tile order = geometry `pd/xyz`; `null` restores the neutral walls. It only updates an
+instance-colour attribute and schedules a render. During playback call
+`view3d.setAnimating(true)` (render loop on) and `setAnimating(false)` afterwards (back to
+render-on-demand). `view3d.pdTileCount`, `requestRender()`, `resetView()` are also public.
+
+### URL state
+
+All controls live in the query string and are restored on load: `file`, `entry` (entry
+number, not list index), `hits`, `flash`, `view`, `color`, `scale`, `cmap`, `theme`,
+`ov=truth,tracks,...` (comma list, only written when it differs from the default; `ov=`
+means none), and `sample=fd|pdsp` (static-bundle mode, no server). Registered module params
+are written when they differ from their default. Controls are populated from the URL after
+the option lists have been fetched, and the state follows what the server actually returned
+(e.g. the resolved hit product). The camera is not in the URL.
+
+### 3-D conventions
+
+GPU buffers stay in detector coordinates; a root group rotates detector `(x,y,z)` into scene
+`(z, y, -x)`: screen-right = z (beam), up = y, x (drift) toward the viewer; proper rotation,
+no mirroring. A corner gizmo labels the axes. Space points: one `THREE.Points` + shader
+(colour by value through a LUT texture, log/linear/auto, categorical by `sp/group/<kind>`,
+or detector x/y/z). Tracks and truth: one indexed `LineSegments` each; radiologicals
+(`mc/from_interaction == 0`) are hidden in the vertex shader from a per-vertex flag, so the
+toggle never rebuilds anything. Truth colour: uniform `mctrack`, or per pdg class with colour
+by "truth pdg". PD walls: `InstancedMesh` of quads with an instance colour attribute.
+Colour-by values not present for space points (`amplitude`, `tick`, `multiplicity` use
+`sp/<name>` when the exporter writes it, else charge).
+
+### Testing
+
+Headless Chromium + SwiftShader (the recipe in the README) crashes the GPU process on the
+first shader draw on this machine (SEGV in JIT code; every WebGL context is lost after
+about 1 s and not reliably restored). Use ANGLE on Mesa llvmpipe instead:
+`--use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist` (no context loss). The viewer
+also redraws after `webglcontextrestored`.

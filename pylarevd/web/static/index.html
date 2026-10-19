@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pylarevd event viewer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="toolbar">
+  <div class="group">
+    <label>file <select id="sel-file"></select></label>
+    <button id="btn-prev" title="previous event (left arrow)">&#9664;</button>
+    <label class="evlabel"><span id="ev-label">-</span></label>
+    <button id="btn-next" title="next event (right arrow)">&#9654;</button>
+    <label>go to <input id="inp-jump" type="number" min="0" step="1" title="event index in the file (0-based), Enter to jump"></label>
+  </div>
+  <div class="group">
+    <label>hits <select id="sel-hits"></select></label>
+    <label>flash <select id="sel-flash"></select></label>
+  </div>
+  <div class="group">
+    <label>view
+      <select id="sel-view">
+        <option value="3d">3D</option>
+        <option value="2d">2D</option>
+        <option value="light">Light</option>
+        <option value="charge+light">Charge+Light</option>
+        <option value="2d+3d">2D+3D</option>
+      </select>
+    </label>
+    <label>colour by
+      <select id="sel-color">
+        <option value="charge">charge</option>
+        <option value="amplitude">amplitude</option>
+        <option value="tick">tick</option>
+        <option value="multiplicity">multiplicity</option>
+        <option value="x">x</option><option value="y">y</option><option value="z">z</option>
+        <option value="track">track</option>
+        <option value="shower">shower</option>
+        <option value="pfparticle">pfparticle</option>
+        <option value="cluster">cluster</option>
+        <option value="slice">slice</option>
+        <option value="pdg">truth pdg</option>
+      </select>
+    </label>
+    <label>scale
+      <select id="sel-scale"><option value="auto">auto</option><option value="log">log</option><option value="linear">linear</option></select>
+    </label>
+    <label>cmap <select id="sel-cmap"></select></label>
+    <label>theme
+      <select id="sel-theme"><option value="dark">dark</option><option value="light">light</option></select>
+    </label>
+  </div>
+  <div class="group overlays" id="overlays">
+    <label><input type="checkbox" data-ov="truth"> truth</label>
+    <label title="true trajectories/deposits not descending from the interaction"><input type="checkbox" data-ov="rad"> radiologicals</label>
+    <label><input type="checkbox" data-ov="dep"> deposits</label>
+    <label><input type="checkbox" data-ov="tracks"> tracks</label>
+    <label><input type="checkbox" data-ov="showers"> showers</label>
+    <label><input type="checkbox" data-ov="vtx"> vertices</label>
+    <label><input type="checkbox" data-ov="labels"> labels</label>
+    <label><input type="checkbox" data-ov="pd"> PD</label>
+  </div>
+  <div class="group">
+    <button id="btn-reset" title="reset the 3D camera">reset view</button>
+    <button id="btn-shot" title="save a PNG of the visible panels">screenshot</button>
+    <button id="btn-link" title="copy a link to this exact state">link</button>
+  </div>
+</header>
+<main id="main" data-view="3d">
+  <section class="panel" id="panel-3d"></section>
+  <section class="panel" id="panel-2d"></section>
+  <section class="panel" id="panel-light"></section>
+  <aside id="summary" title="event summary"></aside>
+</main>
+<footer id="status"><span id="status-text">starting...</span><span id="status-right"></span></footer>
+<script type="module" src="main.js"></script>
+</body>
+</html>
