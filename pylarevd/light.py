@@ -304,21 +304,42 @@ class PhotonDetectorWalls:
 
         half_y = np.empty(len(x))
         half_z = np.empty(len(x))
+        # Real detector outlines when the geometry recorded them: ProtoDUNE-SP
+        # mixes 2 m light-guide bars with 10 cm ARAPUCA cells, so a size
+        # inferred from spacing drew the bars as slivers. A 10 cm bar is
+        # still too thin to read on a 6 m wall, so the short side is
+        # thickened to a quarter of the typical row spacing at least.
+        ext = getattr(geometry, "opdet_half_extent", None)
+        real = None
+        if ext is not None:
+            ext = np.asarray(ext, float)[chans]
+            if np.isfinite(ext).all():
+                real = np.zeros((len(x), 3))
+                np.maximum.at(real, inv, ext)
         for w in range(len(wall_x)):
             m = wall == w
-            half_z[m] = 0.47 * _pitch(z[m])
-            half_y[m] = 0.40 * _pitch(y[m])
+            if real is None:
+                half_z[m] = 0.47 * _pitch(z[m])
+                half_y[m] = 0.40 * _pitch(y[m])
+            else:
+                floor_y = 0.25 * _pitch(y[m], typical=True)
+                floor_z = 0.25 * _pitch(z[m], typical=True)
+                half_y[m] = np.maximum(real[m, 1], floor_y)
+                half_z[m] = np.maximum(real[m, 2], min(floor_z, floor_y))
         return cls(x=x, y=y, z=z, half_y=half_y, half_z=half_z,
                    wall=wall.astype(np.int64), wall_x=wall_x,
                    channels=per_tile, chan_tile=chan_tile, projected=projected)
 
 
-def _pitch(v: np.ndarray, default: float = 20.0) -> float:
-    """Smallest spacing between distinct detector coordinates."""
+def _pitch(v: np.ndarray, default: float = 20.0, *, typical: bool = False) -> float:
+    """Smallest (or, with ``typical``, median) spacing between distinct
+    detector coordinates."""
     u = np.unique(np.round(v, 0))
     d = np.diff(u)
     d = d[d > 2.0]
-    return float(d.min()) if len(d) else default
+    if not len(d):
+        return default
+    return float(np.median(d) if typical else d.min())
 
 
 # --------------------------------------------------------------------------
@@ -1159,19 +1180,35 @@ class _MplScene:
             c3d_w = 7.4 * max(1.0, scale ** 0.5)
             fig_w += c3d_w
         wall_left = left + c3d_w + (0.35 if charge is not None else 0.0)
-        wall_w = fig_w - wall_left - right_w
+        avail_w = fig_w - wall_left - right_w
         spans = [W.extent(w) for w in range(W.n_walls)]
-        wall_h = [wall_w * (s[3] - s[2]) / (s[1] - s[0]) for s in spans]
-        cap = 6.4 / max(1, len(wall_h)) if len(wall_h) > 1 else 6.4
-        if max(wall_h) > cap:                  # tall detector: shrink width
-            f = cap / max(wall_h)
-            wall_h = [h * f for h in wall_h]
-            wall_w *= f
+        aspects = [(s[3] - s[2]) / (s[1] - s[0]) for s in spans]
+        n_w = W.n_walls
+        # Walls about as tall as they are wide (ProtoDUNE: two 7 x 6 m APA
+        # planes) sit side by side; long ones (the FD module) are stacked.
+        self.side_by_side = side = n_w > 1 and min(aspects) > 0.45
+        if side:
+            each_w = (avail_w - (gap + 0.4) * (n_w - 1)) / n_w
+            wall_h = [each_w * r for r in aspects]
+            if max(wall_h) > 6.4:
+                f = 6.4 / max(wall_h)
+                wall_h = [h * f for h in wall_h]
+                each_w *= f
+            block_h = max(wall_h)
+            wall_w = n_w * each_w + (gap + 0.4) * (n_w - 1)
+        else:
+            wall_w = avail_w
+            wall_h = [wall_w * r for r in aspects]
+            cap = 6.4 / max(1, n_w) if n_w > 1 else 6.4
+            if max(wall_h) > cap:              # tall detector: shrink width
+                f = cap / max(wall_h)
+                wall_h = [h * f for h in wall_h]
+                wall_w *= f
+            block_h = sum(wall_h) + gap * (n_w - 1)
         head_h = 1.05 + 0.18 * (scale - 1)
         strip_h, bottom = 1.55 * max(1.0, scale ** 0.5), 0.55
         strip_gap = 0.8 * max(1.0, scale ** 0.5)     # room for the z label
-        fig_h = (head_h + sum(wall_h) + gap * (len(wall_h) - 1) + strip_gap
-                 + strip_h + bottom)
+        fig_h = head_h + block_h + strip_gap + strip_h + bottom
         self.fig = fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi or 100)
         fig.patch.set_facecolor(t.fig_bg)
 
@@ -1185,9 +1222,13 @@ class _MplScene:
         lo, hi = a.pe_range
         tile_idx = []
         for w in range(W.n_walls):
-            y0 = top - wall_h[w]
-            ax = fig.add_axes(frac(wall_left, y0, wall_w, wall_h[w]))
-            top = y0 - gap
+            if side:
+                ax = fig.add_axes(frac(wall_left + w * (each_w + gap + 0.4),
+                                       top - wall_h[w], each_w, wall_h[w]))
+            else:
+                y0 = top - wall_h[w]
+                ax = fig.add_axes(frac(wall_left, y0, wall_w, wall_h[w]))
+                top = y0 - gap
             ax.set_facecolor(t.axes_bg)
             zmin, zmax, ymin, ymax = spans[w]
             for (bz0, bz1, by0, by1) in a._wall_boxes(w):
@@ -1207,8 +1248,9 @@ class _MplScene:
             ax.set_xlim(zmin, zmax)
             ax.set_ylim(ymin, ymax)
             ax.set_aspect("equal", adjustable="box")
-            ax.set_ylabel("y [cm]", fontsize=fonts["label"])
-            if w == W.n_walls - 1:
+            if w == 0 or not side:
+                ax.set_ylabel("y [cm]", fontsize=fonts["label"])
+            if side or w == W.n_walls - 1:
                 ax.set_xlabel("z [cm]  (beam)", fontsize=fonts["label"])
             _style_axes(ax, t, fonts)
             ax.grid(False)
@@ -1259,9 +1301,8 @@ class _MplScene:
                 self.vertex_art.append(v)
 
         # colourbar
-        cax = fig.add_axes(frac(wall_left + wall_w + 0.18, fig_h - head_h
-                                - sum(wall_h) - gap * (len(wall_h) - 1),
-                                0.16, sum(wall_h) + gap * (len(wall_h) - 1)))
+        cax = fig.add_axes(frac(wall_left + wall_w + 0.18, fig_h - head_h - block_h,
+                                0.16, block_h))
         sm = plt.cm.ScalarMappable(norm=mcolors.LogNorm(vmin=lo, vmax=hi),
                                    cmap=cmap)
         cb = fig.colorbar(sm, cax=cax)
@@ -1354,7 +1395,6 @@ class _MplScene:
         self.front3d = []
         self.bars3d = []
         if charge is not None:
-            block_h = sum(wall_h) + gap * (len(wall_h) - 1)
             block_bottom = fig_h - head_h - block_h
             ax3 = fig.add_axes(frac(left - 0.55, block_bottom - 0.45,
                                     c3d_w + 0.1, block_h + 0.35),
@@ -1741,15 +1781,35 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
               for w in range(nw)]
     charge = getattr(a, "charge", None)
     srow = nw + 1
-    if charge is None:
-        wcol = 1
+    # Same rule as the static figure: walls about as tall as they are wide
+    # (ProtoDUNE's two APA planes) go side by side, long ones are stacked.
+    side = nw > 1 and min(ratio) > 0.45
+    wcol = 1 if charge is None else 2
+    cells = [(w + 1, wcol) for w in range(nw)]
+    if side:
+        c0 = 1 if charge is None else 2
+        ncol = nw + c0 - 1
+        row1 = ([{"type": "scene"}] if charge is not None else []) \
+            + [{"type": "xy"} for _ in range(nw)]
+        row1_titles = ([f"charge: {len(charge.sp):,} space points (grey: log "
+                        "charge) + light on the photon detectors"]
+                       if charge is not None else []) + titles
+        fig = make_subplots(
+            rows=2, cols=ncol,
+            specs=[row1, [{"type": "xy", "colspan": ncol}] + [None] * (ncol - 1)],
+            column_widths=([0.4] + [0.6 / nw] * nw) if charge is not None else None,
+            row_heights=[1 - strip_share, strip_share],
+            horizontal_spacing=0.05, vertical_spacing=0.1,
+            subplot_titles=row1_titles + [""])
+        srow = 2
+        cells = [(1, c0 + w) for w in range(nw)]
+    elif charge is None:
         fig = make_subplots(rows=nw + 1, cols=1,
                             row_heights=wall_share + [strip_share],
                             vertical_spacing=0.08 if nw == 1 else 0.05,
                             subplot_titles=titles + [""])
     else:
         # the 3-D charge spans the wall rows on the left; the strip spans all
-        wcol = 2
         specs = ([[{"type": "scene", "rowspan": nw}, {"type": "xy"}]]
                  + [[None, {"type": "xy"}] for _ in range(nw - 1)]
                  + [[{"type": "xy", "colspan": 2}, None]])
@@ -1768,6 +1828,7 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
     lo, hi = a.pe_range
     n = a.n_frames
     dyn: list[tuple[int, callable]] = []     # (trace index, frame -> dict)
+    cur = {"col": cells[0][1]}               # the wall column being filled
 
     def add(static: dict, row: int, fn=None, k0: int | None = 0,
             col: int | None = None):
@@ -1780,7 +1841,7 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
                 else:
                     props[key] = val
         if col is None:
-            col = 1 if row == srow else wcol
+            col = 1 if row == srow else cur["col"]
         fig.add_trace(props, row=row, col=col)
         if fn is not None:
             # Frame entries MUST repeat the trace type: plotly.py validates a
@@ -1791,7 +1852,8 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
                         lambda k, fn=fn, kind=kind: {"type": kind, **fn(k)}))
 
     for w in range(nw):
-        row = w + 1
+        row, wc = cells[w]
+        cur["col"] = wc
         m = np.flatnonzero(W.wall == w)
         bx, by = [], []
         for (z0, z1, y0, y1) in a._wall_boxes(w):
@@ -1885,13 +1947,14 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
                                     f"y {tv[1]:.0f}, z {tv[2]:.0f} cm"
                                     "<extra></extra>")), row)
         zmin, zmax, ymin, ymax = spans[w]
-        xa = fig.get_subplot(row, wcol).xaxis.plotly_name.replace("axis", "")
+        xa = fig.get_subplot(row, wc).xaxis.plotly_name.replace("axis", "")
         # Equal aspect, and shrink the panel rather than pad the axis: the
         # default filled the width with z = -1000..2300 cm of nothing.
-        fig.update_xaxes(range=[zmin, zmax], row=row, col=wcol,
-                         title_text="z [cm] (beam)" if row == nw else None,
+        fig.update_xaxes(range=[zmin, zmax], row=row, col=wc,
+                         title_text="z [cm] (beam)" if (side or row == nw) else None,
                          showgrid=False, zeroline=False, constrain="domain")
-        fig.update_yaxes(range=[ymin, ymax], row=row, col=wcol, title_text="y [cm]",
+        fig.update_yaxes(range=[ymin, ymax], row=row, col=wc,
+                         title_text="y [cm]" if (w == 0 or not side) else None,
                          scaleanchor=xa, scaleratio=1, showgrid=False,
                          zeroline=False, constrain="domain")
 
@@ -1916,7 +1979,6 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
         1)
 
     # ---- strip
-    srow = nw + 1
     inside, outside = a.strip
     links, _ = a._links
     xs = np.repeat(np.arange(n + 1, dtype=float), 2)[1:-1]
@@ -2002,7 +2064,8 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
         template="plotly_dark" if t.is_dark else "plotly_white",
         paper_bgcolor=t.fig_bg, plot_bgcolor=t.axes_bg,
         font=dict(color=t.fg_muted),
-        legend=dict(orientation="h", x=1.0, xanchor="right", y=1.0,
+        legend=dict(orientation="h", x=1.0, xanchor="right",
+                    y=1.06 if side else 1.0,
                     yanchor="bottom", bgcolor="rgba(0,0,0,0)",
                     font=dict(color=t.fg, size=11)),
         margin=dict(l=60, r=30, t=90, b=40),
