@@ -208,3 +208,61 @@ def test_prefetch_fills_neighbours(cache_env):
         assert all(os.path.exists(w) for w in want)
     finally:
         s.close()
+
+
+# ---------------------------------------------------------------- exports
+
+def test_camera_to_mpl():
+    from pylarevd.web.render import camera_to_mpl
+    # looking from +y (above) down: elevation 90
+    e, a, z = camera_to_mpl([0, 10, 0], [0, 0, 0], 10)
+    assert abs(e - 90) < 1e-6 and abs(z - 1.15) < 1e-9
+    # from +z (beam) horizontal: elev 0, azim 0 (matplotlib x axis is z)
+    e, a, _ = camera_to_mpl([0, 0, 5], [0, 0, 0])
+    assert abs(e) < 1e-6 and abs(a) < 1e-6
+    # from +x (drift): azim 90; closer camera zooms in, clipped at 1.8
+    e, a, z = camera_to_mpl([5, 0, 0], [0, 0, 0], 100)
+    assert abs(a - 90) < 1e-6 and z == 1.8
+
+
+@have_fd
+def test_export_pdf_png_and_errors(srv):
+    base = f"/api/export?file={FD}&entry=0"
+    st, hdr, body = get(srv.base, base + "&kind=pdf&view=2d&ov=tracks,vtx,pvtx&merge2d=view")
+    assert st == 200 and body.startswith(b"%PDF"), body[:200]
+    assert "pylarevd_run" in hdr["Content-Disposition"] and hdr["Content-Disposition"].endswith('_2d.pdf"')
+    st, hdr, body = get(srv.base, base + "&kind=pdf&view=3d&campos=900,500,1400&camtgt=0,0,500"
+                        "&color=amplitude&theme=light")
+    assert st == 200 and body.startswith(b"%PDF")
+    st, hdr, body = get(srv.base, base + "&kind=png&view=2d%2B3d")
+    assert st == 200 and body[:4] == b"\x89PNG" and "2-D" in hdr["X-Export-Note"]
+    for bad in ("&kind=jpg", "&view=nope", "&kind=gif&view=2d", "&cmap=zzz", "&ov=bogus",
+                "&lframes=abc", "&campos=1,2", "&scale=sqrt", "&entry=9999"):
+        st, hdr, body = get(srv.base, base + bad if "entry=9999" not in bad else
+                            f"/api/export?file={FD}" + bad)
+        assert st == 400 and "error" in json.loads(body), (bad, st, body[:100])
+    assert get(srv.base, f"/api/export?file={FD}")[0] == 400          # no entry
+    assert get(srv.base, f"/api/export?file=/nope.root&entry=0")[0] == 404
+
+
+@have_fd
+def test_export_gif(srv):
+    from PIL import Image
+    import io
+    base = f"/api/export?file={FD}&entry=0"
+    for extra in ("&view=light&lframes=12&lfps=10", "&view=3d&rotstep=30"):
+        st, hdr, body = get(srv.base, base + "&kind=gif" + extra)
+        assert st == 200 and body[:6] == b"GIF89a", (extra, st, body[:200])
+        im = Image.open(io.BytesIO(body))
+        assert im.n_frames > 1 and ".gif" in hdr["Content-Disposition"]
+
+
+@have_pd
+def test_export_pdsp_pdf(cache_env):
+    s = Srv([PD], workers=2, prefetch=0)
+    try:
+        for view in ("2d", "3d", "light"):
+            st, hdr, body = get(s.base, f"/api/export?file={PD}&entry=0&kind=pdf&view={view}")
+            assert st == 200 and body.startswith(b"%PDF"), (view, st, body[:200])
+    finally:
+        s.close()

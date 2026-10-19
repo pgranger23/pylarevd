@@ -494,6 +494,8 @@ class Handler(BaseHTTPRequestHandler):
                 infos = list(app.files.values())
             return self._json([self._file_entry(i) for i in infos])
         info = app.lookup(_tag(q, "file"))
+        if route == "/api/export":
+            return self._export(info, q)
         if route == "/api/events":
             return self._json(info.ids())
         if route == "/api/geometry":
@@ -520,6 +522,46 @@ class Handler(BaseHTTPRequestHandler):
                 app.prefetch_around(info, entry, hit, flash)
             return None
         raise HttpError(404, f"unknown endpoint {route}")
+
+    def _export(self, info, q):
+        from . import render
+        app = self.app
+        entry = _int(q, "entry")
+        if not 0 <= entry < info.n_events:
+            raise HttpError(400, f"entry {entry} out of range (0..{info.n_events - 1})")
+        dh, df = info.default_tags()
+        hit = _tag(q, "hits") or dh
+        flash = _tag(q, "flash") or df
+        if hit and info.hit_tags() and hit not in info.hit_tags():
+            raise HttpError(400, f"no hit product with tag {hit!r}")
+        if flash and info.flash_tags() and flash not in info.flash_tags():
+            raise HttpError(400, f"no flash product with tag {flash!r}")
+        flat = {k: v[0] for k, v in q.items() if v}
+        try:
+            p = render.parse_export(flat)
+        except ValueError as exc:
+            raise HttpError(400, str(exc))
+        try:
+            fut = app.pool().submit(render.render_export, info.path, entry, hit, flash, p)
+        except BrokenProcessPool:
+            app._pool = None
+            fut = app.pool().submit(render.render_export, info.path, entry, hit, flash, p)
+        app.counters["exports"] += 1
+        try:
+            res = fut.result()
+        except BrokenProcessPool:
+            with app.lock:
+                app._pool = None
+            raise HttpError(500, "worker process died while rendering; retry")
+        if not res["ok"]:
+            raise HttpError(res["status"], res["error"])
+        hdr = {"Content-Disposition": f'attachment; filename="{res["filename"]}"',
+               "Cache-Control": "no-store", "X-Export-Seconds": str(res["render_s"]),
+               "Access-Control-Expose-Headers": "Content-Disposition, X-Export-Note"}
+        if res["note"]:
+            hdr["X-Export-Note"] = res["note"]
+        self._send(200, res["data"], res["ctype"], hdr,
+                   f"export {p['kind']} {p['view']} {res['render_s']}s")
 
     def _bundle(self, dest, note=""):
         gz_ok = "gzip" in (self.headers.get("Accept-Encoding") or "")
