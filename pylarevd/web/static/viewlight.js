@@ -173,7 +173,7 @@ const CSS = `
 .lt-tip { position:absolute; z-index:6; pointer-events:none; display:none; white-space:pre; font:11.5px/1.35 ui-monospace,Menlo,monospace;
   background:var(--legend-bg); border:1px solid var(--legend-edge); border-radius:4px; padding:3px 6px; color:var(--fg); }
 .lt-empty { position:absolute; left:12px; top:12px; color:var(--muted); font-size:13px; white-space:pre-wrap; }
-#main[data-view="light"] #summary { display:none; }
+
 `;
 
 const V = {
@@ -554,6 +554,7 @@ function drawGL() {
     const w = winOf(c);
     const vx = Math.round(c.x * dpr), vw = Math.round(c.cw * dpr), vh = Math.round(c.ch * dpr);
     const vy = Math.round((V.H - c.y - c.ch) * dpr);
+    if (vw <= 0 || vh <= 0) continue;   // transient layout (panel just shown/hidden)
     gl.viewport(vx, vy, vw, vh); gl.scissor(vx, vy, vw, vh);
     gl.uniform2f(loc.uC, 0.5 * (w.z0 + w.z1), 0.5 * (w.y0 + w.y1));
     gl.uniform2f(loc.uH, 0.5 * (w.z1 - w.z0), 0.5 * (w.y1 - w.y0));
@@ -737,7 +738,7 @@ function drawDyn(ctx = null) {
       const alpha = k < 0 ? 0.85 : Math.max(0.45, Math.pow(pers, age));
       ctx.globalAlpha = alpha; ctx.lineWidth = fl.lw;
       const cx = px(fl.z), cy = py(fl.y);
-      ctx.beginPath(); ctx.ellipse(cx, cy, fl.zw * sx, fl.yw * sy, 0, 0, 2 * Math.PI); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(cx, cy, Math.abs(fl.zw * sx), Math.abs(fl.yw * sy), 0, 0, 2 * Math.PI); ctx.stroke();
       ctx.lineWidth = 1.4; ctx.beginPath(); ctx.moveTo(cx - 4, cy); ctx.lineTo(cx + 4, cy); ctx.moveTo(cx, cy - 4); ctx.lineTo(cx, cy + 4); ctx.stroke();
       if (f < 6) {
         ctx.globalAlpha = Math.max(0.75, alpha); ctx.font = fontCss(11); ctx.textBaseline = 'top';

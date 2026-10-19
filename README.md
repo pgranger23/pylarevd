@@ -19,7 +19,61 @@ compiled extension — just `uproot` + `numpy` + `plotly`/`matplotlib`.
 > Already have it? `python -m pylarevd --check` reports what is installed, what
 > is missing and how to install it.
 
-## The interactive browser (start here)
+## The web viewer (new)
+
+A faster browser viewer: each event is decoded once in Python into a compact
+binary bundle, and everything after that (colour, scale, overlays, theme, light
+animation, camera) runs in the browser with WebGL, so controls respond
+immediately and the 3-D camera is never reset. Plain ES modules, no build step.
+
+```bash
+python -m pylarevd.web reco.root [more.root ...] --port 8050 [--precompute] [--workers N]
+ssh -N -L 8050:localhost:8050 <your-host>      # on your laptop, then open http://localhost:8050
+```
+
+The server binds to loopback only, like the Dash app. `--workers N` sets the
+decoder processes (default min(8, cores)); the next two events are decoded in
+the background while you look at one; `--precompute` also fills the cache for
+the whole file in the background.
+
+**Views** (selector in the toolbar):
+
+| view | shows |
+|---|---|
+| 2D | one panel per wire plane, hits and projected overlays; `space` switch between physical (wire, x) and readout (channel, tick) |
+| 3D | space points, tracks, shower cones, vertices, true trajectories, deposits, TPC boxes, photon-detector walls |
+| Light | PD walls face-on, time strip, flash ellipses, play/pause, slider, log or linear clock |
+| Charge+Light | the 3-D view with the PD walls lit by the same time state as the Light panel |
+| 2D+3D | the two side by side |
+
+**Controls.** File, event (prev/next buttons, left/right arrow keys, or type an
+index in "go to" and press Enter), hit product, flash producer, colour by
+(charge, amplitude, tick, multiplicity, x/y/z, track, shower, pfparticle,
+cluster, slice, truth pdg), scale (auto/log/linear), colormap, dark/light
+theme, overlay checkboxes (truth, radiologicals, deposits, tracks, showers,
+vertices, labels, PD), reset view, screenshot (PNG of the visible panels) and
+link. Mouse: 3-D drag to rotate, right-drag to pan, wheel to zoom; 2-D wheel
+to zoom, drag to pan, double click to reset; hover shows hit info. The summary
+line under the panels expands to the full event summary on click.
+
+**URL sharing.** Every control, including the open file and entry, is in the
+query string and restored on load; "link" copies it. The camera is not saved.
+`?sample=fd` or `?sample=pdsp` opens a bundled static sample without a server.
+
+**Cache.** Decoded events are cached in `~/.cache/pylarevd` (override with the
+environment variable `PYLAREVD_CACHE`), keyed on file path, mtime and size, so
+a revisited event opens instantly and several people can share one cache. To
+decode a whole file up front, in parallel:
+
+```bash
+python -m pylarevd.web.export reco.root -j 32          # also: -e 0-9, --hits TAG, --flash TAG
+```
+
+Design and format notes are in [docs/WEB_VIEWER.md](docs/WEB_VIEWER.md). The
+original Dash app (`python -m pylarevd.app`, next section) still exists and is
+unchanged.
+
+## The Dash browser app
 
 This is how most people use pylarevd. It is a small web app: you run it **on the
 machine that has the files**, and view it **in the browser on your laptop**

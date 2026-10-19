@@ -303,7 +303,7 @@ async function loadEvent() {
     if (meta.hit_tag && meta.hit_tag !== state.hits) patch.hits = meta.hit_tag;
     if (meta.flash_tag && meta.flash_tag !== state.flash) patch.flash = meta.flash_tag;
     if (Object.keys(patch).length) setState(patch);
-    $('summary').textContent = (meta.summary || []).join('\n');
+    setSummary(meta.summary || []);
     const t2 = performance.now();
     for (const v of Object.values(app.views)) guard(v, 'setEvent', bundle, app.geometry);
     for (const fn of listeners.event.slice()) fn(bundle, app.geometry);
@@ -322,6 +322,21 @@ async function loadEvent() {
     if (e.name === 'AbortError') return;
     console.error(e); status(String(e.message || e), true);
   }
+}
+
+// ------------------------------------------------------------------ summary bar
+function applySummaryOpen() {
+  const open = state.sum === '1';
+  $('summary-bar').classList.toggle('collapsed', !open);
+  $('sum-toggle').firstChild.textContent = open ? '\u25be ' : '\u25b8 ';
+  $('sum-toggle').title = open ? 'hide the full event summary' : 'show the full event summary';
+  requestLayout();
+}
+function setSummary(lines) {
+  $('summary').textContent = lines.join('\n');
+  $('sum-head').textContent = lines.length ? lines[0] : '';
+  $('summary-bar').classList.toggle('empty', !lines.length);
+  applySummaryOpen();
 }
 
 // ---------------------------------------------------------------- screenshot
@@ -362,6 +377,9 @@ async function boot() {
   readUrl();                                        // after registerParam so extra keys restore
   document.documentElement.dataset.theme = state.theme;
   bindControls();
+  $('sum-toggle').addEventListener('click', () => { setState({ sum: state.sum === '1' ? '0' : '1' }); });
+  app.on('state', (s, ch) => { if (ch.has('sum')) applySummaryOpen(); });
+  applySummaryOpen();
   syncControls();
   applyLayout();
   const all = new Set(['file', 'entry', 'hits', 'flash', 'view', 'color', 'scale', 'cmap', 'theme', 'ov', ...Object.keys(extraParams)]);
@@ -378,5 +396,6 @@ async function boot() {
   }
 }
 
+registerParam('sum', '0');   // summary bar open (1) / collapsed (0)
 boot();
 window.__evd = app;   // debugging / tests

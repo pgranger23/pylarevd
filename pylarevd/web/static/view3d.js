@@ -471,8 +471,28 @@ function buildTruth(b) {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', attr(pts, 3));
   g.setAttribute('aMeta', attr(meta, 1));
-  g.setIndex(new THREE.BufferAttribute(polylineIndex(off), 1));
+  // Index order: segments of from_interaction trajectories first, radiologicals after, so the
+  // radiologicals toggle is just a draw range (hidden ones never reach the vertex shader).
+  const idx = new Uint32Array(2 * Math.max(0, off[n] - off[0] - n));
+  let k = 0;
+  const emit = (want) => {
+    for (let i = 0; i < n; i++) {
+      if (!!(fi ? fi[i] : 1) !== want) continue;
+      const e = off[i + 1] - 1;
+      for (let j = off[i]; j < e; j++) { idx[k++] = j; idx[k++] = j + 1; }
+    }
+  };
+  emit(true); const nInt = k; emit(false);
+  g.setIndex(new THREE.BufferAttribute(idx.subarray(0, k), 1));
   V.mc = addObj(new THREE.LineSegments(g, M.mc), 0);
+  V.mc.userData.nInt = nInt; V.mc.userData.nAll = k;
+  applyMcRange();
+}
+
+function applyMcRange() {
+  if (!V.mc) return;
+  const u = V.mc.userData;
+  V.mc.geometry.setDrawRange(0, V.app.state.ov.rad ? u.nAll : u.nInt);
 }
 
 function buildDeposits(b) {
@@ -565,6 +585,7 @@ function applyOverlays() {
   if (V.markers) V.markers.visible = ov.vtx;
   if (V.pd) V.pd.visible = ov.pd;
   V.uni.uShowRad.value = ov.rad ? 1 : 0;
+  applyMcRange();
   for (const l of V.labels) l.shown = ov.labels;
   for (const l of V.labelPool) if (!ov.labels) l.el.style.display = 'none';
   V.camKey[0] = NaN;   // force label refresh
