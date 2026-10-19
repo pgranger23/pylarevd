@@ -5,8 +5,8 @@
 //     debounced ~30 ms, cleared 120 ms after the pointer leaves every object (so the pointer can
 //     travel to the info card);
 //   * click (app.clickObject) PINS it; clicking the same object again, clicking nothing, or Esc unpins;
-//   * "select by" particle|slice (toolbar, URL param `selby`) decides what a hover/click selects;
-//     holding Shift while hovering selects the other kind;
+//   * "select by" particle|slice|none (toolbar, URL param `selby`) decides what a hover/click selects;
+//     holding Shift while hovering selects the other kind; "none" turns highlighting off entirely;
 //   * "family" (URL param `fam`) extends a PFParticle selection to its whole hierarchy: from the
 //     top-level parent down through all daughters;
 //   * keys (pinned particle): [ parent, ] first daughter, , / . previous/next sibling, f family, Esc clear.
@@ -130,11 +130,14 @@ export function initSelection(app) {
 
   const sameSel = (a, b) => a === b || (a && b && a.kind === b.kind && a.id === b.id && a.pinned === b.pinned && a.family === b.family);
   const familyOn = () => state.fam === '1';
-  const byKind = (shift) => ((state.selby === 'slice') !== !!shift ? 'slice' : 'pfp');
+  const selOff = () => state.selby === 'none';
+  const byKind = (shift) => (selOff() ? null : (state.selby === 'slice') !== !!shift ? 'slice' : 'pfp');
+  const selbyValue = (v) => (v === 'slice' || v === 'none' ? v : 'particle');
 
   function target(ids, shift) {
     if (!ids || !T) return null;
     const kind = byKind(shift);
+    if (!kind) return null;
     const id = kind === 'pfp' ? ids.pfp : ids.slice;
     if (id === undefined || id === null || id < 0) return null;
     return { kind, id };
@@ -207,7 +210,7 @@ export function initSelection(app) {
     T = buildTables(bundle);
     clearTimeout(hoverTimer); clearTimeout(clearTimer); clearTimer = 0; pendKey = '';
     let sel = null;
-    if (firstEvent && T) {
+    if (firstEvent && T && !selOff()) {
       const pf = parseInt(state.pfp, 10), sl = parseInt(state.slice, 10);
       if (Number.isFinite(pf) && pf >= 0 && pf < T.nPfp) sel = { kind: 'pfp', id: pf, pinned: true, family: familyOn() };
       else if (Number.isFinite(sl) && sl >= 0 && sl < T.nSlice) sel = { kind: 'slice', id: sl, pinned: true, family: false };
@@ -221,14 +224,14 @@ export function initSelection(app) {
   // ------------------------------------------------------------------ toolbar
   function syncToolbar() {
     const by = $('sel-by'), cb = $('cb-family');
-    if (by) by.value = state.selby === 'slice' ? 'slice' : 'particle';
-    if (cb) { cb.checked = familyOn(); cb.disabled = !!T && !T.hasPfp; }
+    if (by) by.value = selbyValue(state.selby);
+    if (cb) { cb.checked = familyOn(); cb.disabled = (!!T && !T.hasPfp) || selOff(); }
     const grp = $('sel-group');
     if (grp) grp.hidden = !T || (!T.groupsPfp && !T.groupsSlice);
   }
   function bindToolbar() {
     const by = $('sel-by'), cb = $('cb-family');
-    if (by) by.addEventListener('change', () => { app.setState({ selby: by.value === 'slice' ? 'slice' : 'particle' }); app.clearSelection(); });
+    if (by) by.addEventListener('change', () => { app.setState({ selby: selbyValue(by.value) }); app.clearSelection(); });
     if (cb) cb.addEventListener('change', () => { app.setState({ fam: cb.checked ? '1' : '0' }); refamily(); });
     app.on('state', (s, ch) => { if (ch.has('selby') || ch.has('fam')) syncToolbar(); if (ch.has('view')) renderCard(); });
     syncToolbar();
@@ -245,7 +248,7 @@ export function initSelection(app) {
     if (e.key === 'Shift') { if (!e.repeat && last.ids) app.hoverObject(last.ids, true); return; }
     const s = state.sel;
     if (e.key === 'Escape') { if (s || state.pfp || state.slice) { app.clearSelection(); e.preventDefault(); } return; }
-    if (e.key === 'f' && T && T.hasPfp) { app.setState({ fam: familyOn() ? '0' : '1' }); refamily(); syncToolbar(); return; }
+    if (e.key === 'f' && T && T.hasPfp && !selOff()) { app.setState({ fam: familyOn() ? '0' : '1' }); refamily(); syncToolbar(); return; }
     if (!s || s.kind !== 'pfp' || !T || !T.hasPfp) return;
     let to = -1;
     if (e.key === '[') to = T.parent[s.id];
