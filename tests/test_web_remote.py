@@ -112,3 +112,13 @@ def test_remote_file_over_xrootd(cache_env):
         assert st["files"][0]["cached_entries"] == [0]
     finally:
         s.close()
+
+
+def test_unreadable_inputs_do_not_stop_the_server(cache_env, tmp_path):
+    s = Srv([str(tmp_path / "missing.root")], workers=1, prefetch=0)
+    try:
+        st = json.loads(get(s.base, "/api/status")[2])
+        assert st["files"] == [] and "missing.root" in st["startup_errors"][0]
+        assert json.loads(get(s.base, "/api/files")[2]) == []
+    finally:
+        s.close()

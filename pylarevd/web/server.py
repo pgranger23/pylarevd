@@ -100,7 +100,8 @@ def expand_inputs(paths) -> list:
             st, listing = FileSystem(f"{u.protocol}://{u.hostid}").dirlist(
                 "/" + u.path.lstrip("/"), timeout=60)
             if not st.ok:
-                raise SystemExit(f"cannot list {p}: {st.message.strip()}")
+                print(f"  could not list {p}: {st.message.strip()}", file=sys.stderr, flush=True)
+                continue
             out += [p + e.name for e in sorted(listing, key=lambda e: e.name)
                     if e.name.endswith(".root")]
         elif not _SCHEME.match(p) and os.path.isdir(p):
@@ -123,9 +124,15 @@ def _write_gz(dest: str) -> None:
     cache._atomic_write(_gz_path(dest), gzip.compress(raw, GZIP_LEVEL, mtime=0))
 
 
-def _build_job(kind: str, path: str, entry: int, hit_tag, flash_tag) -> dict:
-    """Runs in a worker process.  Returns timing only; data goes via the cache."""
+def _build_job(kind: str, path: str, entry: int, hit_tag, flash_tag, cache_root=None) -> dict:
+    """Runs in a worker process.  Returns timing only; data goes via the cache.
+
+    ``cache_root`` is the server's cache directory: workers come from a process-wide
+    forkserver, whose environment may predate a later change of PYLAREVD_CACHE.
+    """
     from . import cache
+    if cache_root:
+        os.environ["PYLAREVD_CACHE"] = cache_root
     t = time.time()
     if kind == "geometry":
         cache.get_or_build_geometry(path)
@@ -239,8 +246,13 @@ class App:
         self.last_times: collections.deque = collections.deque(maxlen=20)
         self._pool = None
         self.t_start = time.time()
+        self.startup_errors: list[str] = []
         for f in files:
-            self.open_file(f)
+            try:
+                self.open_file(f)
+            except HttpError as exc:      # keep serving the others (e.g. EOS not reachable yet)
+                self.startup_errors.append(f"{f}: {exc}")
+                print(f"  could not open {f}: {exc}", file=sys.stderr, flush=True)
 
     # ---- files
     def may_open(self) -> bool:
@@ -320,11 +332,12 @@ class App:
         key = job.key
         self.jobs[key] = job
         self.counters["builds"] += 1
+        from .cache import _root
         try:
-            fut = self.pool().submit(_build_job, *key)
+            fut = self.pool().submit(_build_job, *key, _root())
         except BrokenProcessPool:
             self._pool = None
-            fut = self.pool().submit(_build_job, *key)
+            fut = self.pool().submit(_build_job, *key, _root())
         fut.add_done_callback(lambda f, j=job: self._done(j, f))
 
     def _done(self, job: Job, fut):
@@ -436,7 +449,8 @@ class App:
         return {"uptime_s": round(time.time() - self.t_start, 1), "workers": self.workers,
                 "prefetch": self.prefetch, "in_flight": inflight, "queued_prefetch": queued, "precompute_backlog": n_bg,
                 "counters": dict(self.counters), "recent": list(self.last_times),
-                "files": files, "allow_open": self.may_open(),
+                "files": files, "startup_errors": self.startup_errors,
+                "allow_open": self.may_open(),
                 "open_prefixes": list(self.open_prefixes) if not self.allow_open else []}
 
 

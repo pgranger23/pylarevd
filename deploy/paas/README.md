@@ -8,7 +8,6 @@ browser ── https://pylarevd.web.cern.ch ── SSO proxy (Helm chart cern-au
                                                ▼
                                       Service pylarevd:8080 ── viewer pod
                                                                ├─ /cache  CephFS bundle cache
-                                                               ├─ /data   CephFS copies (optional)
                                                                └─ root://eos...  over xrootd,
                                                                   Kerberos ticket from a sidecar
 ```
@@ -48,18 +47,15 @@ The `args` of the viewer container in `app.yaml` list what it serves: files or d
 local or `root://` URLs (a URL ending in `/` stands for the `.root` files inside it).
 `--allow-open-under` limits what the "open" box can reach.
 
-- **Copies in the cluster:** mount `pylarevd-data` read-write in a temporary pod and `oc cp`
-  the files to `/data`.
-- **EOS over xrootd:** create the secret of a *service* account that can read the files, then add
-  the ticket sidecar:
+Files are read from EOS over xrootd, with the Kerberos ticket of a *service* account (never a
+personal one) that can read them, e.g. a CERNBox read-only share of the data folders. Store its
+password in the project and add the ticket sidecar:
 
-  ```sh
-  oc create secret generic eos-credentials \
-      --from-literal=KEYTAB_USER=<service account> --from-literal=KEYTAB_PWD=<password>
-  oc patch deployment pylarevd --type=strategic --patch-file deploy/paas/eos-kerberos.yaml
-  ```
-
-  and list `root://eosuser.cern.ch//eos/...` paths in `app.yaml`.
+```sh
+oc create secret generic eos-credentials \
+    --from-literal=KEYTAB_USER=<service account> --from-literal=KEYTAB_PWD=<password>
+oc patch deployment pylarevd --type=strategic --patch-file deploy/paas/eos-kerberos.yaml
+```
 
 ## Limits
 

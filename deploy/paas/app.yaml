@@ -22,10 +22,12 @@ spec:
       containers:
         - name: viewer
           image: pylarevd:latest
-          # Inputs: files or directories (local, or root:// URLs ending in '/').
+          # Inputs: files or directories (local paths, or root:// URLs; a URL ending in '/'
+          # stands for every .root file in it, all opened at start-up).
           # --allow-open-under: what the "open" box may reach (the server is not on localhost).
           args: ["--workers", "4", "--precompute",
-                 "/data/", "--allow-open-under", "/data"]
+                 "root://eosuser.cern.ch//eos/user/X/USER/SOME/FILE.root",
+                 "--allow-open-under", "root://eosuser.cern.ch//eos/user/X/USER/SOME/"]
           ports:
             - {name: http, containerPort: 8080}
           env:
@@ -50,13 +52,10 @@ spec:
             failureThreshold: 6
           volumeMounts:
             - {name: cache, mountPath: /cache}
-            - {name: data, mountPath: /data, readOnly: true}
             - {name: krb, mountPath: /krb}
       volumes:
         - name: cache
           persistentVolumeClaim: {claimName: pylarevd-cache}
-        - name: data
-          persistentVolumeClaim: {claimName: pylarevd-data}
         - name: krb
           emptyDir: {medium: Memory, sizeLimit: 1Mi}
 ---

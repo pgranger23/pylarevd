@@ -1,5 +1,4 @@
-# Bundle cache (rebuilt on demand, so no backup) and an optional data area for files
-# copied into the cluster (files on EOS are read over xrootd instead).
+# Bundle cache (rebuilt on demand, so no backup). The data files are read from EOS over xrootd.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -9,13 +8,3 @@ spec:
   storageClassName: cephfs-no-backup
   resources:
     requests: {storage: 40Gi}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: pylarevd-data
-spec:
-  accessModes: [ReadWriteMany]
-  storageClassName: cephfs-no-backup
-  resources:
-    requests: {storage: 20Gi}
