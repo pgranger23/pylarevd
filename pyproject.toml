@@ -29,3 +29,8 @@ pylarevd = "pylarevd.cli:main"
 [tool.setuptools.packages.find]
 include = ["pylarevd*"]
 
+
+# The browser viewer's frontend is served from the installed package, so it has to ship
+# with it (a non-editable install otherwise has no page to serve).
+[tool.setuptools.package-data]
+pylarevd = ["web/static/*.html", "web/static/*.js", "web/static/*.css", "web/static/vendor/*"]
