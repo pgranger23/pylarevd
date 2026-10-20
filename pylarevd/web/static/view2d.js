@@ -13,7 +13,7 @@
 // Zoom/pan per panel persists across state changes and event steps; it is reset by a new
 // geometry (file/detector), a double click, or the "reset" button.
 
-import { getLut, cmapGradientCss, hexToRgb, PDG_CLASSES, pdgClass } from './colormaps.js';
+import { getLut, cmapGradientCss, hexToRgb, PDG_CLASSES, pdgClass, pdgSymbol } from './colormaps.js';
 
 const CSS = `
 .v2d-bar { position:absolute; left:6px; top:3px; z-index:6; display:flex; gap:10px; align-items:center;
@@ -52,11 +52,13 @@ const V = {
 // ---------------------------------------------------------------------------- shaders
 const POINT_VS = `#version 300 es
 precision highp float;
-in vec2 aPos; in float aVal; in float aCat; in float aFlag; in float aSel;
+in vec2 aPos; in float aVal; in float aCat; in float aFlag; in float aSel; in float aMc;
 uniform vec2 uCenter, uHalf;
-uniform float uSize, uMode, uLog, uLo, uInv, uFloor, uCmapLo, uCmapHi, uShowRad, uSelOn;
+uniform float uSize, uMode, uLog, uLo, uInv, uFloor, uCmapLo, uCmapHi, uSelOn, uTruthOn, uTruthSel;
 uniform sampler2D uLut;
-uniform highp sampler2D uSelTex;
+uniform highp sampler2D uSelTex, uTruthTex;
+uniform float uFbVis[18];
+uniform vec3 uHiCol;
 uniform vec3 uPal[8];
 uniform vec3 uUnassoc, uUniform;
 out vec3 vColor; flat out float vShape; flat out float vSelF;
@@ -81,7 +83,15 @@ void main() {
     if (inS > 0.5) { z = -0.95; gl_PointSize = max(uSize * 1.8, 7.0); } else z = 0.95;
   }
   gl_Position = vec4(n, z, 1.0);
-  if (aFlag < 0.5 && uShowRad < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+  if (uTruthOn > 0.5) {                        // deposits: flag texture of truth.js (0 hidden, 1 visible, 2 highlighted)
+    float tf;
+    if (aMc > -0.5) { int r = int(aMc + 0.5); tf = floor(texelFetch(uTruthTex, ivec2(r & 2047, r >> 11), 0).r * 255.0 + 0.5); }
+    else tf = uFbVis[int(aFlag + 0.5)];       // no trajectory: class / origin of the deposit itself
+    if (tf < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    else if (uTruthSel > 0.5) {
+      if (tf > 1.5) { vSelF = 1.0; vColor = uHiCol; gl_PointSize = max(uSize * 2.0, 3.0); } else vSelF = -1.0;
+    }
+  }
 }`;
 const POINT_FS = `#version 300 es
 precision mediump float;
@@ -105,10 +115,10 @@ void main() {
 
 const LINE_VS = `#version 300 es
 precision highp float;
-in vec2 aPos; in vec2 aExtra; in float aSel;
+in vec2 aPos; in vec2 aExtra; in float aSel; in float aMc;
 uniform vec2 uCenter, uHalf, uOff;
-uniform float uMode, uHasFlag, uShowRad, uSelOn, uSelPass;
-uniform highp sampler2D uSelTex;
+uniform float uMode, uSelOn, uSelPass, uTruthOn, uTruthSel;
+uniform highp sampler2D uSelTex, uTruthTex;
 uniform vec3 uColor, uPal[8], uPdg[9], uUnassoc;
 out vec3 vColor; out float vCum; out float vSelF;
 void main() {
@@ -117,9 +127,17 @@ void main() {
   if (uMode < 0.5) vColor = uColor;
   else if (uMode < 1.5) vColor = aExtra.y < -0.5 ? uUnassoc : uPal[int(mod(aExtra.y, 8.0))];
   else vColor = uPdg[int(cls)];
-  if (uHasFlag > 0.5 && aExtra.y > 15.5 && uShowRad < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
   vCum = aExtra.x;
   vSelF = 0.0;
+  if (uTruthOn > 0.5) {                        // true trajectories: hidden / highlighted / faded by the flag texture
+    int r = int(aMc + 0.5);
+    float tf = floor(texelFetch(uTruthTex, ivec2(r & 2047, r >> 11), 0).r * 255.0 + 0.5);
+    if (tf < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    else {
+      if (uTruthSel > 0.5) vSelF = tf > 1.5 ? 1.0 : -1.0;
+      if (uSelPass > 0.5 && tf < 1.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    }
+  }
   if (uSelOn > 0.5) {
     float inS = 0.0;
     if (aSel > -0.5) { int id = int(aSel + 0.5); inS = texelFetch(uSelTex, ivec2(id & 1023, id >> 10), 0).r; }
@@ -206,8 +224,8 @@ function initGL() {
   const gl = V.glc.getContext('webgl2', { antialias: false, alpha: false, depth: true, preserveDrawingBuffer: false });
   if (!gl) throw new Error('WebGL2 unavailable');
   V.gl = gl;
-  V.progs.point = new Prog(gl, POINT_VS, POINT_FS, ['aPos', 'aVal', 'aCat', 'aFlag', 'aSel']);
-  V.progs.line = new Prog(gl, LINE_VS, LINE_FS, ['aPos', 'aExtra', 'aSel']);
+  V.progs.point = new Prog(gl, POINT_VS, POINT_FS, ['aPos', 'aVal', 'aCat', 'aFlag', 'aSel', 'aMc']);
+  V.progs.line = new Prog(gl, LINE_VS, LINE_FS, ['aPos', 'aExtra', 'aSel', 'aMc']);
   V.progs.fill = new Prog(gl, FILL_VS, FILL_FS, ['aPos', 'aSel']);
   V.lutTex = gl.createTexture(); V.lutName = null;
   gl.bindTexture(gl.TEXTURE_2D, V.lutTex);
@@ -264,6 +282,7 @@ function init(container, app) {
   });
   bindPointer();
   app.on('selection', () => { schedule(true, false); });
+  app.on('truth', () => { schedule(true, false); });
   if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => { if (V.visible) resize(); }).observe(container);
   V.ready = true;
 }
@@ -486,13 +505,16 @@ function overlaySet(kind) {
       if (pts && off && pan) { set = buildLines(pts, off, pan, np, () => 0, true); set.fill = buildFans(pts, off, pan, np); }
     } else if (kind === 'mc') {
       const pts = b.get(`mc2d${sf}/points`), off = b.get(`mc2d${sf}/offsets`), pan = b.get(`mc2d${sf}/panel`), idx = b.get(`mc2d${sf}/index`);
-      const pdg = b.get('mc/pdg'), fi = b.get('mc/from_interaction');
+      const pdg = b.get('mc/pdg');
       if (pts && off && pan) {
         set = buildLines(pts, off, pan, np, (r) => {
           const i = idx ? idx[r] : -1;
-          return (pdg && i >= 0 ? pdgClass(pdg[i]) : 8) + (fi && i >= 0 && !fi[i] ? 16 : 0);
+          return pdg && i >= 0 ? pdgClass(pdg[i]) : 8;
         }, false);
-        set.hasFlag = !!(fi && b.meta.truth && b.meta.truth.has_split);
+        // row of the owning mc/* trajectory of every vertex: the key into truth.js's flag texture
+        const tot = set.segRow.length, mr = new Float32Array(2 * tot);
+        for (let k = 0; k < tot; k++) { const r = idx ? idx[set.segRow[k]] : -1; mr[2 * k] = r; mr[2 * k + 1] = r; }
+        set.mcRes = new Res(mr); V.S.res.push(set.mcRes);
       }
     }
   } catch (e) { console.error('view2d overlay', kind, e); }
@@ -517,8 +539,10 @@ function depositSet() {
   let set = null;
   const xyz = b.get('dep/xyz'), panels = wirePanels(), np = panels.length;
   if (xyz && np) {
-    const n = xyz.length / 3, fi = b.get('dep/from_interaction');
+    const n = xyz.length / 3, fi = b.get('dep/from_interaction'), dm = b.get('dep/mc'), dp = b.get('dep/pdg');
+    const nSp = PDG_CLASSES.length;
     const pos = panels.map(() => new Float32Array(2 * n)), flag = panels.map(() => new Float32Array(n)), cnt = new Uint32Array(np);
+    const mcr = panels.map(() => new Float32Array(n));   // row of the owning trajectory (-1: none)
     // flatten boxes per panel for a tight loop
     const fb = panels.map((p) => {
       const arr = [];
@@ -531,25 +555,27 @@ function depositSet() {
         const B = fb[p];
         for (let k = 0; k < B.length; k += 8) {
           if (x >= B[k] && x <= B[k + 3] && y >= B[k + 1] && y <= B[k + 4] && z >= B[k + 2] && z <= B[k + 5]) {
-            const j = cnt[p]++; pos[p][2 * j] = B[k + 6] * y + B[k + 7] * z; pos[p][2 * j + 1] = x; flag[p][j] = fi ? fi[i] : 1;
+            const j = cnt[p]++; pos[p][2 * j] = B[k + 6] * y + B[k + 7] * z; pos[p][2 * j + 1] = x;
+            flag[p][j] = (dp ? pdgClass(dp[i]) : nSp - 1) + (fi && !fi[i] ? 0 : nSp);   // cls + 9 * from_interaction: fallback visibility
+            mcr[p][j] = dm ? dm[i] : -1;
             break;
           }
         }
       }
     }
-    set = { pos: [], flag: [], n: [] };
+    set = { pos: [], flag: [], mc: [], n: [] };
     for (let p = 0; p < np; p++) {
       // shuffle so that a prefix is a uniform subsample (drawn while panning/zooming)
-      const m = cnt[p], P = pos[p], F = flag[p];
+      const m = cnt[p], P = pos[p], F = flag[p], MR = mcr[p];
       let seed = 12345 + p;
       for (let i = m - 1; i > 0; i--) {
         seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
         const j = seed % (i + 1);
-        const x = P[2 * i], y = P[2 * i + 1], f0 = F[i];
-        P[2 * i] = P[2 * j]; P[2 * i + 1] = P[2 * j + 1]; F[i] = F[j]; P[2 * j] = x; P[2 * j + 1] = y; F[j] = f0;
+        const x = P[2 * i], y = P[2 * i + 1], f0 = F[i], m0 = MR[i];
+        P[2 * i] = P[2 * j]; P[2 * i + 1] = P[2 * j + 1]; F[i] = F[j]; MR[i] = MR[j]; P[2 * j] = x; P[2 * j + 1] = y; F[j] = f0; MR[j] = m0;
       }
-      const a = new Res(pos[p].slice(0, 2 * cnt[p])), f = new Res(flag[p].slice(0, cnt[p]));
-      S.res.push(a, f); set.pos.push(a); set.flag.push(f); set.n.push(cnt[p]);
+      const a = new Res(pos[p].slice(0, 2 * cnt[p])), f = new Res(flag[p].slice(0, cnt[p])), mr = new Res(mcr[p].slice(0, cnt[p]));
+      S.res.push(a, f, mr); set.pos.push(a); set.flag.push(f); set.mc.push(mr); set.n.push(cnt[p]);
     }
   }
   S.sets[skey] = set;
@@ -618,6 +644,29 @@ function ensureSelTex() {
   gl.activeTexture(gl.TEXTURE0);
   V.selStamp = sel.stamp;
   return sel;
+}
+
+// ---- true-particle flags (truth.js): one byte per mc/* trajectory, R8, texture unit 2 ------------------
+function ensureTruthTex() {
+  const gl = V.gl, TM = V.app.truth && V.app.truth.model;
+  if (!gl || !TM) return null;
+  if (!V.truthTex || V.truthCtx !== gl) {
+    V.truthTex = gl.createTexture(); V.truthCtx = gl; V.truthVer = -1; V.truthOf = null;
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, V.truthTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, V.truthTex);
+  if (V.truthOf !== TM || V.truthVer !== TM.version) {
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    if (V.truthOf === TM) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, TM.texW, TM.texH, gl.RED, gl.UNSIGNED_BYTE, TM.flags);
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, TM.texW, TM.texH, 0, gl.RED, gl.UNSIGNED_BYTE, TM.flags);
+    V.truthOf = TM; V.truthVer = TM.version;
+  }
+  gl.activeTexture(gl.TEXTURE0);
+  return TM;
 }
 
 // ---------------------------------------------------------------------------- views (zoom/pan)
@@ -754,6 +803,7 @@ function renderGL() {
   let selHits = null;
   if (selv) { const g = S.bundle.get(`hits/group/${gk}`); if (g) selHits = layoutBuf(L, `g:${gk}`, () => gather(g, L.orig)); }
   const hi = rgb(th.name === 'light' ? '#c2410c' : '#fde047');
+  const TM = ensureTruthTex();
   if (selv) { gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, V.selTex); gl.activeTexture(gl.TEXTURE0); }
   gl.disable(gl.SCISSOR_TEST); gl.viewport(0, 0, V.W, V.H);
   const bg = rgb(th.fig_bg), ax = rgb(th.axes_bg);
@@ -782,10 +832,11 @@ function renderGL() {
       gl.disable(gl.DEPTH_TEST);
       const P = V.progs.point.use();
       P.v2('uCenter', v.cx, v.cy); P.v2('uHalf', v.hx, v.hy); P.f('uAlpha', 0.35);
-      P.f('uShowRad', ov.rad ? 1 : 0);
       pointsUniforms(P, 2, null, Math.max(1, 1.2 * dpr), th); P.v3('uUniform', rgb(th.truth));
-      P.f('uSelOn', 0); P.f('uAlpha', 0.35); gl.uniform3f(P.l('uRing'), 1, 1, 1);
-      attrF(gl, 0, dep.pos[p], 2); attrOff(gl, 1, 0); attrOff(gl, 2, 0); attrF(gl, 3, dep.flag[p], 1); attrOff(gl, 4, -1);
+      P.f('uSelOn', 0); P.f('uAlpha', 0.35); P.v3('uRing', hi); P.v3('uHiCol', hi); P.f('uDim', dimv);
+      P.f('uTruthOn', TM ? 1 : 0); P.f('uTruthSel', TM && TM.selActive ? 1 : 0); gl.uniform1i(P.l('uTruthTex'), 2);
+      gl.uniform1fv(P.l('uFbVis[0]'), TM ? TM.fbVis : new Float32Array(18).fill(1));
+      attrF(gl, 0, dep.pos[p], 2); attrOff(gl, 1, 0); attrOff(gl, 2, 0); attrF(gl, 3, dep.flag[p], 1); attrOff(gl, 4, -1); attrF(gl, 5, dep.mc[p], 1);
       gl.drawArrays(gl.POINTS, 0, V.interact ? Math.ceil(dep.n[p] * 0.12) : dep.n[p]);
     }
     // 2. shower fill
@@ -805,14 +856,14 @@ function renderGL() {
     if (he > hs && cs.kind !== 'none') {
       gl.enable(gl.DEPTH_TEST);
       const P = V.progs.point.use();
-      P.v2('uCenter', v.cx, v.cy); P.v2('uHalf', v.hx, v.hy); P.f('uAlpha', ALPHA); P.f('uShowRad', 1);
+      P.v2('uCenter', v.cx, v.cy); P.v2('uHalf', v.hx, v.hy); P.f('uAlpha', ALPHA); P.f('uTruthOn', 0);
       const mode = cs.kind === 'cat' ? 1 : 0;
       pointsUniforms(P, mode, cs, mode === 1 ? baseSize * 1.5 : baseSize, th); P.v3('uUniform', rgb(th.unassociated));
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, V.lutTex); gl.uniform1i(P.l('uLut'), 0);
       attrF(gl, 0, L.pos, 2, hs * 8);
       if (valRes) attrF(gl, 1, valRes, 1, hs * 4); else attrOff(gl, 1, 0);
       if (catRes) attrF(gl, 2, catRes, 1, hs * 4); else attrOff(gl, 2, 0);
-      attrOff(gl, 3, 1);
+      attrOff(gl, 3, 1); attrOff(gl, 5, -1);
       P.f('uSelOn', selHits ? 1 : 0); P.f('uDim', dimv); gl.uniform1i(P.l('uSelTex'), 1); P.v3('uRing', hi);
       if (selHits) attrF(gl, 4, selHits, 1, hs * 4); else attrOff(gl, 4, -1);
       gl.drawArrays(gl.POINTS, 0, he - hs);
@@ -826,7 +877,9 @@ function renderGL() {
       const P = V.progs.line.use();
       P.v2('uCenter', v.cx, v.cy); P.v2('uHalf', v.hx, v.hy);
       P.f('uAlpha', o.alpha); P.f('uMode', o.mode);
-      P.f('uHasFlag', o.hasFlag ? 1 : 0); P.f('uShowRad', ov.rad ? 1 : 0);
+      const tru = o.truth && TM && set.mcRes;
+      P.f('uTruthOn', tru ? 1 : 0); P.f('uTruthSel', tru && TM.selActive ? 1 : 0); gl.uniform1i(P.l('uTruthTex'), 2);
+      if (tru) attrF(gl, 3, set.mcRes, 1, set.ranges[p][0] * 8); else attrOff(gl, 3, -1);
       P.f('uDash', o.dash ? 1 : 0); P.f('uPxPerCm', 0.5 * (pxPerCmX + pxPerCmY)); P.f('uPeriod', 7 * dpr);
       P.v3('uColor', rgb(o.color)); P.v3('uUnassoc', rgb(th.unassociated));
       const pal = new Float32Array(24); th.categorical.forEach((hx, i) => pal.set(rgb(hx), 3 * i)); gl.uniform3fv(P.l('uPal[0]'), pal);
@@ -836,13 +889,14 @@ function renderGL() {
       const pid = selv && o.selName ? pidBuf(set, o.selName, gk) : null;
       P.f('uSelOn', pid ? 1 : 0); P.f('uDim', dimv); P.f('uSelPass', o.pass ? 1 : 0); gl.uniform1i(P.l('uSelTex'), 1);
       if (pid) attrF(gl, 2, pid, 1, set.ranges[p][0] * 8); else attrOff(gl, 2, -1);
-      if (o.pass && !pid) return;
+      if (o.pass && !pid && !tru) return;
       const n = Math.max(1, Math.round(o.width * dpr)), passes = [[0, 0], [1, 0], [0, 1], [1, 1]].slice(0, Math.min(4, n === 3 ? 3 : n));
       for (const [ox, oy] of passes) { P.v2('uOff', ox * 2 / w, oy * 2 / h); gl.drawArrays(gl.LINES, 0, 2 * set.ranges[p][1]); }
     };
-    line(sets.mc, { width: 1, alpha: selv ? Math.min(0.7, 1.2 * dimv) : 0.7, color: th.mctrack, mode: st.color === 'pdg' ? 2 : 0, dash: true, hasFlag: sets.mc && sets.mc.hasFlag });
+    line(sets.mc, { width: 1, alpha: 0.7, color: th.mctrack, mode: st.color === 'pdg' ? 2 : 0, dash: true, truth: true });
     line(sh, { width: 1, alpha: 0.8, color: th.shower, mode: 0, selName: 'showers' });
     line(sets.tracks, { width: 2, alpha: 0.9, color: th.track, mode: st.color === 'track' ? 1 : 0, selName: 'tracks' });
+    if (TM && TM.selActive) line(sets.mc, { width: 3, alpha: 1, color: th.name === 'light' ? '#c2410c' : '#fde047', mode: 0, dash: false, truth: true, pass: 1 });
     if (selv) {          // emphasis: the selected tracks / shower outlines again, thicker, in the highlight colour
       line(sh, { width: 3, alpha: 1, color: th.name === 'light' ? '#c2410c' : '#fde047', mode: 0, selName: 'showers', pass: 1 });
       line(sets.tracks, { width: 3, alpha: 1, color: th.name === 'light' ? '#c2410c' : '#fde047', mode: 0, selName: 'tracks', pass: 1 });
@@ -1106,7 +1160,8 @@ function bindPointer() {
   const end = (e) => {
     if (V.drag && e.type === 'pointerup' && V.drag.moved < 4 && V.S) {      // a click, not a pan: pin / unpin
       const [px, py] = pos(e), hit = hitAtPx(px, py);
-      V.app.clickObject(hit ? objectsOf(hit.o) : null, e.shiftKey);
+      const ml = hit ? null : mcLineAt(px, py);
+      V.app.clickObject(hit ? objectsOf(hit.o) : ml ? { pfp: -1, slice: -1, mc: ml.row } : null, e.shiftKey);
     }
     if (V.drag) { V.drag = null; c.style.cursor = 'crosshair'; try { c.releasePointerCapture(e.pointerId); } catch (x) { /* none */ } } };
   c.addEventListener('pointerup', end); c.addEventListener('pointercancel', end);
@@ -1165,6 +1220,35 @@ function hitAtPx(px, py) {
   return i < 0 ? null : { p, i, o: L.orig[i] };
 }
 
+/** Visible true trajectory (mc2d line) within 5 px of the cursor -> {row, d} or null. Only used where no hit is
+ *  under the cursor (reco has priority). Linear scan of the panel's segments with a quick reject. */
+function mcLineAt(px, py) {
+  const S = V.S, TM = V.app.truth && V.app.truth.model;
+  if (!S || !TM || V.space !== 'wire' || !V.app.state.ov.truth) return null;
+  const set = S.sets['mc' + sfx()];
+  if (!set || !set.mcRes) return null;
+  const p = panelAt(px, py);
+  if (p < 0 || region(p, px, py) !== 'plot') return null;
+  const r = V.rects[p], v = V.views[vk()][p];
+  const [hx, hy] = toData(p, px, py);
+  const kx = r.pw / (2 * v.hx), ky = r.ph / (2 * v.hy);
+  const [s0, cnt] = set.ranges[p], seg = set.seg.data, mr = set.mcRes.data, f = TM.flags;
+  const R = 5;
+  let best = -1, bd = R * R;
+  for (let j = s0; j < s0 + cnt; j++) {
+    const row = mr[2 * j];
+    if (row < 0 || !f[row]) continue;
+    const ax = (seg[4 * j] - hx) * kx, ay = (seg[4 * j + 1] - hy) * ky, bx = (seg[4 * j + 2] - hx) * kx, by = (seg[4 * j + 3] - hy) * ky;
+    if ((ax < -R && bx < -R) || (ax > R && bx > R) || (ay < -R && by < -R) || (ay > R && by > R)) continue;
+    const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+    let t = l2 > 0 ? -(ax * dx + ay * dy) / l2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const ex = ax + t * dx, ey = ay + t * dy, d2 = ex * ex + ey * ey;
+    if (d2 < bd) { bd = d2; best = row; }
+  }
+  return best < 0 ? null : { row: best, d: Math.sqrt(bd) };
+}
+
 /** ids of the reco objects of an original hit, for the selection model */
 function objectsOf(o) {
   const b = V.S.bundle, gp = b.get('hits/group/pfparticle'), gs = b.get('hits/group/slice');
@@ -1173,7 +1257,19 @@ function objectsOf(o) {
 
 function updateHover(px, py, e) {
   const hit = hitAtPx(px, py);
-  if (!hit) { if (V.hover) { V.hover = null; schedule(false, true); } hideTip(); V.app.hoverObject(null); return; }
+  if (!hit) {
+    if (V.hover) { V.hover = null; schedule(false, true); }
+    const ml = mcLineAt(px, py);
+    if (ml) {                         // a true trajectory (no hit under the cursor)
+      const M = V.app.truth.model;
+      V.app.hoverObject({ pfp: -1, slice: -1, mc: ml.row }, e.shiftKey);
+      V.tip.textContent = `true ${pdgSymbol(M.pdg[ml.row])}  (track id ${M.tid[ml.row]})`;
+      V.tip.style.display = 'block';
+      V.tip.style.left = `${Math.max(2, px + 14)}px`; V.tip.style.top = `${Math.max(2, py + 14)}px`;
+      return;
+    }
+    hideTip(); V.app.hoverObject(null); return;
+  }
   const L = layout(), { p, i, o } = hit;
   V.app.hoverObject(objectsOf(o), e.shiftKey);
   const b = V.S.bundle, wire = V.space === 'wire';
@@ -1265,4 +1361,6 @@ export default {
   debugRender() { const t = performance.now(); renderGL(); V.gl.finish(); return performance.now() - t; },
   debugHitPx(p, k) { const L = layout(), i = L.ranges[p][0] + k; return toPx(p, L.pos.data[2 * i], L.pos.data[2 * i + 1]); },
   debugState() { return { views: V.views, rects: V.rects, space: V.space, key: vk(), lastRenderMs: V.lastRenderMs }; },
+  /** test hook: what a pointer at css px (x, y) of the panel container would pick -> {hit, mc} */
+  debugPickAt(x, y) { return { hit: !!hitAtPx(x, y), mc: mcLineAt(x, y) }; },
 };

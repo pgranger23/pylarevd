@@ -121,3 +121,29 @@ export function pdgClass(pdg) {
     default: return 8;
   }
 }
+
+// ---- particle names ---------------------------------------------------------
+const SYM = {
+  11: 'e-', '-11': 'e+', 13: 'mu-', '-13': 'mu+', 15: 'tau-', '-15': 'tau+', 22: 'gamma',
+  211: 'pi+', '-211': 'pi-', 111: 'pi0', 221: 'eta', 2212: 'p', '-2212': 'pbar', 2112: 'n', '-2112': 'nbar',
+  321: 'K+', '-321': 'K-', 130: 'K0L', 310: 'K0S', 311: 'K0', '-311': 'K0bar',
+  12: 'nu_e', 14: 'nu_mu', 16: 'nu_tau', '-12': 'anti-nu_e', '-14': 'anti-nu_mu', '-16': 'anti-nu_tau',
+  3122: 'Lambda', 3222: 'Sigma+', 3212: 'Sigma0', 3112: 'Sigma-', 3322: 'Xi0', 3312: 'Xi-',
+  411: 'D+', '-411': 'D-', 421: 'D0', 431: 'Ds+', 4122: 'Lambda_c+', 443: 'J/psi',
+  1000010020: 'H2', 1000010030: 'H3', 1000020030: 'He3', 1000020040: 'alpha',
+};
+const ELEM = ['n', 'H', 'He', 'Li', 'Be', 'B', 'C', 'N', 'O', 'F', 'Ne', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'Ar',
+  'K', 'Ca', 'Sc', 'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn', 'Ga', 'Ge', 'As', 'Se', 'Br', 'Kr', 'Rb', 'Sr',
+  'Y', 'Zr', 'Nb', 'Mo', 'Tc', 'Ru', 'Rh', 'Pd', 'Ag', 'Cd', 'In', 'Sn', 'Sb', 'Te', 'I', 'Xe', 'Cs', 'Ba', 'La', 'Ce',
+  'Pr', 'Nd', 'Pm', 'Sm', 'Eu', 'Gd', 'Tb', 'Dy', 'Ho', 'Er', 'Tm', 'Yb', 'Lu', 'Hf', 'Ta', 'W', 'Re', 'Os', 'Ir', 'Pt',
+  'Au', 'Hg', 'Tl', 'Pb', 'Bi', 'Po', 'At', 'Rn', 'Fr', 'Ra', 'Ac', 'Th', 'Pa', 'U'];
+
+/** Short particle name for a PDG code: mu-, gamma, p, Ar39, ... (nuclei 10LZZZAAAI decoded). */
+export function pdgSymbol(p) {
+  if (SYM[p] !== undefined) return SYM[p];
+  if (p > 1000000000) {
+    const z = Math.floor(p / 10000) % 1000, a = Math.floor(p / 10) % 1000, iso = p % 10;
+    return `${ELEM[z] || 'Z' + z}${a}${iso ? 'm' : ''}`;
+  }
+  return `pdg ${p}`;
+}

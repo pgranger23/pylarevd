@@ -47,6 +47,25 @@ def _stack(chunks, shape_tail, dtype=np.float32):
     return np.concatenate(chunks).astype(dtype, copy=False)
 
 
+def _rows_of(keys, query):
+    """Row of each ``query`` value in ``keys`` (-1 if absent), vectorised (sort + searchsorted).
+
+    ``keys`` are unique ids (MCParticle track ids); with duplicates the first row wins.
+    """
+    keys = np.asarray(keys, np.int64)
+    query = np.asarray(query, np.int64)
+    out = np.full(len(query), -1, np.int32)
+    if not len(keys) or not len(query):
+        return out
+    order = np.argsort(keys, kind="stable")
+    sk = keys[order]
+    pos = np.searchsorted(sk, query)
+    pos[pos >= len(sk)] = len(sk) - 1
+    ok = sk[pos] == query
+    out[ok] = order[pos[ok]]
+    return out
+
+
 def _ragged(polys):
     """List of (n_i, 3) arrays -> (points f32, offsets u32)."""
     lens = np.array([len(p) for p in polys], np.int64)
@@ -461,6 +480,15 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         fi = (np.isin(mc.track_id, ids).astype(np.uint8) if ids is not None
               else np.ones(len(mc), np.uint8))
         arrays["mc/from_interaction"] = fi
+        gen = getattr(mc, "generator", None)
+        if gen is not None:
+            # which generator module (MCTruth product) made each particle, daughters included;
+            # -1 = unknown. Names in meta["mc_generators"].
+            arrays["mc/generator"] = np.asarray(gen, np.int16)
+            meta["mc_generators"] = [str(g) for g in getattr(mc, "generators", ())]
+        else:
+            notes.append("no MCParticle-MCTruth association: mc/generator is missing, "
+                         "the viewer can only separate the interaction from the rest")
         meta["truth"]["n_mc"] = int(len(mc))
         meta["truth"]["n_from_interaction"] = int(fi.sum())
         if ids is None:
@@ -497,6 +525,8 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         arrays["dep/from_interaction"] = (
             np.isin(np.abs(deposits.track_id), ids).astype(np.uint8)
             if ids is not None else np.ones(len(deposits), np.uint8))
+        if mc is not None:
+            arrays["dep/mc"] = _rows_of(mc.track_id, np.abs(deposits.track_id))
     if d is not None and tv is not None:
         for sf, dd in [("", d)] + list(extra.items()):
             v2 = []

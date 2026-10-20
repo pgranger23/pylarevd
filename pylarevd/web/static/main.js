@@ -30,7 +30,8 @@
 //                                     from the URL (e.g. viewlight registers 'tmode', 't', 'play').
 //                                     Call from init(); the value is then in app.state[name].
 //   app.on(type, fn) -> unsubscribe   type 'state' fn(state, changed) | 'event' fn(bundle, geometry)
-//                                     | 'geometry' fn(geometry)
+//                                     | 'geometry' fn(geometry) | 'selection' fn(app.selection) (select.js)
+//                                     | 'truth' fn(model) true-particle filter / highlight changed (truth.js)
 //   app.bundle / app.geometry         the current event / geometry Bundles (may be null)
 //   app.theme                         current theme colours (colormaps.js THEMES entry)
 //   app.views                         registry {view3d, view2d, viewlight} -> module objects, so
@@ -49,8 +50,9 @@ import viewlight from './viewlight.js';
 import viewoptical from './viewoptical.js';
 import './exports.js';
 import { initSelection } from './select.js';
+import { initTruth } from './truth.js';
 
-const OVERLAYS = ['truth', 'rad', 'dep', 'tracks', 'showers', 'pvtx', 'vtx', 'labels', 'pd'];
+const OVERLAYS = ['truth', 'dep', 'tracks', 'showers', 'pvtx', 'vtx', 'labels', 'pd'];
 const OV_DEFAULT = ['truth', 'tracks', 'showers', 'pvtx', 'vtx', 'pd'];
 const VIEW_PANELS = {
   '3d': ['view3d'], '2d': ['view2d'], 'light': ['viewlight'],
@@ -69,7 +71,7 @@ const params = new URLSearchParams(location.search);
 const sampleName = params.get('sample');
 const api = sampleName ? sampleApi(sampleName) : serverApi();
 
-const listeners = { state: [], event: [], geometry: [], selection: [] };
+const listeners = { state: [], event: [], geometry: [], selection: [], truth: [] };
 const extraParams = {};   // name -> default (string)
 
 const state = { ...DEFAULTS, ov: Object.fromEntries(OVERLAYS.map((o) => [o, OV_DEFAULT.includes(o)])) };
@@ -102,6 +104,7 @@ function readUrl() {
   if (p.has('ov')) {
     const on = new Set(p.get('ov').split(',').filter(Boolean));
     for (const o of OVERLAYS) state.ov[o] = on.has(o);
+    app.legacyRad = on.has('rad');   // the old "radiologicals" box: truth.js maps it to "all origins visible"
   }
   for (const [name] of Object.entries(extraParams)) if (p.has(name)) state[name] = p.get(name);
 }
@@ -354,6 +357,7 @@ async function loadEvent() {
     if (tok !== loadToken) return;
     const t1 = performance.now();
     app.bundle = bundle;
+    guard(app, 'resetTruth', bundle);           // truth.js: filter model of the new event (before the selection)
     guard(app, 'resetSelection', bundle);       // selection.js: new tables, drop/restore the selection
     updateEventLabel();
     const meta = bundle.meta;
@@ -459,6 +463,7 @@ async function boot() {
 }
 
 registerParam('sum', '0');   // summary bar open (1) / collapsed (0)
-initSelection(app);          // selection model + info card (select.js); registers selby/fam/pfp/slice
+initTruth(app);              // true-particle filter + drawer (truth.js); registers tsp/tog/thide
+initSelection(app);          // selection model + info card (select.js); registers selby/fam/pfp/slice/mc
 boot();
 window.__evd = app;   // debugging / tests
