@@ -26,8 +26,11 @@ STATIC_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 GZIP_LEVEL = 3
 
 _SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
-_EOS_REDIRECTORS = (("/eos/experiment/", "eospublic.cern.ch"),
-                    ("/eos/", "eospublic.cern.ch"))     # same rule as pylarevd.app
+_EOS_REDIRECTORS = (("/eos/user/", "eosuser.cern.ch"),
+                    ("/eos/home-", "eosuser.cern.ch"),
+                    ("/eos/experiment/", "eospublic.cern.ch"),
+                    ("/eos/", "eospublic.cern.ch"))
+_DOT_SEGMENT = re.compile(r"(^|/)\.\.?(/|$)")
 
 MIME = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
         ".html": "text/html; charset=utf-8", ".json": "application/json",
@@ -53,6 +56,58 @@ def normalise_path(path: str) -> str:
             if p.startswith(prefix):
                 return f"root://{host}/{p}"
     return p
+
+
+def _url_norm(url: str) -> str:
+    """``root://Host//eos//a/`` -> ``root://host/eos/a/`` (for prefix comparisons only)."""
+    scheme, rest = url.split("://", 1)
+    host, _, p = rest.partition("/")
+    return f"{scheme.lower()}://{host.lower()}/" + re.sub(r"/+", "/", p).lstrip("/")
+
+
+def under_prefix(path: str, prefixes) -> bool:
+    """Is ``path`` (normalised) inside one of the directories ``prefixes``?
+
+    Local paths are compared after resolving symlinks and ``..``; URLs must not
+    contain ``.``/``..`` segments, a query or a fragment.
+    """
+    if _SCHEME.match(path):
+        tail = path.split("://", 1)[1]
+        if _DOT_SEGMENT.search(tail.partition("/")[2]) or "?" in path or "#" in path:
+            return False
+        n = _url_norm(path)
+        return any(n.startswith(_url_norm(pre).rstrip("/") + "/")
+                   for pre in prefixes if _SCHEME.match(pre))
+    real = os.path.realpath(path)
+    for pre in prefixes:
+        if _SCHEME.match(pre):
+            continue
+        r = os.path.realpath(normalise_path(pre))
+        if os.path.commonpath([real, r]) == r:
+            return True
+    return False
+
+
+def expand_inputs(paths) -> list:
+    """Command-line inputs -> data files: a directory (local, or a URL ending in '/')
+    stands for the ``*.root`` files directly inside it."""
+    out = []
+    for raw in paths:
+        p = normalise_path(raw)
+        if _SCHEME.match(p) and p.endswith("/"):
+            from XRootD.client import URL, FileSystem
+            u = URL(p)
+            st, listing = FileSystem(f"{u.protocol}://{u.hostid}").dirlist(
+                "/" + u.path.lstrip("/"), timeout=60)
+            if not st.ok:
+                raise SystemExit(f"cannot list {p}: {st.message.strip()}")
+            out += [p + e.name for e in sorted(listing, key=lambda e: e.name)
+                    if e.name.endswith(".root")]
+        elif not _SCHEME.match(p) and os.path.isdir(p):
+            out += [os.path.join(p, n) for n in sorted(os.listdir(p)) if n.endswith(".root")]
+        else:
+            out.append(p)
+    return out
 
 
 # ---------------------------------------------------------------- workers
@@ -169,10 +224,11 @@ class Job:
 
 
 class App:
-    def __init__(self, files=(), workers=None, prefetch=2, allow_open=True):
+    def __init__(self, files=(), workers=None, prefetch=2, allow_open=True, open_prefixes=()):
         self.files: dict[str, FileInfo] = {}
         self.by_name: dict[str, str] = {}
-        self.allow_open = allow_open
+        self.allow_open = allow_open                  # any path this account can read
+        self.open_prefixes = tuple(open_prefixes)     # otherwise only files under these
         self.workers = max(1, workers or min(8, os.cpu_count() or 1))
         self.prefetch = max(0, prefetch)
         self.lock = threading.RLock()
@@ -187,10 +243,18 @@ class App:
             self.open_file(f)
 
     # ---- files
-    def open_file(self, path: str) -> FileInfo:
+    def may_open(self) -> bool:
+        return self.allow_open or bool(self.open_prefixes)
+
+    def open_file(self, path: str, restricted: bool = False) -> FileInfo:
+        """``restricted``: a request from a browser, allowed only under ``open_prefixes``
+        unless ``allow_open``."""
         path = normalise_path(path)
         if not path:
             raise HttpError(400, "no path given")
+        if restricted and not self.allow_open and not under_prefix(path, self.open_prefixes):
+            raise HttpError(403, "this server only opens files under: "
+                                 + ", ".join(self.open_prefixes))
         if not _SCHEME.match(path):
             path = os.path.abspath(path)
             if not os.path.exists(path):
@@ -199,9 +263,8 @@ class App:
                 raise HttpError(400, f"that is a directory, not a file: {path}")
             if not os.access(path, os.R_OK):
                 raise HttpError(403, f"not readable: {path}")
-        else:
-            raise HttpError(400, "remote (root://) files are not supported by the "
-                                 "web viewer cache yet; copy the file locally")
+        elif _DOT_SEGMENT.search(path.split("://", 1)[1].partition("/")[2]):
+            raise HttpError(400, f"'.' or '..' in {path}")
         with self.lock:
             if path in self.files:
                 return self.files[path]
@@ -373,7 +436,8 @@ class App:
         return {"uptime_s": round(time.time() - self.t_start, 1), "workers": self.workers,
                 "prefetch": self.prefetch, "in_flight": inflight, "queued_prefetch": queued, "precompute_backlog": n_bg,
                 "counters": dict(self.counters), "recent": list(self.last_times),
-                "files": files, "allow_open": self.allow_open}
+                "files": files, "allow_open": self.may_open(),
+                "open_prefixes": list(self.open_prefixes) if not self.allow_open else []}
 
 
 # ---------------------------------------------------------------- HTTP
@@ -460,9 +524,10 @@ class Handler(BaseHTTPRequestHandler):
             raw = self.rfile.read(n) if n else b""
             if u.path != "/api/open":
                 raise HttpError(404, "not found")
-            if not self.app.allow_open:
+            if not self.app.may_open():
                 raise HttpError(403, "opening files by path is disabled when bound "
-                                     "beyond localhost (use --allow-remote-open)")
+                                     "beyond localhost (use --allow-open-under DIR "
+                                     "or --allow-remote-open)")
             try:
                 body = json.loads(raw or b"{}")
                 path = body["path"]
@@ -470,7 +535,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise TypeError
             except Exception:
                 raise HttpError(400, 'expected JSON body {"path": "..."}')
-            info = self.app.open_file(path)
+            info = self.app.open_file(path, restricted=True)
             self._json(self._file_entry(info))
         except HttpError as e:
             self._error(e.status, str(e))
@@ -611,10 +676,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def make_server(files=(), host="127.0.0.1", port=8050, workers=None, prefetch=2,
-                allow_remote_open=False) -> tuple:
+                allow_remote_open=False, open_prefixes=()) -> tuple:
     loopback = host in ("127.0.0.1", "localhost", "::1")
     app = App(files, workers=workers, prefetch=prefetch,
-              allow_open=loopback or allow_remote_open)
+              allow_open=loopback or allow_remote_open, open_prefixes=open_prefixes)
     handler = type("BoundHandler", (Handler,), {"app": app})
     httpd = ThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True
@@ -624,7 +689,9 @@ def make_server(files=(), host="127.0.0.1", port=8050, workers=None, prefetch=2,
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m pylarevd.web",
                                  description="pylarevd browser event viewer")
-    ap.add_argument("files", nargs="*", help="art-ROOT file(s)")
+    ap.add_argument("files", nargs="*",
+                    help="art-ROOT file(s): local paths or root:// URLs; a directory "
+                         "(a URL ending in '/') stands for the .root files inside it")
     ap.add_argument("--port", type=int, default=8050)
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address (default localhost only; use an SSH tunnel)")
@@ -636,12 +703,15 @@ def main(argv=None) -> int:
                     help="permit opening files by path even when --host exposes the "
                          "server beyond localhost (anyone who can reach the port can "
                          "read any file this account can read)")
+    ap.add_argument("--allow-open-under", action="append", default=[], metavar="DIR",
+                    help="let browsers open files by path under this directory (local or "
+                         "root:// URL; repeatable), whatever --host is")
     ap.add_argument("--precompute", action="store_true",
                     help="build the cache for every event of the given files in the background")
     a = ap.parse_args(argv)
 
-    httpd, app = make_server(a.files, a.host, a.port, a.workers, a.prefetch,
-                             a.allow_remote_open)
+    httpd, app = make_server(expand_inputs(a.files), a.host, a.port, a.workers, a.prefetch,
+                             a.allow_remote_open, a.allow_open_under)
     node = os.uname().nodename
     fqdn = node if "." in node else f"{node}.cern.ch"
     print(f"\n  pylarevd web viewer on http://{a.host}:{a.port}  "
@@ -653,7 +723,9 @@ def main(argv=None) -> int:
         print("  open-by-path is %s\n" % (
             "ENABLED (--allow-remote-open): anyone who can reach this port can read any "
             "file you can" if a.allow_remote_open
-            else "disabled; pass --allow-remote-open to enable"), flush=True)
+            else "limited to " + ", ".join(a.allow_open_under) if a.allow_open_under
+            else "disabled; pass --allow-open-under DIR or --allow-remote-open to enable"),
+            flush=True)
     if a.precompute:
         for info in list(app.files.values()):
             app.precompute(info)

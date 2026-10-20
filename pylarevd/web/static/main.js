@@ -274,9 +274,13 @@ async function openByPath() {
   }
 }
 
-function setOpenAllowed(ok, why) {
+function setOpenAllowed(ok, why, prefixes) {
   $('inp-open').disabled = !ok; $('btn-open').disabled = !ok;
-  const tip = ok ? 'absolute path of a .root file on the server, Enter to open' : (why || 'opening files by path is disabled on this server');
+  let tip = ok ? 'absolute path or root:// URL of a .root file on the server, Enter to open' : (why || 'opening files by path is disabled on this server');
+  if (ok && prefixes && prefixes.length) {
+    tip = `a .root file under ${prefixes.join(' or ')}, Enter to open`;
+    $('inp-open').placeholder = prefixes[0].replace(/\/?$/, '/...');
+  }
   $('inp-open').title = tip; $('btn-open').title = tip;
 }
 
@@ -286,7 +290,8 @@ async function initOpenBox() {
     const r = await fetch('/api/status');
     if (r.ok) {
       const st = await r.json();
-      if (st.allow_open === false) setOpenAllowed(false, 'opening files by path is disabled when the server is bound beyond localhost (restart with --allow-remote-open)');
+      if (st.allow_open === false) setOpenAllowed(false, 'opening files by path is disabled when the server is bound beyond localhost (restart with --allow-open-under DIR or --allow-remote-open)');
+      else if (st.open_prefixes && st.open_prefixes.length) setOpenAllowed(true, '', st.open_prefixes);
     }
   } catch (e) { /* attempt anyway; a 403 will disable the box */ }
 }
