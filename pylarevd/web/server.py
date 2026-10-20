@@ -722,7 +722,7 @@ def main(argv=None) -> int:
                          "root:// URL; repeatable), whatever --host is")
     ap.add_argument("--precompute", action="store_true",
                     help="build the cache for every event of the given files in the background")
-    a = ap.parse_args(argv)
+    a = ap.parse_intermixed_args(argv)      # files may follow options
 
     httpd, app = make_server(expand_inputs(a.files), a.host, a.port, a.workers, a.prefetch,
                              a.allow_remote_open, a.allow_open_under)
