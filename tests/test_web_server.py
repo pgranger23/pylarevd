@@ -266,3 +266,22 @@ def test_export_pdsp_pdf(cache_env):
             assert st == 200 and body.startswith(b"%PDF"), (view, st, body[:200])
     finally:
         s.close()
+
+
+def test_frontend_dom_ids_and_truth_wiring():
+    """Every `$('id')` of the truth / selection / main modules exists in index.html (no browser needed),
+    the truth drawer is wired and the old radiologicals checkbox is gone."""
+    import pathlib
+    import re
+    static = pathlib.Path(__file__).resolve().parents[1] / "pylarevd" / "web" / "static"
+    html = (static / "index.html").read_text()
+    ids = set(re.findall(r'id="([^"]+)"', html))
+    for js in ("truth.js", "select.js", "main.js"):
+        src = (static / js).read_text()
+        for m in re.findall(r"\$\('([A-Za-z0-9_-]+)'\)", src):
+            assert m in ids, (js, m)
+    for need in ("btn-truth", "truth-drawer", "td-cat", "td-part", "td-tree", "td-search", "td-reset", "td-foot"):
+        assert need in ids
+    assert 'data-ov="rad"' not in html
+    main = (static / "main.js").read_text()
+    assert "initTruth(app)" in main and "resetTruth" in main

@@ -363,3 +363,85 @@ def test_pfp_tables_degrade_without_pfparticles(monkeypatch):
     assert "pfp/id" not in a
     assert "hits/group/pfparticle" in a and "hits/group/slice" in a
     assert h["meta"]["available"]["slice"] and len(a["slice/id"]) >= 1
+
+
+# ---- true-particle generator tags and deposit -> trajectory rows (truth filter) -----
+
+def test_rows_of_vectorised_lookup():
+    from pylarevd.web.export import _rows_of
+    keys = np.array([7, 3, 11, 5, 2], np.int32)
+    q = np.array([5, 2, 99, 7, 3, 11, 0, 5, -3], np.int64)
+    got = _rows_of(keys, q)
+    want = np.array([3, 4, -1, 0, 1, 2, -1, 3, -1], np.int32)
+    np.testing.assert_array_equal(got, want)
+    assert got.dtype == np.int32
+    assert _rows_of(np.zeros(0, np.int32), q).tolist() == [-1] * len(q)
+    assert len(_rows_of(keys, np.zeros(0, np.int64))) == 0
+    # a value above every key must not run off the end
+    assert _rows_of(keys, np.array([1000])).tolist() == [-1]
+
+
+def test_bundle_version_bumped_for_truth_filter():
+    from pylarevd.web import cache
+    assert cache.BUNDLE_VERSION >= 3
+
+
+@needs_fd
+def test_fd_mc_generator_and_deposit_rows(fd_event):
+    f, (h, a) = fd_event
+    m = h["meta"]
+    n = len(a["mc/pdg"])
+    g = a["mc/generator"]
+    assert g.dtype == np.int16 and g.shape == (n,)
+    names = m["mc_generators"]
+    assert "generator" in names and "Ar39GenInLAr" in names
+    assert g.min() >= -1 and g.max() < len(names)
+    # the neutrino interaction is exactly the particles made by the "generator" module
+    fi = a["mc/from_interaction"].astype(bool)
+    gen_idx = names.index("generator")
+    assert np.array_equal(g == gen_idx, fi) or (g[fi] == gen_idx).all()
+    # deposits: row of the owning trajectory (EM-shower daughters carry a negated track id)
+    dm = a["dep/mc"]
+    assert dm.dtype == np.int32 and dm.shape == a["dep/track_id"].shape
+    ok = dm >= 0
+    assert ok.any() and dm.max() < n
+    np.testing.assert_array_equal(a["mc/track_id"][dm[ok]], np.abs(a["dep/track_id"][ok]))
+    # an unmatched deposit has a track id that is not in mc/*
+    absent = ~np.isin(np.abs(a["dep/track_id"]), a["mc/track_id"])
+    assert np.array_equal(~ok, absent)
+    # interaction flag of a deposit agrees with the one of its trajectory
+    np.testing.assert_array_equal(a["dep/from_interaction"][ok], a["mc/from_interaction"][dm[ok]])
+
+
+@needs_pd
+def test_pdsp_mc_generator():
+    from pylario import EventFile
+    from pylarevd.web.export import event_bundle
+    f = EventFile(PD)
+    h, a = read_bundle(event_bundle(f[1], hit_tag="hitpdune"))
+    names = h["meta"]["mc_generators"]
+    assert "cosmicgenerator" in names and "generator" in names
+    g = a["mc/generator"]
+    assert g.shape == a["mc/pdg"].shape and g.max() < len(names)
+    assert (g == names.index("cosmicgenerator")).sum() > 100_000
+    assert "dep/mc" not in a            # no SimEnergyDeposit product in this file
+
+
+@needs_fd
+def test_generator_missing_degrades(monkeypatch):
+    """No MCParticle-MCTruth association: no mc/generator, a note, everything else unchanged."""
+    import dataclasses
+    from pylario import EventFile
+    from pylarevd.web import export
+    f = EventFile(FD)
+    ev = f[1]
+    orig = type(ev).mc_particles
+
+    def stripped(self, *a, **k):
+        mc = orig(self, *a, **k)
+        return dataclasses.replace(mc, generator=None, generators=())
+    monkeypatch.setattr(type(ev), "mc_particles", stripped)
+    h, a = read_bundle(export.event_bundle(ev, hit_tag="hitfd"))
+    assert "mc/generator" not in a and "mc_generators" not in h["meta"]
+    assert any("mc/generator" in n for n in h["meta"]["notes"])
+    assert "mc/from_interaction" in a and "dep/mc" in a

@@ -40,23 +40,24 @@ button:disabled, input:disabled { opacity: 0.5; cursor: not-allowed; }
 button { cursor: pointer; }
 button:hover { border-color: var(--accent); }
 .evlabel span { color: var(--fg); min-width: 11em; text-align: center; display: inline-block; font-variant-numeric: tabular-nums; }
-#main { flex: 1; min-height: 0; position: relative; display: grid; gap: 2px; background: var(--grid); }
+#main { flex: 1; min-height: 0; position: relative; display: grid; gap: 2px; background: var(--grid); --cols: 1fr; --tw: 340px; grid-template-columns: var(--cols); }
 .panel { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--axes-bg); display: none; }
-/* view layouts: which panels are visible and how they tile */
-#main[data-view="3d"] { grid-template-columns: 1fr; }
+/* view layouts: which panels are visible and how they tile (--cols = the view panels; the truth drawer adds one column) */
+#main[data-view="3d"] { --cols: 1fr; }
 #main[data-view="3d"] #panel-3d { display: block; }
-#main[data-view="2d"] { grid-template-columns: 1fr; }
+#main[data-view="2d"] { --cols: 1fr; }
 #main[data-view="2d"] #panel-2d { display: block; }
-#main[data-view="light"] { grid-template-columns: 1fr; }
+#main[data-view="light"] { --cols: 1fr; }
 #main[data-view="light"] #panel-light { display: block; }
-#main[data-view="optical"] { grid-template-columns: 1fr; }
+#main[data-view="optical"] { --cols: 1fr; }
 #main[data-view="optical"] #panel-optical { display: block; }
-#main[data-view="flash3d"] { grid-template-columns: 1fr; }
+#main[data-view="flash3d"] { --cols: 1fr; }
 #main[data-view="flash3d"] #panel-3d { display: block; }
-#main[data-view="charge+light"] { grid-template-columns: 3fr 2fr; }
+#main[data-view="charge+light"] { --cols: 3fr 2fr; }
 #main[data-view="charge+light"] #panel-3d, #main[data-view="charge+light"] #panel-light { display: block; }
-#main[data-view="2d+3d"] { grid-template-columns: 1fr 1fr; }
+#main[data-view="2d+3d"] { --cols: 1fr 1fr; }
 #main[data-view="2d+3d"] #panel-3d, #main[data-view="2d+3d"] #panel-2d { display: block; }
+#main.tdrawer-open { grid-template-columns: var(--cols) minmax(0, var(--tw)); }
 .panel canvas { display: block; width: 100%; height: 100%; }
 #summary-bar {
   flex: none; background: color-mix(in srgb, var(--legend-bg) 88%, transparent);
@@ -111,3 +112,61 @@ button:hover { border-color: var(--accent); }
 #sel-card .row { margin: 1px 0; }
 #sel-card .rel a { margin-right: 6px; white-space: nowrap; }
 #sel-card .note { color: var(--muted); }
+
+/* truth drawer (truth.js): docked as an extra grid column on wide windows, an overlay on narrow ones */
+button.small { padding: 0 6px; font-size: 12px; }
+#btn-truth.on { border-color: var(--accent); color: var(--accent); }
+#truth-drawer {
+  grid-column: -2 / -1; grid-row: 1 / -1; min-width: 0; min-height: 0; z-index: 25;
+  display: flex; flex-direction: column; background: var(--legend-bg); color: var(--fg);
+  border-left: 1px solid var(--legend-edge); font-size: 12px;
+}
+#main:not(.tdrawer-open) #truth-drawer { display: none; }
+#truth-drawer .td-head { display: flex; justify-content: space-between; align-items: center; padding: 5px 8px; border-bottom: 1px solid var(--legend-edge); }
+#truth-drawer .td-tabs { display: flex; border-bottom: 1px solid var(--legend-edge); }
+#truth-drawer .td-tabs button { flex: 1; border: 0; border-radius: 0; background: transparent; color: var(--muted); padding: 4px 6px; }
+#truth-drawer .td-tabs button.on { color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
+#truth-drawer .td-body { flex: 1; min-height: 0; overflow: auto; padding: 4px 8px; }
+#truth-drawer #td-part { display: flex; flex-direction: column; overflow: hidden; padding: 4px 0 0; }
+#truth-drawer #td-part[hidden] { display: none; }
+#truth-drawer .td-foot { padding: 4px 8px; border-top: 1px solid var(--legend-edge); color: var(--muted); }
+#truth-drawer .td-sec { display: flex; justify-content: space-between; margin: 8px 0 3px; color: var(--muted); }
+#truth-drawer .td-sec:first-child { margin-top: 2px; }
+#truth-drawer .td-sec a, #truth-drawer .td-note a { color: var(--accent); text-decoration: none; margin-left: 6px; }
+#truth-drawer .td-note { color: var(--muted); margin: 8px 0; line-height: 1.35; }
+#truth-drawer .td-row { display: flex; align-items: center; gap: 6px; padding: 1px 2px; cursor: pointer; white-space: nowrap; }
+#truth-drawer .td-row:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+#truth-drawer .td-row.empty { opacity: 0.45; }
+#truth-drawer .td-row .nm { flex: 1; min-width: 0; }
+#truth-drawer .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#truth-drawer .ct { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: auto; padding-left: 8px; }
+#truth-drawer .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex: none; margin: 0 3px; }
+#truth-drawer .td-tools { display: flex; gap: 6px; padding: 0 8px 4px; }
+#truth-drawer #td-search { flex: 1; min-width: 0; }
+#truth-drawer .td-info { padding: 0 8px 4px; color: var(--muted); }
+#truth-drawer .td-tree { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--legend-edge); }
+#truth-drawer .tg { display: flex; align-items: center; gap: 5px; padding: 3px 6px; white-space: nowrap; background: color-mix(in srgb, var(--fig-bg) 55%, transparent); border-bottom: 1px solid var(--legend-edge); cursor: pointer; position: sticky; top: 0; z-index: 2; }
+#truth-drawer .tg b { font-weight: 600; min-width: 0; flex: 0 1 auto; }
+#truth-drawer .tg .ct { flex: none; }
+#truth-drawer .tr { display: flex; align-items: center; gap: 4px; white-space: nowrap; padding-right: 6px; line-height: 1.55; cursor: pointer; }
+#truth-drawer .tr:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+#truth-drawer .tr.sel { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+#truth-drawer .tr.hit .sym { text-decoration: underline; }
+#truth-drawer .tr.dim { opacity: 0.45; }
+#truth-drawer .tr .car, #truth-drawer .tg .car { display: inline-block; width: 11px; flex: none; color: var(--muted); text-align: center; }
+#truth-drawer .tr .sym { font-weight: 600; }
+#truth-drawer .tr .tid { color: var(--muted); font-variant-numeric: tabular-nums; }
+#truth-drawer .tr .pr { color: var(--muted); overflow: hidden; text-overflow: ellipsis; min-width: 0; font-style: italic; }
+#truth-drawer .tr .len, #truth-drawer .tr .ds { color: var(--muted); margin-left: auto; font-variant-numeric: tabular-nums; flex: none; }
+#truth-drawer .tr .ds { margin-left: 4px; }
+#truth-drawer .more { padding: 2px 6px; color: var(--accent); cursor: pointer; }
+#truth-drawer .tri { display: inline-block; flex: none; width: 13px; height: 13px; border: 1.5px solid var(--muted); border-radius: 3px; position: relative; background: transparent; cursor: pointer; }
+#truth-drawer .tri.s1 { background: var(--accent); border-color: var(--accent); }
+#truth-drawer .tri.s1::after { content: ""; position: absolute; left: 3px; top: 0px; width: 3px; height: 7px; border: solid var(--axes-bg); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+#truth-drawer .tri.s2 { border-color: var(--accent); background: linear-gradient(90deg, var(--accent) 50%, transparent 50%); }
+@media (max-width: 900px) {
+  #main.tdrawer-open { grid-template-columns: var(--cols); }
+  #truth-drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(340px, 92%); grid-column: auto; box-shadow: -4px 0 12px rgba(0,0,0,.35); }
+}
+#main.tdrawer-open #sel-card.right { right: calc(var(--tw) + 8px); }
+@media (max-width: 900px) { #main.tdrawer-open #sel-card.right { right: 8px; } }

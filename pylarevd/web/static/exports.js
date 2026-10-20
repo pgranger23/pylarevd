@@ -27,7 +27,11 @@ function buildQuery(kind) {
   q.set('view', s.view);
   if (kind === 'gif' && s.view === '3d') q.set('rotstep', '4');
   for (const k of ['color', 'scale', 'cmap', 'theme']) if (s[k]) q.set(k, s[k]);
-  q.set('ov', Object.keys(s.ov || {}).filter((k) => s.ov[k]).join(','));
+  // The Python renderers know only the old on/off "radiologicals" switch (the truth filters of the
+  // viewer are not applied to PDF/PNG/GIF exports): any visible non-interaction origin turns it on.
+  const ovOn = Object.keys(s.ov || {}).filter((k) => s.ov[k]);
+  if (app.truth && app.truth.radiologicalsOn()) ovOn.push('rad');
+  q.set('ov', ovOn.join(','));
   for (const k of ['merge2d', 'space2d']) if (s[k]) q.set(k, s[k]);
   for (const k of LIGHT_KEYS) if (s[k] !== undefined && s[k] !== '') q.set(k, s[k]);
   let cam = null;

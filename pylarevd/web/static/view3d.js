@@ -6,8 +6,10 @@
 // into/out of the screen. The mapping is a proper rotation (no mirror image).
 //
 // Rendering strategy: one draw call per kind. Control changes (colour-by, scale, cmap,
-// theme, overlays, radiologicals) only touch uniforms / visibility / small attributes.
-// Radiologicals are filtered in the vertex shader from a per-vertex flag.
+// theme, overlays, truth filters) only touch uniforms / visibility / small attributes.
+// True trajectories / deposits are filtered in the vertex shader by a per-trajectory flag texture
+// (truth.js, WP-T: 0 hidden, 1 visible, 2 highlighted); the trajectory index buffer is sorted by
+// (origin, species) so fully hidden categories are not even drawn (geometry groups).
 // Rendering is on demand (rAF coalesced); the animation loop only runs between
 // setAnimating(true) and setAnimating(false).
 //
@@ -60,6 +62,15 @@ float selFlag(float id) {
 }
 `;
 
+const TRUTHGLSL = /* glsl */`
+// per-trajectory flag texture (truth.js): row r at texel (r & 2047, r >> 11); 0 hidden, 1 visible, 2 highlighted
+uniform sampler2D uTruthTex;
+float truthFlag(float row) {
+  int r = int(row + 0.5);
+  return floor(texelFetch(uTruthTex, ivec2(r & 2047, r >> 11), 0).r * 255.0 + 0.5);
+}
+`;
+
 const SP_VERT = /* glsl */`
 attribute float aValue;
 attribute float aCat;
@@ -107,42 +118,50 @@ void main() {
 }`;
 
 const DEP_VERT = /* glsl */`
-attribute float aFlag;
-uniform float uSize, uPx, uShowRad, uHasFlag;
-uniform vec3 uUniform;
+attribute float aMc;       // row of the owning mc/* trajectory, -1 if none
+attribute float aFb;       // cls + 9 * from_interaction: visibility of deposits without a trajectory (uFbVis)
+uniform float uSize, uPx, uTruthSel, uDim;
+uniform float uFbVis[18];
+uniform vec3 uUniform, uHi, uBg;
 varying vec3 vColor;
+${TRUTHGLSL}
 void main() {
   vColor = uUniform;
   gl_PointSize = uSize * uPx;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  if (uHasFlag > 0.5 && aFlag < 0.5 && uShowRad < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+  float tf = aMc > -0.5 ? truthFlag(aMc) : uFbVis[int(aFb + 0.5)];
+  if (tf < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  if (uTruthSel > 0.5) {
+    if (tf > 1.5) { vColor = uHi; gl_PointSize = max(uSize * 2.2, 4.0) * uPx; }
+    else vColor = mix(uBg, vColor, min(1.0, uDim * 1.33));
+  }
 }`;
 
-// Lines: aMeta is cls + 16*flag for truth (modes 0/1), the object id for tracks (mode 2).
+// Lines: aMeta is the species class for truth (mode 1), the object id for tracks (mode 2). aMc is the
+// row of the trajectory (truth only, uTruthOn): hidden by the flag texture, highlighted / faded under a selection.
 const LINE_VERT = /* glsl */`
 attribute float aMeta;
 attribute float aSel;
-uniform float uMode, uHasFlag, uShowRad;
+attribute float aMc;
+uniform float uMode, uTruthOn, uTruthSel;
 uniform vec3 uColor;
 uniform vec3 uPdg[9];
 uniform vec3 uPal[8];
 uniform vec3 uBg, uHi;
-uniform float uDimAll;
 varying vec3 vColor;
 ${SELGLSL}
+${TRUTHGLSL}
 void main() {
   vColor = uColor;
-  float flag = 1.0;
-  if (uHasFlag > 0.5) {
-    flag = floor(aMeta / 16.0);
-    if (uMode > 0.5 && uMode < 1.5) vColor = uPdg[int(aMeta - flag * 16.0)];
-  } else if (uMode > 1.5) {
-    vColor = uPal[int(mod(aMeta, 8.0))];
-  }
+  if (uMode > 1.5) vColor = uPal[int(mod(aMeta, 8.0))];
+  else if (uMode > 0.5) vColor = uPdg[int(aMeta)];
   if (uSelOn > 0.5) vColor = selFlag(aSel) > 0.5 ? uHi : mix(uBg, vColor, uDim * 0.9);
-  if (uDimAll > 0.5) vColor = mix(uBg, vColor, min(1.0, uDim * 1.33));
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  if (flag < 0.5 && uShowRad < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+  if (uTruthOn > 0.5) {
+    float tf = truthFlag(aMc);
+    if (tf < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+    if (uTruthSel > 0.5) vColor = tf > 1.5 ? uHi : mix(uBg, vColor, min(1.0, uDim * 1.33));
+  }
 }`;
 const FRAG_FLAT = /* glsl */`
 varying vec3 vColor;
@@ -221,6 +240,30 @@ varying vec3 vColor;
 varying float vAlpha;
 void main() { gl_FragColor = vec4(vColor, vAlpha); }`;
 
+// Highlighted true trajectories are also drawn as screen-space ribbons (WebGL lines are 1 px): each
+// segment is 4 vertices, (this end, other end, side).
+const RIB_VERT = /* glsl */`
+attribute vec3 aOther;
+attribute float aSide;
+uniform vec2 uRes;
+uniform float uPx, uWidth;
+void main() {
+  vec4 a = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec4 b = projectionMatrix * modelViewMatrix * vec4(aOther, 1.0);
+  if (a.w <= 0.0 || b.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  vec2 d = (b.xy / b.w - a.xy / a.w) * uRes * 0.5;
+  float len = length(d);
+  vec2 dir = len > 1e-3 ? d / len : vec2(1.0, 0.0);
+  vec2 nrm = vec2(-dir.y, dir.x);
+  vec2 off = (nrm * aSide - dir) * uWidth * uPx * 0.5;
+  gl_Position = a;
+  gl_Position.xy += off / (uRes * 0.5) * a.w;
+}`;
+const RIB_FRAG = /* glsl */`
+uniform vec3 uHi;
+void main() { gl_FragColor = vec4(uHi, 1.0); }`;
+const RIB_MAX = 120000;     // segments; a bigger highlighted family stays 1-px lines
+
 // ------------------------------------------------------------------ module state
 const V = {
   ready: false, app: null, container: null, visible: true,
@@ -231,7 +274,7 @@ const V = {
   tpc: null, axes: null, pd: null, pdN: 0, pdAlpha: 0.28, pdCustom: false,
   sp: null, spCat: new Map(), spVal: new Map(), stats: new Map(), spMode: 'value',
   tracks: null, trackCat: null, showers: null, markers: null, mc: null, dep: null,
-  flashes: null, flashWin: null, flashTime: null, fbox: null,
+  flashes: null, flashWin: null, flashTime: null, fbox: null, rib: null, ribVer: -1,
   labels: [], labelPool: [], labelLayer: null, axisLabels: [],
   legend: null, title: null,
   selAttrs: new Map(), selTexObj: null, showerPos: null, pk: null, pkRaf: 0, mouse: null, pickMs: [], lastPickObj: null,
@@ -246,7 +289,9 @@ function mkUniforms() {
   const pdg = Array.from({ length: PDG_CLASSES.length }, () => new THREE.Vector3());
   return {
     uLut: { value: null }, uPal: { value: pal }, uPdg: { value: pdg },
-    uCmapLo: { value: 0 }, uCmapHi: { value: 1 }, uShowRad: { value: 0 }, uPx: { value: 1 },
+    uCmapLo: { value: 0 }, uCmapHi: { value: 1 }, uPx: { value: 1 },
+    // true-particle flag texture (truth.js) and "a selection exists" (non-highlighted truth fades)
+    uTruthTex: { value: null }, uTruthSel: { value: 0 }, uFbVis: { value: new Float32Array(18) },
     // selection highlight, shared by space points / tracks / showers (uSelOn is per material)
     uSelTex: { value: null }, uSelH: { value: 1 }, uDim: { value: 0.15 }, uBg: { value: new THREE.Vector3() }, uHi: { value: new THREE.Vector3(1, 0.9, 0.2) },
   };
@@ -304,6 +349,7 @@ function init(container, app) {
   container.appendChild(V.fbox);
   buildMaterials();
   app.on('selection', () => { applySelection(); });
+  app.on('truth', () => { updateTruth(); });
   bindPicking(renderer.domElement);
   const ro = new ResizeObserver(() => resize());
   ro.observe(container);
@@ -323,14 +369,17 @@ function buildMaterials() {
   });
   M.dep = new THREE.ShaderMaterial({
     vertexShader: DEP_VERT, fragmentShader: FRAG_DISC,
-    uniforms: { uSize: { value: 2 }, uPx: u.uPx, uShowRad: u.uShowRad, uHasFlag: { value: 1 }, uUniform: { value: new THREE.Vector3() } },
+    uniforms: {
+      uSize: { value: 2 }, uPx: u.uPx, uUniform: { value: new THREE.Vector3() },
+      uTruthTex: u.uTruthTex, uTruthSel: u.uTruthSel, uFbVis: u.uFbVis, uDim: u.uDim, uBg: u.uBg, uHi: u.uHi,
+    },
   });
   const lineUni = () => ({
-    uMode: { value: 0 }, uHasFlag: { value: 0 }, uShowRad: u.uShowRad, uColor: { value: new THREE.Vector3() },
-    uPdg: u.uPdg, uPal: u.uPal,
-    uSelTex: u.uSelTex, uSelH: u.uSelH, uDim: u.uDim, uBg: u.uBg, uHi: u.uHi, uSelOn: { value: 0 }, uDimAll: { value: 0 },
+    uMode: { value: 0 }, uColor: { value: new THREE.Vector3() },
+    uPdg: u.uPdg, uPal: u.uPal, uTruthOn: { value: 0 }, uTruthTex: u.uTruthTex, uTruthSel: u.uTruthSel,
+    uSelTex: u.uSelTex, uSelH: u.uSelH, uDim: u.uDim, uBg: u.uBg, uHi: u.uHi, uSelOn: { value: 0 },
   });
-  M.mc = new THREE.ShaderMaterial({ vertexShader: LINE_VERT, fragmentShader: FRAG_FLAT, uniforms: { ...lineUni(), uHasFlag: { value: 1 } } });
+  M.mc = new THREE.ShaderMaterial({ vertexShader: LINE_VERT, fragmentShader: FRAG_FLAT, uniforms: { ...lineUni(), uTruthOn: { value: 1 } } });
   M.tracks = new THREE.ShaderMaterial({ vertexShader: LINE_VERT, fragmentShader: FRAG_FLAT, uniforms: lineUni() });
   M.marker = new THREE.ShaderMaterial({
     vertexShader: MARK_VERT, fragmentShader: MARK_FRAG, depthTest: false, transparent: false,
@@ -346,6 +395,10 @@ function buildMaterials() {
       uLut: u.uLut, uCmapLo: u.uCmapLo, uCmapHi: u.uCmapHi, uPx: u.uPx, uRes: { value: new THREE.Vector2(1, 1) },
       uTLo: { value: -50 }, uTHi: { value: 50 }, uTMax: { value: 50 },
     },
+  });
+  M.rib = new THREE.ShaderMaterial({
+    vertexShader: RIB_VERT, fragmentShader: RIB_FRAG, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+    uniforms: { uRes: { value: new THREE.Vector2(1, 1) }, uPx: u.uPx, uWidth: { value: 3 }, uHi: u.uHi },
   });
   M.tpc = new THREE.LineBasicMaterial({ color: 0x64748b });
   M.shower = new THREE.ShaderMaterial({ vertexShader: LINE_VERT, fragmentShader: FRAG_FLAT, uniforms: lineUni() });
@@ -492,9 +545,10 @@ function setPdColors(rgb, alpha) {
 
 // ------------------------------------------------------------------ event
 function clearEvent() {
-  for (const k of ['sp', 'tracks', 'showers', 'markers', 'mc', 'dep', 'flashes']) { disposeObj(V[k]); V[k] = null; }
+  for (const k of ['sp', 'tracks', 'showers', 'markers', 'mc', 'dep', 'flashes', 'rib']) { disposeObj(V[k]); V[k] = null; }
+  V.ribVer = -1;
   V.spCat.clear(); V.spVal.clear(); V.stats.clear(); V.trackCat = null;
-  V.selAttrs.clear(); V.pk = null; V.showerPos = null; V.lastPickObj = null;
+  V.selAttrs.clear(); V.pk = null; V.mcpk = null; V.showerPos = null; V.lastPickObj = null;
   V.labels = [];
   for (const l of V.labelPool) l.el.style.display = 'none';
 }
@@ -510,6 +564,7 @@ function setEvent(bundle, geometry) {
   buildShowers(bundle);
   buildTruth(bundle);
   buildDeposits(bundle);
+  V.truthStamp = -1; updateTruth();
   buildLabels(bundle);
   buildMarkers(bundle);
   buildFlashes(bundle);
@@ -575,49 +630,124 @@ function buildShowers(b) {
 }
 
 function buildTruth(b) {
+  const TM = V.app.truth && V.app.truth.model;
   const pts = b.get('mc/points'), off = b.get('mc/offsets');
-  if (!pts || !off || off.length < 2) return;
-  const n = off.length - 1;
-  const pdg = b.get('mc/pdg'), fi = b.get('mc/from_interaction');
-  const perTraj = new Uint8Array(n);
-  for (let i = 0; i < n; i++) perTraj[i] = (pdg ? pdgClass(pdg[i]) : 8) + (fi && !fi[i] ? 0 : 16);
-  const meta = expandRagged(off, perTraj, Uint8Array);
+  if (!TM || !pts || !off || off.length < 2) return;
+  const n = off.length - 1, nKeys = TM.nO * TM.nSp, key = TM.key, cls = TM.cls;
+  const nv = pts.length / 3;
+  const meta = new Uint8Array(nv), row = new Float32Array(nv);   // species class and trajectory row per vertex
+  const segStart = new Int32Array(nKeys + 1);
+  for (let i = 0; i < n; i++) {
+    const a = off[i], e = off[i + 1], c = cls[i];
+    for (let j = a; j < e; j++) { meta[j] = c; row[j] = i; }
+    if (e - a > 1) segStart[key[i] + 1] += e - a - 1;
+  }
+  for (let k = 0; k < nKeys; k++) segStart[k + 1] += segStart[k];
+  // Index order: segments sorted by (origin, species) key, so whole categories are contiguous ranges that
+  // applyMcGroups() can leave out of the draw; per-trajectory visibility is the flag texture.
+  const idx = new Uint32Array(2 * segStart[nKeys]), cur = segStart.slice(0, nKeys);
+  for (let i = 0; i < n; i++) {
+    const a = off[i], e = off[i + 1] - 1;
+    if (e <= a) continue;
+    let k = cur[key[i]];
+    for (let j = a; j < e; j++) { idx[2 * k] = j; idx[2 * k + 1] = j + 1; k++; }
+    cur[key[i]] = k;
+  }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', attr(pts, 3));
   g.setAttribute('aMeta', attr(meta, 1));
-  // Index order: segments of from_interaction trajectories first, radiologicals after, so the
-  // radiologicals toggle is just a draw range (hidden ones never reach the vertex shader).
-  const idx = new Uint32Array(2 * Math.max(0, off[n] - off[0] - n));
-  let k = 0;
-  const emit = (want) => {
-    for (let i = 0; i < n; i++) {
-      if (!!(fi ? fi[i] : 1) !== want) continue;
-      const e = off[i + 1] - 1;
-      for (let j = off[i]; j < e; j++) { idx[k++] = j; idx[k++] = j + 1; }
-    }
-  };
-  emit(true); const nInt = k; emit(false);
-  g.setIndex(new THREE.BufferAttribute(idx.subarray(0, k), 1));
-  V.mc = addObj(new THREE.LineSegments(g, M.mc), 0);
-  V.mc.userData.nInt = nInt; V.mc.userData.nAll = k;
-  applyMcRange();
+  g.setAttribute('aMc', attr(row, 1));
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  V.mc = addObj(new THREE.LineSegments(g, [M.mc]), 0);
+  V.mc.userData.segStart = segStart;
+  applyMcGroups();
 }
 
-function applyMcRange() {
+/** Draw only the (origin, species) ranges that are switched on; the flag texture handles the rest. */
+function applyMcGroups() {
   if (!V.mc) return;
-  const u = V.mc.userData;
-  V.mc.geometry.setDrawRange(0, V.app.state.ov.rad ? u.nAll : u.nInt);
+  const TM = V.app.truth.model, ks = V.mc.userData.segStart, g = V.mc.geometry;
+  g.clearGroups();
+  if (!TM) return;
+  const nSp = TM.nSp, nKeys = TM.nO * nSp;
+  let open = false, start = 0, end = 0;
+  for (let k = 0; k < nKeys; k++) {
+    if (ks[k + 1] === ks[k]) continue;
+    const on = TM.orgOn[(k / nSp) | 0] && TM.spOn[k % nSp];
+    if (on) { if (!open) { start = ks[k]; open = true; } end = ks[k + 1]; }
+    else if (open) { g.addGroup(2 * start, 2 * (end - start), 0); open = false; }
+  }
+  if (open) g.addGroup(2 * start, 2 * (end - start), 0);
 }
 
 function buildDeposits(b) {
   const xyz = b.get('dep/xyz');
   if (!xyz || !xyz.length) return;
+  const n = xyz.length / 3;
+  const dm = b.get('dep/mc'), dp = b.get('dep/pdg'), fi = b.get('dep/from_interaction');
+  const aMc = new Float32Array(n), aFb = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    aMc[i] = dm ? dm[i] : -1;
+    aFb[i] = (dp ? pdgClass(dp[i]) : PDG_CLASSES.length - 1) + (fi && !fi[i] ? 0 : PDG_CLASSES.length);
+  }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', attr(xyz, 3));
-  const fi = b.get('dep/from_interaction');
-  M.dep.uniforms.uHasFlag.value = fi ? 1 : 0;
-  if (fi) g.setAttribute('aFlag', attr(fi, 1));
+  g.setAttribute('aMc', attr(aMc, 1));
+  g.setAttribute('aFb', attr(aFb, 1));
   V.dep = addObj(new THREE.Points(g, M.dep), 0);
+}
+
+/** (Re)upload the truth flag texture and the draw groups after a truth filter / highlight change. */
+function updateTruth() {
+  if (!V.ready) return;
+  const TM = V.app.truth && V.app.truth.model;
+  if (TM) {
+    if (V.truthOf !== TM) {
+      if (V.truthTex) V.truthTex.dispose();
+      const tex = new THREE.DataTexture(TM.flags, TM.texW, TM.texH, THREE.RedFormat, THREE.UnsignedByteType);
+      tex.minFilter = tex.magFilter = THREE.NearestFilter; tex.generateMipmaps = false; tex.flipY = false; tex.unpackAlignment = 1;
+      V.truthTex = tex; V.truthOf = TM; V.uni.uTruthTex.value = tex;
+    }
+    V.truthTex.needsUpdate = true;
+    V.uni.uTruthSel.value = TM.selActive ? 1 : 0;
+    V.uni.uFbVis.value.set(TM.fbVis);
+    if (V.truthStamp !== TM.stamp) { V.truthStamp = TM.stamp; applyMcGroups(); if (V.bundle && V.app.state.color === 'pdg') applyColors(); schedulePrewarm(); }
+    if (V.ribVer !== TM.version) { V.ribVer = TM.version; buildRibbons(TM); }
+  } else V.uni.uFbVis.value.fill(1);
+  requestRender();
+}
+
+/** thick highlight of the selected / matched true trajectories (only the ones that pass the filter) */
+function buildRibbons(TM) {
+  disposeObj(V.rib); V.rib = null;
+  const b = V.bundle;
+  if (!b || !TM.hiRows.length) return;
+  const off = b.get('mc/offsets'), pts = b.get('mc/points'), f = TM.flags;
+  if (!off || !pts) return;
+  let ns = 0;
+  for (const r of TM.hiRows) if (f[r] > 0 && off[r + 1] - off[r] > 1) ns += off[r + 1] - off[r] - 1;
+  if (!ns || ns > RIB_MAX) return;
+  const pos = new Float32Array(ns * 12), oth = new Float32Array(ns * 12), side = new Float32Array(ns * 4), idx = new Uint32Array(ns * 6);
+  let k = 0;
+  for (const r of TM.hiRows) {
+    if (!(f[r] > 0)) continue;
+    for (let j = off[r]; j < off[r + 1] - 1; j++, k++) {
+      const p0 = 3 * j, p1 = 3 * j + 3, v = 4 * k;
+      for (let e = 0; e < 4; e++) {
+        const first = e < 2;                       // vertices 0,1 sit at p0; 2,3 at p1
+        const a = first ? p0 : p1, o = first ? p1 : p0;
+        pos[3 * (v + e)] = pts[a]; pos[3 * (v + e) + 1] = pts[a + 1]; pos[3 * (v + e) + 2] = pts[a + 2];
+        oth[3 * (v + e)] = pts[o]; oth[3 * (v + e) + 1] = pts[o + 1]; oth[3 * (v + e) + 2] = pts[o + 2];
+        side[v + e] = (e === 1 || e === 2) ? 1 : -1;
+      }
+      idx.set([v, v + 1, v + 2, v, v + 2, v + 3], 6 * k);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', attr(pos, 3)); g.setAttribute('aOther', attr(oth, 3)); g.setAttribute('aSide', attr(side, 1));
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  V.rib = addObj(new THREE.Mesh(g, M.rib), 5);
+  V.rib.visible = V.app.state.ov.truth && V.app.state.view !== 'flash3d';
 }
 
 function buildLabels(b) {
@@ -776,6 +906,7 @@ function applyOverlays() {
   if (V.tracks) V.tracks.visible = ov.tracks && !fm;
   if (V.showers) V.showers.visible = ov.showers && !fm;
   if (V.mc) V.mc.visible = ov.truth && !fm;
+  if (V.rib) V.rib.visible = ov.truth && !fm;
   if (V.dep) V.dep.visible = ov.dep && !fm;
   if (V.markers) {
     // per-vertex show/hide through aSize (<= 0 is clipped in the shader): no rebuild
@@ -793,8 +924,6 @@ function applyOverlays() {
   if (V.flashes) V.flashes.visible = flashesWanted();
   if (V.pd) V.pd.visible = ov.pd;
   if (!V.pdCustom) M.pd.uniforms.uAlpha.value = fm ? 0.1 : V.pdAlpha;
-  V.uni.uShowRad.value = ov.rad ? 1 : 0;
-  applyMcRange();
   for (const l of V.labels) l.shown = ov.labels && !fm;
   for (const l of V.labelPool) if (!ov.labels || fm) l.el.style.display = 'none';
   if (V.fbox) {
@@ -909,7 +1038,8 @@ function applyColors() {
   const pdgMode = colour === 'pdg';
   M.mc.uniforms.uMode.value = pdgMode ? 1 : 0;
   if (pdgMode && V.mc && V.app.state.ov.truth) {
-    leg.innerHTML += PDG_CLASSES.map((c) => `<div><span class="sw" style="background:${c[t.name]}"></span>${c.name}</div>`).join('');
+    const TM = V.app.truth && V.app.truth.model;
+    leg.innerHTML += PDG_CLASSES.map((c, i) => `<div${TM && !TM.spOn[i] ? ' style="opacity:.35" title="hidden by the truth filter"' : ''}><span class="sw" style="background:${c[t.name]}"></span>${c.name}</div>`).join('');
   }
   if (st.view === 'flash3d') leg.innerHTML = '';   // charge is hidden: the legend is the flash time bar
   leg.innerHTML += flashLegend();
@@ -981,7 +1111,6 @@ function applySelection() {
     mat.uniforms.uSelOn.value = a ? 1 : 0;
   };
   set(V.sp, M.sp, 'sp'); set(V.tracks, M.tracks, 'tracks'); set(V.showers, M.shower, 'showers');
-  M.mc.uniforms.uDimAll.value = on ? 1 : 0;           // true trajectories fade too
   if (V.markers) applyOverlays();                      // vertex marker sizes follow the selection
   requestRender();
 }
@@ -992,7 +1121,11 @@ function focusSelection() {
   if (!sel || !b) return;
   const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
   const add = (x, y, z) => { if (!Number.isFinite(x + y + z)) return; lo[0] = Math.min(lo[0], x); hi[0] = Math.max(hi[0], x); lo[1] = Math.min(lo[1], y); hi[1] = Math.max(hi[1], y); lo[2] = Math.min(lo[2], z); hi[2] = Math.max(hi[2], z); };
-  const xyz = b.get('sp/xyz'), g = b.get(`sp/group/${sel.groupKind}`);
+  if (sel.kind === 'mc' && sel.mcRows) {                  // a true particle: frame its trajectory (or subtree)
+    const pts = b.get('mc/points'), off = b.get('mc/offsets');
+    if (pts && off) for (let q = 0; q < sel.mcRows.length && q < 20000; q++) { const r = sel.mcRows[q]; for (let k = off[r]; k < off[r + 1]; k++) add(pts[3 * k], pts[3 * k + 1], pts[3 * k + 2]); }
+  }
+  const xyz = b.get('sp/xyz'), g = lo[0] <= hi[0] ? null : b.get(`sp/group/${sel.groupKind}`);
   if (xyz && g) for (let i = 0; i < g.length; i++) { const id = g[i]; if (id >= 0 && id < sel.n && sel.mask[id]) add(xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]); }
   if (!(lo[0] <= hi[0])) {
     const a = selAttrFor('tracks', sel.groupKind), pts = b.get('tracks/points');
@@ -1128,7 +1261,79 @@ function pickAt(mx, my) {
     }
     if (si >= 0 && Math.sqrt(sb) + 1 < bd) { bd = Math.sqrt(sb); best = { pfp: P.spfp[si], slice: sliceOf(P.spfp[si]), what: 'shower', d: bd }; }
   }
+  // a visible true trajectory counts only where no reco object is under the cursor (reco has priority)
+  if (!best && V.mc && V.mc.visible && V.app.state.ov.truth) {
+    const m = pickMc(mx, my);
+    if (m) best = { pfp: -1, slice: -1, mc: m.row, what: 'mc', d: m.d };
+  }
   return best;
+}
+
+// True trajectories: only the VISIBLE ones (truth.js flags) are candidates. Their points are projected in
+// one pass (per camera / filter change, in the background after the camera settles), each trajectory keeps a
+// screen bounding box, and a pick is a bbox reject + point-segment distance within R_LINE px.
+function mcPickState() {
+  const TM = V.app.truth && V.app.truth.model, b = V.bundle;
+  if (!TM || !b || !V.mc) return null;
+  let P = V.mcpk;
+  if (P && P.TM === TM && P.stamp === TM.stamp && P.bundle === b) return P;
+  const off = b.get('mc/offsets'), f = TM.flags, rows = [];
+  let tot = 0;
+  for (let i = 0; i < TM.n; i++) if (f[i] && off[i + 1] - off[i] >= 2) { rows.push(i); tot += off[i + 1] - off[i]; }
+  const nr = rows.length, ptIdx = new Int32Array(tot), co = new Int32Array(nr + 1);
+  let k = 0;
+  for (let t = 0; t < nr; t++) { const r = rows[t]; co[t] = k; for (let j = off[r]; j < off[r + 1]; j++) ptIdx[k++] = j; }
+  co[nr] = k;
+  V.mcpk = P = {
+    TM, bundle: b, stamp: TM.stamp, rows: Int32Array.from(rows), ptIdx, co,
+    sx: new Float32Array(tot), sy: new Float32Array(tot),
+    bx0: new Float32Array(nr), bx1: new Float32Array(nr), by0: new Float32Array(nr), by1: new Float32Array(nr),
+    key: new Float64Array(10).fill(NaN),
+  };
+  return P;
+}
+
+function projectMc(P) {
+  const c = V.camera, p = c.position, q = c.quaternion;
+  const w = V.container.clientWidth, h = V.container.clientHeight, k = P.key;
+  if (k[0] === p.x && k[1] === p.y && k[2] === p.z && k[3] === q.x && k[4] === q.y && k[5] === q.z && k[6] === q.w && k[7] === w && k[8] === h && k[9] === c.fov) return;
+  k[0] = p.x; k[1] = p.y; k[2] = p.z; k[3] = q.x; k[4] = q.y; k[5] = q.z; k[6] = q.w; k[7] = w; k[8] = h; k[9] = c.fov;
+  c.updateMatrixWorld(); V.root.updateMatrixWorld(true);
+  const e = new THREE.Matrix4().multiplyMatrices(c.projectionMatrix, c.matrixWorldInverse).multiply(V.root.matrixWorld).elements;
+  const hw = 0.5 * w, hh = 0.5 * h, pts = V.bundle.get('mc/points');
+  const { ptIdx, co, sx, sy, bx0, bx1, by0, by1 } = P;
+  for (let t = 0; t < P.rows.length; t++) {
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (let m = co[t]; m < co[t + 1]; m++) {
+      const j = 3 * ptIdx[m], x = pts[j], y = pts[j + 1], z = pts[j + 2];
+      const cw = e[3] * x + e[7] * y + e[11] * z + e[15];
+      if (!(cw > 1e-6)) { sx[m] = NaN; sy[m] = NaN; continue; }
+      const px = (e[0] * x + e[4] * y + e[8] * z + e[12]) / cw * hw + hw, py = h - ((e[1] * x + e[5] * y + e[9] * z + e[13]) / cw * hh + hh);
+      sx[m] = px; sy[m] = py;
+      if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py;
+    }
+    bx0[t] = x0; bx1[t] = x1; by0[t] = y0; by1[t] = y1;
+  }
+}
+
+/** -> {row, d} of the visible true trajectory nearest to the cursor (css px), within R_LINE, or null */
+function pickMc(mx, my) {
+  const P = mcPickState();
+  if (!P || !P.rows.length) return null;
+  projectMc(P);
+  const { co, sx, sy, bx0, bx1, by0, by1 } = P;
+  let bd = R_LINE * R_LINE, bt = -1;
+  for (let t = 0; t < P.rows.length; t++) {
+    if (bx1[t] < mx - R_LINE || bx0[t] > mx + R_LINE || by1[t] < my - R_LINE || by0[t] > my + R_LINE) continue;
+    for (let m = co[t]; m < co[t + 1] - 1; m++) {
+      const ax = sx[m], ay = sy[m], bx = sx[m + 1], by = sy[m + 1];
+      if (ax !== ax || bx !== bx) continue;
+      if ((ax < mx - R_LINE && bx < mx - R_LINE) || (ax > mx + R_LINE && bx > mx + R_LINE) || (ay < my - R_LINE && by < my - R_LINE) || (ay > my + R_LINE && by > my + R_LINE)) continue;
+      const d2 = segDist2(mx, my, ax, ay, bx, by);
+      if (d2 < bd) { bd = d2; bt = t; }
+    }
+  }
+  return bt < 0 ? null : { row: P.rows[bt], d: Math.sqrt(bd) };
 }
 
 /** project in the background shortly after the camera settles, so a hover never pays for it */
@@ -1137,6 +1342,7 @@ function schedulePrewarm() {
   V.pkTimer = setTimeout(() => {
     if (!V.visible || !V.bundle) return;
     const P = pickState(); if (P) projectAll(P);
+    const Q = V.mc && V.mc.visible ? mcPickState() : null; if (Q) projectMc(Q);
   }, 150);
 }
 
@@ -1228,6 +1434,7 @@ function render() {
   V.root.updateMatrixWorld(true);
   updateLabels();
   if (V.flashes && V.flashes.visible) V.renderer.getDrawingBufferSize(M.flash.uniforms.uRes.value);
+  if (V.rib && V.rib.visible) V.renderer.getDrawingBufferSize(M.rib.uniforms.uRes.value);
   try { V.renderer.render(V.scene, V.camera); } catch (e) {
     if (!V.renderer.getContext().isContextLost()) throw e;   // lost mid-draw: redraw after restore
   }
