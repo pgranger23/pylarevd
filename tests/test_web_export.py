@@ -381,9 +381,9 @@ def test_rows_of_vectorised_lookup():
     assert _rows_of(keys, np.array([1000])).tolist() == [-1]
 
 
-def test_bundle_version_bumped_for_truth_filter():
+def test_bundle_version_bumped_for_trigger():
     from pylarevd.web import cache
-    assert cache.BUNDLE_VERSION >= 3
+    assert cache.BUNDLE_VERSION >= 4
 
 
 @needs_fd
@@ -445,3 +445,10 @@ def test_generator_missing_degrades(monkeypatch):
     assert "mc/generator" not in a and "mc_generators" not in h["meta"]
     assert any("mc/generator" in n for n in h["meta"]["notes"])
     assert "mc/from_interaction" in a and "dep/mc" in a
+
+
+@needs_fd
+def test_fd_has_no_trigger(fd_event):
+    f, (h, a) = fd_event
+    assert h["meta"]["available"]["trigger"] is False
+    assert "trigger" not in h["meta"] and not any(k.startswith(("tp/", "ta/", "tc/")) for k in a)

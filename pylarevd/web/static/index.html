@@ -70,6 +70,11 @@
     <label><input type="checkbox" data-ov="labels"> labels</label>
     <label><input type="checkbox" data-ov="pd"> PD</label>
   </div>
+  <div class="group overlays" id="trig-group" hidden>
+    <label title="trigger primitives: one above-threshold pulse on one channel (2-D views)"><input type="checkbox" data-ov="tp"> TPs</label>
+    <label title="trigger activities: boxes around the primitives each one groups (2-D views)"><input type="checkbox" data-ov="ta"> TAs</label>
+    <label title="trigger candidates: their time window across every 2-D panel"><input type="checkbox" data-ov="tc"> TCs</label>
+  </div>
   <div class="group" id="sel-group" hidden>
     <label title="what hovering / clicking a hit, space point or track selects; hold Shift to use the other one; none disables highlighting">select by
       <select id="sel-by"><option value="particle">particle</option><option value="slice">slice</option><option value="none">none</option></select>

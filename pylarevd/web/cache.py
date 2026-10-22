@@ -23,7 +23,7 @@ _REMOTE_STAT_TTL = 60.0     # s; the stat is needed on every request, the file r
 _remote_stats: dict = {}    # per-process: url -> (monotonic time, (mtime_ns, size))
 
 # Bump whenever the bundle contents change, so stale caches are not served.
-BUNDLE_VERSION = 3
+BUNDLE_VERSION = 4
 
 
 def _root() -> str:

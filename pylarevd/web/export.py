@@ -233,7 +233,8 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
     arrays: dict = {}
     notes: list[str] = []
     avail = dict.fromkeys(("hits", "spacepoints", "tracks", "showers", "vertices",
-                           "truth_mc", "deposits", "optical", "links", "pfp", "slice"), False)
+                           "truth_mc", "deposits", "optical", "links", "pfp", "slice",
+                           "trigger"), False)
     timing: dict = {}
     geometry = ev.geometry
     src = ev._src
@@ -629,6 +630,15 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
     section("optical", optical)
     if not avail["optical"]:
         meta["optical"] = {"notes": [n for n in notes if n.startswith("optical")]}
+
+    # ---- online trigger (TPs, TAs, TCs) ----------------------------------
+    def trigger():
+        from .trigger import export_trigger
+        displays = ([("", d)] + list(extra.items())) if d is not None else []
+        meta["summary"].extend(export_trigger(ev, hits, displays, arrays, meta))
+        avail["trigger"] = True
+    if src.art.find_product("dunedaq::trgdataformats::TriggerPrimitive"):
+        section("trigger", trigger)
 
     timing["total"] = round(time.time() - t_start, 3)
     return bundle_bytes("event", meta, arrays)
