@@ -1,0 +1,26 @@
+# Image built in the cluster from a local checkout:
+#   oc apply -f deploy/paas/build.yaml && oc start-build pylarevd --from-dir=. --follow
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: pylarevd
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: pylarevd
+spec:
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy: {}
+  output:
+    to:
+      kind: ImageStreamTag
+      name: pylarevd:latest
+  resources:
+    requests: {cpu: 50m, memory: 256Mi}
+    limits: {cpu: "2", memory: 2Gi}
+  successfulBuildsHistoryLimit: 3
+  failedBuildsHistoryLimit: 3

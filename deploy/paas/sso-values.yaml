@@ -1,0 +1,19 @@
+# CERN SSO proxy in front of the viewer (Helm chart "cern-auth-proxy" from the PaaS catalogue):
+#   helm repo add paas https://gitlab.cern.ch/api/v4/projects/124069/packages/helm/master
+#   helm install sso paas/cern-auth-proxy -f deploy/paas/sso-values.yaml
+upstream:
+  service:
+    name: pylarevd
+    port: 8080
+route:
+  hostname: pylarevd.web.cern.ch
+  path: "/"
+  # false: CERN network only. true: reachable from anywhere (still behind the SSO login).
+  public: false
+  annotations:
+    # cold event decodes take 10-25 s and GIF exports ~35 s (router default: 30 s)
+    haproxy.router.openshift.io/timeout: 180s
+authOptions:
+  # Who may log in is set on the Application Portal: by default "default-role" is every
+  # CERN and eduGAIN account; restrict it to an e-group there.
+  allowedRole: default-role

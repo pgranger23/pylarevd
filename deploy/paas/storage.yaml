@@ -1,0 +1,10 @@
+# Bundle cache (rebuilt on demand, so no backup). The data files are read from EOS over xrootd.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pylarevd-cache
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: cephfs-no-backup
+  resources:
+    requests: {storage: 40Gi}

@@ -969,8 +969,8 @@ def main(argv=None) -> int:
 
     from concurrent.futures import ProcessPoolExecutor
     from pylario import EventFile
-    from .cache import cache_dir, get_or_build_geometry
-    path = os.path.abspath(ns.file)
+    from .cache import cache_dir, canonical, get_or_build_geometry
+    path = canonical(ns.file)
     with EventFile(path) as f:
         n = len(f)
     entries = _parse_entries(ns.entries, n)

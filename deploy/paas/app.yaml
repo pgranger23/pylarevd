@@ -1,0 +1,69 @@
+# The viewer itself. It is not exposed directly: the CERN SSO proxy (sso-values.yaml)
+# owns the Route and forwards authenticated requests to the Service below.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pylarevd
+  annotations:
+    # redeploy whenever a new image is built
+    image.openshift.io/triggers: >-
+      [{"from":{"kind":"ImageStreamTag","name":"pylarevd:latest"},
+        "fieldPath":"spec.template.spec.containers[?(@.name==\"viewer\")].image"}]
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # one decode pool per cache, and the quota has room for one pod
+  selector:
+    matchLabels: {app: pylarevd}
+  template:
+    metadata:
+      labels: {app: pylarevd}
+    spec:
+      containers:
+        - name: viewer
+          image: pylarevd:latest
+          # Inputs: files or directories (local paths, or root:// URLs; a URL ending in '/'
+          # stands for every .root file in it, all opened at start-up).
+          # --allow-open-under: what the "open" box may reach (the server is not on localhost).
+          args: ["--workers", "4", "--precompute",
+                 "root://eosuser.cern.ch//eos/user/X/USER/SOME/FILE.root",
+                 "--allow-open-under", "root://eosuser.cern.ch//eos/user/X/USER/SOME/"]
+          ports:
+            - {name: http, containerPort: 8080}
+          env:
+            - {name: KRB5CCNAME, value: "FILE:/krb/krb5cc"}
+          resources:
+            # The project quota caps *requests* at 1 CPU / 4 GiB in total; decoding
+            # bursts above that up to the limits (each worker holds ~2 GB).
+            requests: {cpu: 600m, memory: 3Gi}
+            limits: {cpu: "6", memory: 16Gi}
+          startupProbe:         # files are opened before the port listens
+            httpGet: {path: /api/status, port: http}
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /api/status, port: http}
+            periodSeconds: 15
+            timeoutSeconds: 10
+          livenessProbe:
+            httpGet: {path: /api/status, port: http}
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+          volumeMounts:
+            - {name: cache, mountPath: /cache}
+            - {name: krb, mountPath: /krb}
+      volumes:
+        - name: cache
+          persistentVolumeClaim: {claimName: pylarevd-cache}
+        - name: krb
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pylarevd
+spec:
+  selector: {app: pylarevd}
+  ports:
+    - {name: http, port: 8080, targetPort: http}

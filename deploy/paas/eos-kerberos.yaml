@@ -1,0 +1,29 @@
+# Kerberos ticket for reading EOS over xrootd, kept fresh by CERN's helper running as a
+# native sidecar next to the viewer. Needs the secret first (a *service* account that
+# can read the files, never a personal one):
+#   oc create secret generic eos-credentials \
+#     --from-literal=KEYTAB_USER=<service account> --from-literal=KEYTAB_PWD=<its password>
+# then:  oc patch deployment pylarevd --type=strategic --patch-file deploy/paas/eos-kerberos.yaml
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: kerberos
+          image: gitlab-registry.cern.ch/paas-tools/kerberos-ticket-manager:RELEASE.2023.11.30T16-47-18Z
+          restartPolicy: Always          # sidecar: starts first, keeps renewing the ticket
+          args: ["daemon"]
+          env:
+            - {name: KRB5CCNAME, value: "FILE:/krb/krb5cc"}
+            - name: KEYTAB_USER
+              valueFrom: {secretKeyRef: {name: eos-credentials, key: KEYTAB_USER}}
+            - name: KEYTAB_PWD
+              valueFrom: {secretKeyRef: {name: eos-credentials, key: KEYTAB_PWD}}
+          startupProbe:                  # the viewer starts once a ticket exists
+            exec: {command: ["sh", "-c", "test -s /krb/krb5cc"]}
+            periodSeconds: 2
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          volumeMounts:
+            - {name: krb, mountPath: /krb}
