@@ -45,6 +45,8 @@ the whole file in the background.
 | Light | PD walls face-on, time strip, flash ellipses, play/pause, slider, log or linear clock |
 | Charge+Light | the 3-D view with the PD walls lit by the same time state as the Light panel |
 | 2D+3D | the two side by side |
+| Trigger | trigger primitives / activities / candidates in channel x time (time horizontal), four layouts: timeline + planes, detector-unit grid (APA x plane), hierarchy explorer (TC > TA tree, zoom, histograms), trigger vs reco |
+| Trigger + 2D | one plane of TPs next to the 2-D wire view, linked: hovering a TP marks it in 2-D, selecting a TA / TC zooms both |
 
 **Controls.** File, event (prev/next buttons, left/right arrow keys, or type an
 index in "go to" and press Enter), hit product, flash producer, colour by

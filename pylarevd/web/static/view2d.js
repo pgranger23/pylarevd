@@ -284,6 +284,7 @@ function init(container, app) {
   bindPointer();
   app.on('selection', () => { schedule(true, false); });
   app.on('truth', () => { schedule(true, false); });
+  app.on('trigger', onTrigger);
   if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => { if (V.visible) resize(); }).observe(container);
   V.ready = true;
 }
@@ -1064,6 +1065,7 @@ function renderOv() {
       if (ov.truth && tv) { const [x, y] = toPx(p, tv[0], tv[1]); drawMarkers(g, 'X', [x, y], th.mctrack, th.axes_bg); }
     }
     drawTrigger(g, p, r, th);
+    drawTriggerMark(g, p, th);
     // hover ring
     if (V.hover && V.hover.p === p) {
       const [x, y] = toPx(p, V.hover.h, V.hover.v);
@@ -1117,10 +1119,12 @@ function drawTrigger(g, p, r, th) {
       const t0 = b.get('tc/tick0'), t1 = b.get('tc/tick1'), tk = b.get('tc/tick');
       for (let j = 0; j < t0.length; j++) bands.push([-Infinity, Infinity, t0[j], t1[j], tk[j], j]);
     }
+    const ts = V.trigSel;
     for (const [h0, h1, v0, v1, vc, j] of bands) {
       const [x0, y0, x1, y1] = rect(h0, h1, v0, v1);
-      g.fillStyle = col.tc; g.globalAlpha = 0.09; g.fillRect(x0, y0, x1 - x0, y1 - y0);
-      g.globalAlpha = 0.8; g.strokeStyle = col.tc; g.lineWidth = 1; g.setLineDash([4, 3]);
+      const on = ts && ts.kind === 'tc' && ts.i === j;
+      g.fillStyle = col.tc; g.globalAlpha = on ? 0.18 : 0.09; g.fillRect(x0, y0, x1 - x0, y1 - y0);
+      g.globalAlpha = on ? 1 : 0.8; g.strokeStyle = col.tc; g.lineWidth = on ? 2.5 : 1; g.setLineDash([4, 3]);
       g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y0); g.moveTo(x0, y1); g.lineTo(x1, y1); g.stroke();
       g.setLineDash([]);
       if (Number.isFinite(vc)) { const y = toPx(p, 0, vc)[1]; g.lineWidth = 1.5; g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke(); }
@@ -1137,12 +1141,14 @@ function drawTrigger(g, p, r, th) {
       pa = cv ? Array.from(cv, (c) => { const k = byView.get(c); return k === undefined ? -1 : k; }) : null;
     }
     if (bx && pa) {
-      g.strokeStyle = col.ta; g.lineWidth = 1.5;
+      const ts = V.trigSel, taTc = b.get('ta/tc');
+      g.strokeStyle = col.ta;
       for (let k = 0; k < pa.length; k++) {
         if (pa[k] !== p) continue;
         const [x0, y0, x1, y1] = rect(bx[4 * k], bx[4 * k + 1], bx[4 * k + 2], bx[4 * k + 3]);
-        g.fillStyle = col.ta; g.globalAlpha = 0.06; g.fillRect(x0, y0, x1 - x0, y1 - y0);
-        g.globalAlpha = 0.95; g.strokeRect(x0, y0, x1 - x0, y1 - y0);
+        const on = ts && (ts.kind === 'ta' ? ts.i === ix[k] : taTc && taTc[ix[k]] === ts.i);
+        g.fillStyle = col.ta; g.globalAlpha = on ? 0.14 : 0.06; g.fillRect(x0, y0, x1 - x0, y1 - y0);
+        g.lineWidth = on ? 3 : 1.5; g.globalAlpha = 0.95; g.strokeRect(x0, y0, x1 - x0, y1 - y0);
         g.globalAlpha = 1; g.fillStyle = col.ta; g.textAlign = 'right';
         g.fillText(`TA ${ix[k]}`, Math.min(x1, r.px + r.pw) - 3, Math.max(Math.min(y0, y1), r.py) + 2);
         g.textAlign = 'left';
@@ -1150,6 +1156,68 @@ function drawTrigger(g, p, r, th) {
     }
   }
   g.globalAlpha = 1;
+}
+
+/** The TP hovered in the Trigger view ("Trigger + 2D"), at its wire position (wire space; TPs
+ *  with an ambiguous wire have none) or its channel and tick (readout space). */
+function drawTriggerMark(g, p, th) {
+  const i = V.trigTp, b = V.S.bundle;
+  if (i == null || !b.get('tp/channel')) return;
+  let h, v;
+  if (V.space === 'wire') {
+    const pan = b.get('tp/panel' + sfx());
+    if (!pan || pan[i] !== p) return;
+    h = b.get('tp/h')[i]; v = b.get('tp/v')[i];
+  } else {
+    if (readoutPanelOf().get(b.get('tp/chan_view')[i]) !== p) return;
+    h = b.get('tp/channel')[i]; v = b.get('tp/tick')[i];
+  }
+  if (!Number.isFinite(h) || !Number.isFinite(v)) return;
+  const [x, y] = toPx(p, h, v), c = trigColours(th).ta;
+  g.strokeStyle = th.axes_bg; g.lineWidth = 4; g.beginPath(); g.arc(x, y, 8, 0, 2 * Math.PI); g.stroke();
+  g.strokeStyle = c; g.lineWidth = 2; g.beginPath(); g.arc(x, y, 8, 0, 2 * Math.PI);
+  g.moveTo(x - 13, y); g.lineTo(x - 4, y); g.moveTo(x + 4, y); g.lineTo(x + 13, y); g.stroke();
+}
+
+/** Zoom every panel to the selected candidate's (drift window) or activity's (window and wires)
+ *  extent, from the exporter's 2-D boxes. */
+function fitTrigger(sel) {
+  const b = V.S.bundle, views = ensureViews(), wire = V.space === 'wire', sf = sfx();
+  const per = new Map();
+  const add = (p, h0, h1, v0, v1) => {
+    const c = per.get(p);
+    if (c) { c[0] = Math.min(c[0], h0); c[1] = Math.max(c[1], h1); c[2] = Math.min(c[2], v0); c[3] = Math.max(c[3], v1); }
+    else per.set(p, [h0, h1, v0, v1]);
+  };
+  if (wire) {
+    const kind = sel.kind === 'tc' ? 'tc2d' : 'ta2d';
+    const bx = b.get(`${kind}${sf}/box`), pa = b.get(`${kind}${sf}/panel`), ix = b.get(`${kind}${sf}/index`);
+    const taTc = b.get('ta/tc');
+    if (bx) for (let k = 0; k < pa.length; k++) {
+      if (ix[k] === sel.i || (sel.kind === 'tc' && kind === 'ta2d' && taTc && taTc[ix[k]] === sel.i)) add(pa[k], bx[4 * k], bx[4 * k + 1], bx[4 * k + 2], bx[4 * k + 3]);
+    }
+  } else if (sel.kind === 'ta') {
+    const bx = b.get('ta_ro/box'), ix = b.get('ta_ro/index'), cv = b.get('ta_ro/panel'), byView = readoutPanelOf();
+    if (bx) for (let k = 0; k < ix.length; k++) if (ix[k] === sel.i && byView.has(cv[k])) add(byView.get(cv[k]), bx[4 * k], bx[4 * k + 1], bx[4 * k + 2], bx[4 * k + 3]);
+  } else {
+    const t0 = b.get('tc/tick0'), t1 = b.get('tc/tick1');
+    if (t0) for (let p = 0; p < views.length; p++) add(p, NaN, NaN, t0[sel.i], t1[sel.i]);
+  }
+  for (const [p, [h0, h1, v0, v1]] of per) {
+    const v = views[p]; if (!v) continue;
+    v.cy = 0.5 * (v0 + v1); v.hy = Math.max(0.5 * (v1 - v0) * 1.4, 0.02 * v.init.hy);
+    if (sel.kind === 'ta' && Number.isFinite(h0)) { v.cx = 0.5 * (h0 + h1); v.hx = Math.max(0.5 * (h1 - h0) * 1.3, 0.02 * v.init.hx); if (V.linkW && wire) syncLinked(p); }
+  }
+}
+
+function onTrigger(m) {
+  if (!V.S) return;
+  if (m.type === 'hover') { V.trigTp = m.tp; schedule(false, true); return; }
+  if (m.type === 'select') {
+    V.trigSel = m.sel || null;
+    if (m.fit && m.sel && V.visible) fitTrigger(m.sel);
+    schedule(true, true);
+  }
 }
 
 function L_count(p) { const L = layout(); const [s, e] = L.ranges[p] || [0, 0]; return e - s; }
@@ -1502,7 +1570,7 @@ function updateHover(px, py, e) {
 // ---------------------------------------------------------------------------- module interface
 function freeEvent() {
   if (V.S) for (const r of V.S.res) r.free();
-  V.S = null; V.hover = null; hideTip();
+  V.S = null; V.hover = null; V.trigTp = null; V.trigSel = null; hideTip();
 }
 
 function setGeometry() { V.views = {}; }

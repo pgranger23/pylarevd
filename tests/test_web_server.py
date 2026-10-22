@@ -285,3 +285,22 @@ def test_frontend_dom_ids_and_truth_wiring():
     assert 'data-ov="rad"' not in html
     main = (static / "main.js").read_text()
     assert "initTruth(app)" in main and "resetTruth" in main
+
+
+def test_trigger_view_is_wired():
+    """The Trigger view is registered, has its panel, both view entries and its CSS layouts."""
+    import pathlib
+    static = pathlib.Path(__file__).resolve().parents[1] / "pylarevd" / "web" / "static"
+    html = (static / "index.html").read_text()
+    main = (static / "main.js").read_text()
+    css = (static / "style.css").read_text()
+    assert 'id="panel-trigger"' in html
+    assert 'value="trigger"' in html and 'value="trigger+2d"' in html
+    assert "import viewtrigger from './viewtrigger.js'" in main and "viewtrigger: 'panel-trigger'" in main
+    assert "'trigger+2d': ['viewtrigger', 'view2d']" in main and "trigger: []" in main
+    assert '#main[data-view="trigger"] #panel-trigger' in css and '#main[data-view="trigger+2d"]' in css
+    src = (static / "viewtrigger.js").read_text()
+    for layout in ("timeline", "grid", "explorer", "reco"):
+        assert f"'{layout}'" in src
+    view2d = (static / "view2d.js").read_text()
+    assert "app.on('trigger', onTrigger)" in view2d

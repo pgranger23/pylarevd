@@ -57,6 +57,10 @@ button:hover { border-color: var(--accent); }
 #main[data-view="charge+light"] #panel-3d, #main[data-view="charge+light"] #panel-light { display: block; }
 #main[data-view="2d+3d"] { --cols: 1fr 1fr; }
 #main[data-view="2d+3d"] #panel-3d, #main[data-view="2d+3d"] #panel-2d { display: block; }
+#main[data-view="trigger"] { --cols: 1fr; }
+#main[data-view="trigger"] #panel-trigger { display: block; }
+#main[data-view="trigger+2d"] { --cols: 1fr 1fr; }
+#main[data-view="trigger+2d"] #panel-trigger, #main[data-view="trigger+2d"] #panel-2d { display: block; }
 #main.tdrawer-open { grid-template-columns: var(--cols) minmax(0, var(--tw)); }
 .panel canvas { display: block; width: 100%; height: 100%; }
 #summary-bar {

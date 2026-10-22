@@ -514,3 +514,18 @@ def test_building_a_bundle_releases_the_decoded_event(tmp_path, monkeypatch):
     if not hasattr(f, "release"):
         pytest.skip("pylario without EventFile.release")
     assert data[:4] == b"EVDB" and 1 not in f._events and not f.art._baskets
+
+
+@needs_fd
+def test_geometry_bundle_readout_units():
+    """Every FD 1x2x6 channel has a view and an APA; each APA has 800 U, 800 V, 960 Z."""
+    from pylario import EventFile
+    from pylarevd.web.export import geometry_bundle
+    h, a = read_bundle(geometry_bundle(EventFile(FD).geometry))
+    cv, cu, units = a["ro/chan_view"], a["ro/chan_unit"], h["meta"]["units"]
+    assert len(units) == 12 and units[0]["name"] == "APA 1"
+    assert np.all(cu >= 0) and len(cv) == len(cu)
+    for k in range(len(units)):
+        assert [int(((cu == k) & (cv == v)).sum()) for v in (0, 1, 2)] == [800, 800, 960]
+    # units are numbered by their lowest channel
+    assert [u["channels"][0] for u in units] == sorted(u["channels"][0] for u in units)

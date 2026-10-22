@@ -98,3 +98,14 @@ def test_event_without_candidates():
     assert len(arrays["tp/channel"]) == 55206
     assert len(arrays["ta2d/box"]) == 0 and len(arrays["tc2d/box"]) == 0
     assert np.all(arrays["tp/ta"] == -1)
+
+
+@needs_pdhd
+def test_readout_units_pdhd():
+    from pylario import EventFile
+    from pylarevd.web.trigger import readout_units
+    cv, cu, units = readout_units(EventFile(PDHD).geometry)
+    assert [u["name"] for u in units] == ["APA 1", "APA 2", "APA 3", "APA 4"]
+    assert [u["tpcs"] for u in units] == [[0, 1], [2, 3], [4, 5], [6, 7]]
+    for k in range(4):
+        assert [int(((cu == k) & (cv == v)).sum()) for v in (0, 1, 2)] == [800, 800, 960]

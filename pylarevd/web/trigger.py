@@ -277,6 +277,54 @@ def export_trigger(ev, hits, displays, arrays, meta):
     return summary_lines(tr, counts, mhits)
 
 
+def readout_units(g):
+    """View (U/V/Z) and detector unit of every readout channel, and the units.
+
+    A unit is a set of TPCs tied together by shared channels -- an APA with
+    both its faces in a wrapped-wire detector (the induction wires wrap
+    around it), or a single readout plane assembly otherwise. Units are
+    numbered by their lowest channel. Returns ``(chan_view i8, chan_unit i16,
+    [{name, tpcs, channels: [lo, hi]}])``; -1 for a channel with no wire.
+    """
+    nch = int(g.nchannels)
+    chan = np.asarray(g.w_chan, np.int64)
+    tpc = np.asarray(g.w_tpc, np.int64)
+    parent = {int(t): int(t) for t in np.unique(tpc)}
+
+    def root(t):
+        while parent[t] != t:
+            parent[t] = parent[parent[t]]
+            t = parent[t]
+        return t
+
+    order = np.argsort(chan, kind="stable")
+    c, t = chan[order], tpc[order]
+    first = np.r_[True, c[1:] != c[:-1]]
+    head = t[np.flatnonzero(first)][np.cumsum(first) - 1]       # first TPC of each channel
+    for a, b in {(int(x), int(y)) for x, y in zip(head, t) if x != y}:
+        ra, rb = root(a), root(b)
+        if ra != rb:
+            parent[rb] = ra
+    roots = np.array([root(int(x)) for x in t[first]])           # per channel, in c order
+    chans = c[first]
+    lowest = {}
+    for r, ch in zip(roots.tolist(), chans.tolist()):
+        lowest[r] = min(lowest.get(r, ch), ch)
+    rank = {r: k for k, r in enumerate(sorted(lowest, key=lowest.get))}
+    chan_unit = np.full(nch, -1, np.int16)
+    ok = (chans >= 0) & (chans < nch)
+    chan_unit[chans[ok]] = [rank[r] for r in roots[ok].tolist()]
+    chan_view = np.asarray(g.channel_view[:nch], np.int8)
+    word = "APA" if g.wrapped_channels else "unit"
+    units = []
+    for r, k in sorted(rank.items(), key=lambda kv: kv[1]):
+        members = sorted(x for x in parent if root(x) == r)
+        mine = chans[roots == r]
+        units.append({"name": f"{word} {k + 1}", "tpcs": members,
+                      "channels": [int(mine.min()), int(mine.max())]})
+    return chan_view, chan_unit, units
+
+
 def summary_lines(tr, counts, mhits) -> list[str]:
     from pylario.event import TA_ALGORITHMS, TC_TYPES
     out = [f"trigger: {tr.n_tp:,} TPs, {tr.n_ta} TAs, {tr.n_tc} TCs "

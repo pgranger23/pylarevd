@@ -24,6 +24,9 @@ _remote_stats: dict = {}    # per-process: url -> (monotonic time, (mtime_ns, si
 
 # Bump whenever the bundle contents change, so stale caches are not served.
 BUNDLE_VERSION = 4
+#: the geometry bundle's own version (in its file name), so a geometry-only change
+#: does not throw away every cached event bundle
+GEOMETRY_VERSION = 2
 
 
 def _root() -> str:
@@ -146,8 +149,12 @@ def get_or_build_event(path, entry: int, hit_tag=None, flash_tag=None) -> bytes:
     return data
 
 
+def geometry_path(path) -> str:
+    return os.path.join(cache_dir(path), f"geometry_v{GEOMETRY_VERSION}.evdb")
+
+
 def get_or_build_geometry(path) -> bytes:
-    dest = os.path.join(cache_dir(path), "geometry.evdb")
+    dest = geometry_path(path)
     data = _read(dest)
     if data is not None:
         return data

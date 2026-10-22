@@ -531,3 +531,31 @@ Particle labels: reco tracks are matched against per-particle bounding boxes, an
 mean distance to the box already exceeds the 15 cm cut are skipped (an exact bound; same labels).
 What remains on the heavy samples is mostly pylario: `mc_particles` post-processing and `_freeze`,
 `neutrino_track_ids`, the generic `recob::Track` decode.
+
+## Trigger view (2026-10-22)
+
+`viewtrigger.js`, view entries **Trigger** (`trigger`) and **Trigger + 2D** (`trigger+2d` = viewtrigger +
+view2d). Channel x time with time horizontal; the channel axis is a ROW axis per plane (that plane's
+channels in channel order), so a plane panel is not two thirds empty between the interleaved U/V/Z
+blocks of each APA. Labels show real channel numbers, unit (APA) boundaries are dotted.
+
+- **Geometry** (geometry bundle, `GEOMETRY_VERSION` 2 in its file name so event bundles stay cached):
+  `ro/chan_view` i8 and `ro/chan_unit` i16 per channel, `meta.units` [{name, tpcs, channels}]. A unit =
+  the TPCs tied together by shared channels (`trigger.readout_units`): an APA and both its faces when
+  wires wrap; numbered by lowest channel.
+- **Layouts** (param `tlay`): `timeline` (TC/TA bars on a shared time axis, TA lanes packed greedily,
+  TP rate per pixel bin stacked by plane with the in-activity count as a line; one panel per plane;
+  details strip), `grid` (unit rows x plane columns), `explorer` (TC > TA tree; zoom panels for the
+  selection's (unit, plane) cells; histograms of time over threshold, log10 ADC sum, ADC peak and TPs
+  per channel, selection vs its planes, each normalised to its own maximum), `reco` (one plane, param
+  `tplane`, in the Trigger + 2D view).
+- **Rendering**: each TP is one instance (GL_LINES bar over the time over threshold + a square point at
+  the peak); instance buffers in (plane, unit, in-activity) order make every panel one contiguous
+  range with activity TPs on top. Colour (`tcol`): ADC sum / ADC peak (log), time over threshold
+  (linear), or activity (categorical; selection in the activity colour). Hits underlay (`thits`).
+- **Selection** (`tsel` = `tc:i` / `ta:i`, in the URL): click a TP (its TA), a TA box/bar or a TC
+  band/bar; `n` / `p` step candidates (activities without candidates), `z` zooms to it, Escape
+  clears; the selection's TPs are bright, the rest dimmed. The app event `trigger` ({type: 'select',
+  sel, fit} / {type: 'hover', tp}) drives view2d: bold TA box / TC band, zoom to the 2-D boxes
+  (`ta2d`, `tc2d`, `ta_ro`), and a ring on the hovered TP (wire position, or channel/tick).
+- No PDF export for the Trigger views (button disabled; screenshot works).

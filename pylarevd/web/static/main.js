@@ -48,6 +48,7 @@ import view3d from './view3d.js';
 import view2d from './view2d.js';
 import viewlight from './viewlight.js';
 import viewoptical from './viewoptical.js';
+import viewtrigger from './viewtrigger.js';
 import './exports.js';
 import { initSelection } from './select.js';
 import { initTruth } from './truth.js';
@@ -58,8 +59,9 @@ const VIEW_PANELS = {
   '3d': ['view3d'], '2d': ['view2d'], 'light': ['viewlight'],
   'charge+light': ['view3d', 'viewlight'], '2d+3d': ['view2d', 'view3d'],
   'optical': ['viewoptical'], 'flash3d': ['view3d'],
+  'trigger': ['viewtrigger'], 'trigger+2d': ['viewtrigger', 'view2d'],
 };
-const PANEL_IDS = { view3d: 'panel-3d', view2d: 'panel-2d', viewlight: 'panel-light', viewoptical: 'panel-optical' };
+const PANEL_IDS = { view3d: 'panel-3d', view2d: 'panel-2d', viewlight: 'panel-light', viewoptical: 'panel-optical', viewtrigger: 'panel-trigger' };
 
 const DEFAULTS = {
   file: '', entry: 0, hits: '', flash: '', view: '3d', color: 'charge', scale: 'auto',
@@ -71,7 +73,7 @@ const params = new URLSearchParams(location.search);
 const sampleName = params.get('sample');
 const api = sampleName ? sampleApi(sampleName) : serverApi();
 
-const listeners = { state: [], event: [], geometry: [], selection: [], truth: [] };
+const listeners = { state: [], event: [], geometry: [], selection: [], truth: [], trigger: [] };
 const extraParams = {};   // name -> default (string)
 
 const state = { ...DEFAULTS, ov: Object.fromEntries(OVERLAYS.map((o) => [o, OV_DEFAULT.includes(o)])) };
@@ -79,7 +81,7 @@ const state = { ...DEFAULTS, ov: Object.fromEntries(OVERLAYS.map((o) => [o, OV_D
 export const app = {
   state, api,
   bundle: null, geometry: null,
-  views: { view3d, view2d, viewlight, viewoptical },
+  views: { view3d, view2d, viewlight, viewoptical, viewtrigger },
   get theme() { return THEMES[state.theme] || THEMES.dark; },
   setState, registerParam, status, requestLayout,
   emit(type, ...args) {

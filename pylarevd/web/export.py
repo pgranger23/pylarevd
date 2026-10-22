@@ -192,6 +192,14 @@ def geometry_bundle(geometry) -> bytes:
     meta = {"detector": str(geometry.detector), "tpcs": [], "walls": [],
             "notes": []}
     arrays = {}
+    try:
+        from .trigger import readout_units
+        chan_view, chan_unit, units = readout_units(geometry)
+        arrays["ro/chan_view"] = chan_view
+        arrays["ro/chan_unit"] = chan_unit
+        meta["units"] = units
+    except Exception as exc:
+        meta["notes"].append(f"no readout units: {_fmt_exc(exc)}")
     for b in geometry.tpcs:
         meta["tpcs"].append([float(b.xmin), float(b.ymin), float(b.zmin),
                              float(b.xmax), float(b.ymax), float(b.zmax)])

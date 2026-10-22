@@ -136,7 +136,7 @@ def _build_job(kind: str, path: str, entry: int, hit_tag, flash_tag, cache_root=
     t = time.time()
     if kind == "geometry":
         cache.get_or_build_geometry(path)
-        dest = os.path.join(cache.cache_dir(path), "geometry.evdb")
+        dest = cache.geometry_path(path)
     else:
         cache.get_or_build_event(path, entry, hit_tag, flash_tag)
         dest = cache.entry_path(path, entry, hit_tag, flash_tag)
@@ -324,7 +324,7 @@ class App:
         from . import cache
         kind, path, entry, hit, flash = key
         if kind == "geometry":
-            return os.path.join(cache.cache_dir(path), "geometry.evdb")
+            return cache.geometry_path(path)
         return cache.entry_path(path, entry, hit, flash)
 
     def _submit(self, job: Job):

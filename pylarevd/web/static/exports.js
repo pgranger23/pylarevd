@@ -101,8 +101,9 @@ function refresh() {
   const sample = new URLSearchParams(location.search).has('sample');
   const view = app.state.view;
   const noServer = sample ? 'exports need the Python server (not available in static sample mode)' : '';
-  pdfBtn.disabled = busy || !!noServer;
-  pdfBtn.title = noServer || (view === '2d+3d'
+  const trig = view.startsWith('trigger') ? 'no PDF for the Trigger views yet: use "screenshot"' : '';
+  pdfBtn.disabled = busy || !!noServer || !!trig;
+  pdfBtn.title = noServer || trig || (view === '2d+3d'
     ? 'vector PDF (300 dpi) of the 2-D panels (2D+3D exports the 2-D side)'
     : 'vector PDF (300 dpi) of the current view, rendered on the server');
   const gifOk = GIF_VIEWS.includes(view) && !sample;
