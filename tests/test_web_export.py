@@ -502,3 +502,15 @@ def test_fd_has_no_trigger(fd_event):
     f, (h, a) = fd_event
     assert h["meta"]["available"]["trigger"] is False
     assert "trigger" not in h["meta"] and not any(k.startswith(("tp/", "ta/", "tc/")) for k in a)
+
+
+@needs_fd
+def test_building_a_bundle_releases_the_decoded_event(tmp_path, monkeypatch):
+    """A worker keeps the bundle on disk, not the decoded event or its baskets."""
+    from pylarevd.web import cache
+    monkeypatch.setenv("PYLAREVD_CACHE", str(tmp_path))
+    data = cache.get_or_build_event(FD, 1, "hitfd", None)
+    f = cache._open(FD)
+    if not hasattr(f, "release"):
+        pytest.skip("pylario without EventFile.release")
+    assert data[:4] == b"EVDB" and 1 not in f._events and not f.art._baskets

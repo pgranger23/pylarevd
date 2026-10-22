@@ -132,7 +132,16 @@ def get_or_build_event(path, entry: int, hit_tag=None, flash_tag=None) -> bytes:
     if data is not None:
         return data
     from .export import event_bundle
-    data = event_bundle(_open(path)[int(entry)], hit_tag=hit_tag, flash_tag=flash_tag)
+    f = _open(path)
+    try:
+        data = event_bundle(f[int(entry)], hit_tag=hit_tag, flash_tag=flash_tag)
+    finally:
+        # The bundle is all that is kept: the decoded event and the decompressed
+        # baskets would stay warm in this worker for nothing -- four ProtoDUNE-HD
+        # events held ~4.8 GB per worker, ~0.6 GB once released.
+        release = getattr(f, "release", None)          # pylario with EventFile.release
+        if release is not None:
+            release(int(entry))
     _atomic_write(dest, data)
     return data
 
