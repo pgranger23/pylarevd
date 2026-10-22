@@ -650,23 +650,42 @@ class _TruthInfo:
         # particle with a point inside the track's bounding box padded by
         # _PAD can pass the 15 cm cut (otherwise every sample is > _PAD away),
         # so only those are scored, exactly as before.
+        # Candidates are found per particle bounding box rather than per point
+        # (28k particles instead of 100k points, 3 s -> 0.3 s for 200 tracks
+        # on ProtoDUNE-HD): a box that does not reach the padded track box has
+        # every point > _PAD away, and one that reaches it but has no point
+        # inside can only score > _PAD, so neither can change the match.
         _PAD, _CUT = 60.0, 15.0
         if self.tracks is not None and mc is not None and len(mc):
             lens = np.array([len(p) for p in mc.points], dtype=np.int64)
             allp = (np.concatenate([np.asarray(p, float) for p in mc.points if len(p)])
                     if lens.sum() else np.zeros((0, 3)))
-            owner = np.repeat(np.arange(len(mc)), lens)
+            has = np.flatnonzero(lens)
+            first = (np.cumsum(lens) - lens)[has]
+            pmin = np.minimum.reduceat(allp, first, axis=0) if len(has) else allp
+            pmax = np.maximum.reduceat(allp, first, axis=0) if len(has) else allp
             for i, pts in enumerate(self.tracks.points):
                 if len(pts) == 0 or not len(allp):
                     continue
                 smp = np.asarray(pts[::max(1, len(pts) // 15)], float)
                 lo, hi = smp.min(0) - _PAD, smp.max(0) + _PAD
-                inbox = np.all((allp >= lo) & (allp <= hi), axis=1)
-                cand = np.unique(owner[inbox])
-                if not len(cand):
+                near = np.flatnonzero(np.all(pmin <= hi, axis=1) & np.all(pmax >= lo, axis=1))
+                if not len(near):
                     continue
-                sel = np.isin(owner, cand)
-                q, qo = allp[sel], owner[sel]
+                # The distance from a sample to a particle's bounding box bounds
+                # its distance to every point of the particle from below, so a
+                # particle whose mean box distance is >= _CUT can neither pass
+                # the cut nor beat one that does: skip the point-by-point work
+                # (the margin absorbs rounding in the bound).
+                out = np.maximum(np.maximum(pmin[near][None] - smp[:, None],
+                                            smp[:, None] - pmax[near][None]), 0.0)
+                bound = np.sqrt((out ** 2).sum(-1)).mean(axis=0)
+                near = near[bound < _CUT + 1e-6]
+                if not len(near):
+                    continue
+                cand, n = has[near], lens[has[near]]
+                at = np.repeat(first[near] - np.cumsum(n) + n, n) + np.arange(n.sum())
+                q, qo = allp[at], np.repeat(cand, n)
                 d = np.sqrt(((smp[:, None, :] - q[None, :, :]) ** 2).sum(-1))
                 starts = np.flatnonzero(np.r_[True, qo[1:] != qo[:-1]])
                 per = np.minimum.reduceat(d, starts, axis=1).mean(axis=0)
@@ -880,13 +899,26 @@ class EventDisplay(_TruthInfo):
                             int(obj)))
         return batches
 
-    def _faces(self, panel: PanelSpec):
-        """Yield (measurement direction, TPC boxes) for each face in a panel.
+    def _faces(self, panel: PanelSpec) -> list:
+        """(measurement direction, TPC boxes) for each face in a panel.
 
         A merged panel spans both APA faces, whose wires are mirror images and
         so have different measurement directions. Anything projected into the
         panel has to use the frame of the face it physically sits in.
+
+        Remembered per panel (and hit collection): every projection asks, and
+        rescanning the panel's hits each time cost 42 s of a ProtoDUNE-HD
+        export, one call per shower cone per panel.
         """
+        memo = self.__dict__.setdefault("_faces_memo", {})
+        hit = memo.get(id(panel))
+        if hit is not None and hit[0] is panel and hit[1] is self.hits:
+            return hit[2]
+        faces = list(self._scan_faces(panel))
+        memo[id(panel)] = (panel, self.hits, faces)
+        return faces
+
+    def _scan_faces(self, panel: PanelSpec):
         g, h = self.geometry, self.hits
         for sign in np.unique(h.drift_sign[panel.mask]):
             sub = panel.mask & (h.drift_sign == sign)
@@ -988,24 +1020,18 @@ class EventDisplay(_TruthInfo):
             return []
         return self._polylines(panel, self.mc.points)
 
-    def _shower_wx(self, panel: PanelSpec, *, n_azimuth: int = 24
-                   ) -> list[tuple[np.ndarray, np.ndarray]]:
-        """Shower cones as a projected silhouette.
-
-        The cone's base is a disc perpendicular to the shower axis. Its
-        appearance in a given panel depends on where that disc points relative
-        to the panel's measurement direction, so the whole rim is sampled and
-        projected. Taking a single arbitrary perpendicular instead makes the
-        drawn width an artefact of that choice -- and for collection wires,
-        where the measurement direction is z, a perpendicular built from the z
-        axis projects to zero width, drawing a cone with no opening at all.
-        """
-        if self.showers is None or not len(self.showers):
-            return []
+    def _shower_outlines(self, n_azimuth: int = 24) -> list:
+        """(shower index, (n_azimuth + 2, 3) outline: apex, rim, apex) of every
+        drawable cone. Independent of the panel, so computed once per shower
+        collection rather than once per panel."""
+        memo = self.__dict__.setdefault("_outline_memo", {})
+        hit = memo.get(n_azimuth)
+        if hit is not None and hit[0] is self.showers:
+            return hit[1]
         out = []
-        for start, direction, length, angle in zip(
+        for j, (start, direction, length, angle) in enumerate(zip(
                 self.showers.start, self.showers.direction,
-                self.showers.length, self.showers.open_angle):
+                self.showers.length, self.showers.open_angle)):
             if not (np.isfinite(length) and np.isfinite(angle)) or length <= 0:
                 continue
             norm = np.linalg.norm(direction)
@@ -1024,15 +1050,43 @@ class EventDisplay(_TruthInfo):
             tip = start + d * length
             phi = np.linspace(0.0, 2.0 * np.pi, n_azimuth, endpoint=False)
             rim = tip + r * (np.cos(phi)[:, None] * u1 + np.sin(phi)[:, None] * u2)
-            outline = np.vstack([start, rim, start])
-            pr = self.project_points(panel, outline[:, 0], outline[:, 1],
-                                     outline[:, 2], clip=False)
-            if pr is None:
-                continue
-            w, x = pr
+            out.append((j, np.vstack([start, rim, start])))
+        memo[n_azimuth] = (self.showers, out)
+        return out
+
+    def _shower_wx(self, panel: PanelSpec, *, n_azimuth: int = 24,
+                   with_index: bool = False) -> list:
+        """Shower cones as a projected silhouette.
+
+        The cone's base is a disc perpendicular to the shower axis. Its
+        appearance in a given panel depends on where that disc points relative
+        to the panel's measurement direction, so the whole rim is sampled and
+        projected. Taking a single arbitrary perpendicular instead makes the
+        drawn width an artefact of that choice -- and for collection wires,
+        where the measurement direction is z, a perpendicular built from the z
+        axis projects to zero width, drawing a cone with no opening at all.
+
+        Returns ``(w, x)`` per drawn cone, or ``(shower index, w, x)`` with
+        ``with_index``. All cones are projected in one call (a ProtoDUNE-HD
+        event has ~400 showers in each of 8 panels).
+        """
+        if self.showers is None or not len(self.showers):
+            return []
+        cones = self._shower_outlines(n_azimuth)
+        if not cones:
+            return []
+        pts = np.concatenate([o for _, o in cones])
+        pr = self.project_points(panel, pts[:, 0], pts[:, 1], pts[:, 2], clip=False)
+        if pr is None:
+            return []
+        w_all, x_all = pr
+        k = n_azimuth + 2
+        out = []
+        for i, (j, _outline) in enumerate(cones):
+            w, x = w_all[i * k:(i + 1) * k], x_all[i * k:(i + 1) * k]
             good = np.isfinite(w) & np.isfinite(x)
             if good.sum() > 2:
-                out.append((w[good], x[good]))
+                out.append((j, w[good], x[good]) if with_index else (w[good], x[good]))
         return out
 
     def _vertex_wx(self, panel: PanelSpec):

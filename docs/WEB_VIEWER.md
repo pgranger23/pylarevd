@@ -473,3 +473,20 @@ Files: `export.py`, `cache.py` (`BUNDLE_VERSION` 3), new `static/truth.js`, `sel
 A filter click costs the JS above plus one ordinary frame (the frame with a changed filter is the same as the frame without any change, so the filter itself adds nothing measurable to the rendering): about 30-45 ms from click to redraw, below the 50 ms target, except when hundreds of thousands of extra trajectories are switched on, where it is the software rasteriser drawing 3.6M line indices (99-137 ms). 2-D (PDSP e3): JS 3.5-6 ms, the 2-D frame is 98 ms with or without a change (FD with 307k deposits shown: ~790 ms, unchanged from `origin/main`). 3-D pick: median 0.3 ms with the interaction only; the first pick after switching the cosmics on 168 ms (the background prewarm normally absorbs it), then median 4 ms / max 8 ms with 584k extra trajectories; 2-D mc-line pick median 0.1 ms. Event load is unchanged within noise (`setEvent` PDSP e3 599 ms vs 593 ms on `origin/main`, FD 218 vs 196 ms; `view3d.setEvent` alone 117-137 vs 140-158 ms).
 
 **Known gaps.** The matplotlib PDF / PNG / GIF exports ignore the species / origin / per-particle filters and the highlight (only the all-or-nothing `rad` is derived); 2-D lines of non-interaction particles do not exist on PDSP (mc2d scope); the highlight ribbon is 3 px in 3-D only, 2-D uses the 3-px pass; in 3-D a trajectory is only picked where no reco object is within the pick radius; the tri-state box shows the state of the particle, not of a hidden ancestor (a visible child of a hidden parent is checked, as asked); reco-truth matches follow the exporter's labels (on PDSP only particles of the interaction can be matched; e.g. PDSP entry 1 has none); the first hover of a true particle per event pays the tree build (13-72 ms); bundles written before version 3 are not served (the cache key includes the version); the drawer open state, tab and tree expansion are not in the URL; deposits without a trajectory use the interaction / any-other-origin rule rather than their generator; `Esc` / `f` / `[ ] , .` are ignored while a text field has focus.
+
+## Export performance (2026-10-22)
+
+Event-bundle build times, same pylario (with its bulk MCParticle decoder) before and after this round,
+bundles checked identical array by array (meta minus timing):
+
+| event | before | after | what went |
+|---|---|---|---|
+| ProtoDUNE-HD BSM MC, entry 5 (861k particles, 393 showers, 200 tracks) | 44.6 s | 13.8 s | `EventDisplay._faces` rescanned the panel's hits on every call (once per shower cone per panel): now remembered per panel; cones projected all at once per panel |
+| FD atmospheric, entry 1 | 4.7 s | 2.5 s | true trajectories stacked with two `vstack`s each, per panel: now one vectorised stack reused by every panel |
+| FD atmospheric, entry 4 | 3.4 s | 1.2 s | same |
+| ProtoDUNE-SP, entry 1 | 8.9 s | 8.4 s | dominated by pylario (truth post-processing, neutrino-descendant ids) |
+
+Particle labels: reco tracks are matched against per-particle bounding boxes, and particles whose
+mean distance to the box already exceeds the 15 cm cut are skipped (an exact bound; same labels).
+What remains on the heavy samples is mostly pylario: `mc_particles` post-processing and `_freeze`,
+`neutrino_track_ids`, the generic `recob::Track` decode.

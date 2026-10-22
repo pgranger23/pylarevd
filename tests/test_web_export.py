@@ -102,6 +102,56 @@ def test_project_polylines_ragged(tmp_path):
     assert len(off) == len(own) + 1 and off[-1] == len(pts)
 
 
+def test_stack_polylines_matches_the_per_polyline_stack():
+    """The vectorised stack is row for row what stacking each polyline with a NaN
+    separator gave, and reusing it across panels changes nothing."""
+    from pylarevd.web.export import _stack_polylines, project_polylines
+    rng = np.random.default_rng(3)
+    polys = [rng.normal(0, 50, (n, 3)) for n in (5, 0, 1, 2, 40, 1, 3)] + \
+            [[[0, 0, 0], [1, 2, 3]]]                     # plain lists are accepted too
+    stacked, owner, gap = _stack_polylines(polys)
+    idx = [i for i, p in enumerate(polys) if len(p) >= 2]
+    sep = np.full((1, 3), np.nan)
+    ref = np.vstack([np.vstack([np.asarray(polys[i], float), sep]) for i in idx])
+    np.testing.assert_array_equal(stacked, ref)
+    assert owner.tolist() == sum(([i] * (len(polys[i]) + 1) for i in idx), [])
+    assert gap.dtype == bool and len(gap) == len(stacked)
+    assert _stack_polylines([np.zeros((1, 3)), []]) == (None, None, None)
+
+    class Fake:
+        def project_points(self, panel, x, y, z, clip=True):
+            return y.copy() + panel, x.copy()
+    for panel in (0, 1):
+        a = project_polylines(Fake(), panel, polys)
+        b = project_polylines(Fake(), panel, polys, (stacked, owner, gap))
+        for u, v in zip(a, b):
+            np.testing.assert_array_equal(u, v)
+
+
+def test_shower_cones_with_index_match_the_plain_list():
+    """with_index only adds the shower each outline belongs to."""
+    from pylarevd.display import EventDisplay
+
+    class Showers:
+        start = np.array([[0., 0, 0], [10, 10, 10], [5, 5, 5]])
+        direction = np.array([[0., 0, 1], [1, 0, 0], [0, 0, 0]])       # third: no axis
+        length = np.array([50., 30, 20])
+        open_angle = np.array([0.2, 0.1, 0.3])
+
+        def __len__(self):
+            return 3
+
+    d = EventDisplay.__new__(EventDisplay)
+    d.showers = Showers()
+    d.project_points = lambda panel, x, y, z, clip=True: (y + z, x)
+    plain = d._shower_wx(None)
+    indexed = d._shower_wx(None, with_index=True)
+    assert [j for j, _, _ in indexed] == [0, 1]
+    for (w, x), (_, w2, x2) in zip(plain, indexed):
+        np.testing.assert_array_equal(w, w2)
+        np.testing.assert_array_equal(x, x2)
+
+
 # ---- cache -----------------------------------------------------------------
 
 def test_cache_atomic_and_keyed(tmp_path, monkeypatch):

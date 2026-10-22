@@ -66,40 +66,70 @@ def _rows_of(keys, query):
     return out
 
 
+def _concat_points(polys) -> np.ndarray:
+    """(n_i, 3) point lists -> one (sum n_i, 3) float64 array.
+
+    One np.concatenate when they are already arrays (true trajectories, tracks);
+    converting each first cost ~1 us a polyline, 0.7 s for 600k trajectories.
+    """
+    try:
+        pts = np.concatenate(polys)
+        if pts.ndim == 2 and pts.shape[1] == 3:
+            return pts.astype(np.float64, copy=False)
+    except ValueError:
+        pass
+    return np.concatenate([np.asarray(p, np.float64).reshape(-1, 3) for p in polys])
+
+
 def _ragged(polys):
     """List of (n_i, 3) arrays -> (points f32, offsets u32)."""
-    lens = np.array([len(p) for p in polys], np.int64)
+    lens = np.fromiter((len(p) for p in polys), np.int64, len(polys))
     offsets = np.zeros(len(polys) + 1, np.uint32)
     offsets[1:] = np.cumsum(lens)
-    pts = (np.concatenate([np.asarray(p, np.float64).reshape(-1, 3) for p in polys])
-           if lens.sum() else np.zeros((0, 3)))
+    pts = _concat_points(polys) if lens.sum() else np.zeros((0, 3))
     return pts.astype(np.float32), offsets
 
 
-def project_polylines(d, panel, polys):
+def _stack_polylines(polys):
+    """Every polyline of >= 2 points, each followed by a NaN row, in one (m, 3)
+    array, the owner (index into ``polys``) of every row, and whether the step
+    into each row is longer than MAX_STEP_CM; (None, None, None) if there is no
+    polyline. Built once and reused for every panel: stacking per polyline (two
+    vstacks each) cost 3 s a panel set for 425k true trajectories."""
+    from ..display import MAX_STEP_CM
+    lens = np.fromiter((len(p) for p in polys), np.int64, len(polys))
+    idx = np.flatnonzero(lens >= 2)
+    if not len(idx):
+        return None, None, None
+    n = lens[idx]
+    pts = _concat_points([polys[i] for i in idx])
+    stacked = np.full((len(pts) + len(idx), 3), np.nan)
+    # each point moves down by one row per separator before it
+    stacked[np.arange(len(pts)) + np.repeat(np.arange(len(idx)), n)] = pts
+    with np.errstate(invalid="ignore"):
+        step = np.linalg.norm(np.diff(stacked, axis=0), axis=1)
+    gap = np.zeros(len(stacked), bool)
+    gap[1:] = step > MAX_STEP_CM
+    return stacked, np.repeat(idx, n + 1), gap
+
+
+def project_polylines(d, panel, polys, stacked=None):
     """Project 3-D polylines into one panel, vectorised.
 
     Same rules as ``EventDisplay._polylines`` (face clipping, break at a gap
     longer than MAX_STEP_CM) but keeps the owner of each run.  Returns
     ``(points (k,2) f32, offsets u32, owner i32)`` -- one run per row of
-    ``offsets`` -- or None when nothing lands in the panel.
+    ``offsets`` -- or None when nothing lands in the panel.  ``stacked`` is
+    ``_stack_polylines(polys)``, to reuse across panels.
     """
-    from ..display import MAX_STEP_CM
-    idx = [i for i, p in enumerate(polys) if len(p) >= 2]
-    if not idx:
+    stacked, owner_row, gap = stacked if stacked is not None else _stack_polylines(polys)
+    if stacked is None:
         return None
-    sep = np.full((1, 3), np.nan)
-    stacked = np.vstack([np.vstack([np.asarray(polys[i], np.float64), sep]) for i in idx])
-    owner_row = np.concatenate([np.full(len(polys[i]) + 1, i, np.int64) for i in idx])
     pr = d.project_points(panel, stacked[:, 0], stacked[:, 1], stacked[:, 2])
     if pr is None:
         return None
     w, x = pr
     valid = np.isfinite(w) & np.isfinite(x)
-    with np.errstate(invalid="ignore"):
-        step = np.linalg.norm(np.diff(stacked, axis=0), axis=1)
-    gap = np.zeros(len(stacked), bool)
-    gap[1:] = step > MAX_STEP_CM
     prev_valid = np.r_[False, valid[:-1]]
     new = valid & (~prev_valid | gap)
     run = np.cumsum(new) - 1
@@ -124,8 +154,9 @@ def _add_projected(arrays, prefix, key_name, d, polys, panels):
     """Project ``polys`` into every panel; store ``<prefix>/{points,offsets,panel,<key>}``."""
     pts, offs, pan, own = [], [], [], []
     base = 0
+    stacked = _stack_polylines(polys)
     for k, panel in enumerate(panels):
-        r = project_polylines(d, panel, polys)
+        r = project_polylines(d, panel, polys, stacked)
         if r is None:
             continue
         p, o, ow = r
@@ -414,17 +445,11 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         if d is not None:
             def cones(sf, dd):
                 polys, owner, pan = [], [], []
-                full = dd.showers
-                try:
-                    for k, panel in enumerate(dd.panels):
-                        for j in range(len(full)):
-                            dd.showers = full[[j]]
-                            for w, x in dd._shower_wx(panel):
-                                polys.append(np.column_stack([w, x]))
-                                owner.append(j)
-                                pan.append(k)
-                finally:
-                    dd.showers = full
+                for k, panel in enumerate(dd.panels):
+                    for j, w, x in dd._shower_wx(panel, with_index=True):
+                        polys.append(np.column_stack([w, x]))
+                        owner.append(j)
+                        pan.append(k)
                 lens = np.array([len(p) for p in polys], np.int64)
                 off = np.zeros(len(polys) + 1, np.uint32)
                 off[1:] = np.cumsum(lens)
