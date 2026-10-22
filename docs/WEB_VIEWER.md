@@ -514,3 +514,20 @@ colour. TA boxes and TC bands (dashed edges, solid line at the candidate time) a
 overlay. Hovering a TP (nearer than the nearest hit) shows channel, times, ADC sum and peak, how its
 wire was chosen and its TA -> TC. URL: overlays `tp`, `ta`, `tc` (TAs and TCs on by default).
 Not shown in 3-D.
+
+## Export performance (2026-10-22)
+
+Event-bundle build times, same pylario (with its bulk MCParticle decoder) before and after this round,
+bundles checked identical array by array (meta minus timing):
+
+| event | before | after | what went |
+|---|---|---|---|
+| ProtoDUNE-HD BSM MC, entry 5 (861k particles, 393 showers, 200 tracks) | 44.6 s | 13.8 s | `EventDisplay._faces` rescanned the panel's hits on every call (once per shower cone per panel): now remembered per panel; cones projected all at once per panel |
+| FD atmospheric, entry 1 | 4.7 s | 2.5 s | true trajectories stacked with two `vstack`s each, per panel: now one vectorised stack reused by every panel |
+| FD atmospheric, entry 4 | 3.4 s | 1.2 s | same |
+| ProtoDUNE-SP, entry 1 | 8.9 s | 8.4 s | dominated by pylario (truth post-processing, neutrino-descendant ids) |
+
+Particle labels: reco tracks are matched against per-particle bounding boxes, and particles whose
+mean distance to the box already exceeds the 15 cm cut are skipped (an exact bound; same labels).
+What remains on the heavy samples is mostly pylario: `mc_particles` post-processing and `_freeze`,
+`neutrino_track_ids`, the generic `recob::Track` decode.
