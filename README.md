@@ -52,7 +52,11 @@ index in "go to" and press Enter), hit product, flash producer, colour by
 cluster, slice, truth pdg), scale (auto/log/linear), colormap, dark/light
 theme, overlay checkboxes (truth, radiologicals, deposits, tracks, showers,
 vertices, labels, PD), reset view, screenshot (PNG of the visible panels) and
-link. Mouse: 3-D drag to rotate, right-drag to pan, wheel to zoom; 2-D wheel
+link. Files with the online trigger chain (`dunetrigger` TPs, TAs and TCs, e.g.
+the ProtoDUNE-HD BSM MC) add **TPs / TAs / TCs** checkboxes for the 2-D views:
+primitives as squares with a time-over-threshold bar (those in an activity
+highlighted), activities as boxes, candidates as time bands; hover a primitive
+for its details. Mouse: 3-D drag to rotate, right-drag to pan, wheel to zoom; 2-D wheel
 to zoom, drag to pan, double click to reset; hover shows hit info. The summary
 line under the panels expands to the full event summary on click.
 

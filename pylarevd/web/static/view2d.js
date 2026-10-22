@@ -54,7 +54,7 @@ const POINT_VS = `#version 300 es
 precision highp float;
 in vec2 aPos; in float aVal; in float aCat; in float aFlag; in float aSel; in float aMc;
 uniform vec2 uCenter, uHalf;
-uniform float uSize, uMode, uLog, uLo, uInv, uFloor, uCmapLo, uCmapHi, uSelOn, uTruthOn, uTruthSel;
+uniform float uSize, uMode, uLog, uLo, uInv, uFloor, uCmapLo, uCmapHi, uSelOn, uTruthOn, uTruthSel, uShapeOv;
 uniform sampler2D uLut;
 uniform highp sampler2D uSelTex, uTruthTex;
 uniform float uFbVis[18];
@@ -74,6 +74,7 @@ void main() {
     if (aCat < -0.5) { vColor = uUnassoc; z = 0.5; }
     else { vColor = uPal[int(mod(aCat, 8.0))]; vShape = mod(aCat, 5.0); }
   } else { vColor = uUniform; }
+  if (uShapeOv > 0.5) vShape = uShapeOv - 1.0;  // fixed marker (trigger primitives: squares)
   gl_PointSize = uSize;
   vSelF = 0.0;
   if (uSelOn > 0.5) {                          // selection: GPU-side lookup of the group id in a flag texture
@@ -522,6 +523,79 @@ function overlaySet(kind) {
   return set;
 }
 
+// ---- trigger primitives, sorted by panel; within a panel those in an activity come last (on top) ---
+/** Colours of the trigger layers (theme-aware). */
+function trigColours(th) {
+  const dark = th.name !== 'light';
+  return { tp: dark ? '#22d3ee' : '#0e7490', ta: dark ? '#e879f9' : '#a21caf', tc: dark ? '#fbbf24' : '#b45309' };
+}
+
+/** readout panel index of each U/V/Z view (panels_readout is one entry per plane present) */
+function readoutPanelOf() {
+  const specs = panelSpecs('readout'), m = new Map();
+  specs.forEach((sp, k) => m.set(sp.view, k));
+  return m;
+}
+
+function tpSet() {
+  const S = V.S, b = S.bundle, key = 'tp:' + vk();
+  if (S.sets[key] !== undefined) return S.sets[key];
+  let set = null;
+  const ch = b.get('tp/channel'), ta = b.get('tp/ta');
+  const tick = b.get('tp/tick'), t0 = b.get('tp/tick0'), tot = b.get('tp/tot');
+  const np = panelSpecs(V.space).length, ro = V.space === 'readout';
+  let pan = null;
+  if (ch && ro) {
+    const cv = b.get('tp/chan_view'), byView = readoutPanelOf();
+    pan = new Uint8Array(ch.length);
+    for (let i = 0; i < ch.length; i++) { const k = byView.get(cv[i]); pan[i] = k === undefined ? 255 : k; }
+  } else if (ch) pan = b.get('tp/panel' + sfx());
+  if (pan) {
+    const h = b.get('tp/h'), v = b.get('tp/v'), dv = b.get('tp/dvdt'), n = ch.length;
+    const slot = (i) => 2 * pan[i] + (ta[i] >= 0 ? 1 : 0);
+    const cnt = new Uint32Array(2 * np + 1);
+    for (let i = 0; i < n; i++) if (pan[i] < np) cnt[slot(i) + 1]++;
+    for (let k = 0; k < 2 * np; k++) cnt[k + 1] += cnt[k];
+    const m = cnt[2 * np], cur = cnt.slice(0, 2 * np);
+    const orig = new Uint32Array(m), pos = new Float32Array(2 * m), seg = new Float32Array(4 * m);
+    for (let i = 0; i < n; i++) {
+      if (pan[i] >= np) continue;
+      const k = cur[slot(i)]++;
+      // a bar over the time over threshold, through the peak; in wire space the ticks go through the
+      // drift conversion of the TP's own plane (dv = cm per tick)
+      const x = ro ? ch[i] : h[i], y = ro ? tick[i] : v[i];
+      const y0 = ro ? t0[i] : v[i] + (t0[i] - tick[i]) * dv[i], y1 = ro ? t0[i] + tot[i] : v[i] + (t0[i] + tot[i] - tick[i]) * dv[i];
+      orig[k] = i; pos[2 * k] = x; pos[2 * k + 1] = y;
+      seg[4 * k] = x; seg[4 * k + 1] = y0; seg[4 * k + 2] = x; seg[4 * k + 3] = y1;
+    }
+    const ranges = []; for (let p = 0; p < np; p++) ranges.push([cnt[2 * p], cnt[2 * p + 1], cnt[2 * p + 2]]);
+    set = { orig, pos: new Res(pos), seg: new Res(seg), ranges, n: m };
+    S.res.push(set.pos, set.seg);
+  }
+  S.sets[key] = set;
+  return set;
+}
+
+/** the TP under the cursor -> {p, k (slot), i (TP index), d (px)} or null; linear scan of the panel */
+function tpAtPx(px, py) {
+  if (!V.S || !V.app.state.ov.tp) return null;
+  const set = tpSet(); if (!set) return null;
+  const p = panelAt(px, py);
+  if (p < 0 || region(p, px, py) !== 'plot') return null;
+  const r = V.rects[p], v = V.views[vk()][p];
+  const [hx, hy] = toData(p, px, py);
+  const kx = r.pw / (2 * v.hx), ky = r.ph / (2 * v.hy), R = 6;
+  const [a, , e] = set.ranges[p], pos = set.pos.data;
+  let best = -1, bd = R * R;
+  for (let k = a; k < e; k++) {
+    const dx = (pos[2 * k] - hx) * kx, dy = (pos[2 * k + 1] - hy) * ky;
+    if (dx > R || dx < -R || dy > R || dy < -R) continue;
+    const d2 = dx * dx + dy * dy;
+    if (d2 <= bd) { bd = d2; best = k; }
+  }
+  return best < 0 ? null : { p, k: best, i: set.orig[best], d: Math.sqrt(bd) };
+}
+
 // ---- face projection (deposits, labels) ----------------------------------------------------------
 function projectPoint(panel, x, y, z) {
   for (const f of panel.faces || []) {
@@ -869,6 +943,26 @@ function renderGL() {
       gl.drawArrays(gl.POINTS, 0, he - hs);
       gl.disable(gl.DEPTH_TEST);
     }
+    // 3b. trigger primitives: a bar over the time over threshold plus a square at the peak; those that belong
+    //     to an activity are drawn last, in the activity colour
+    const tps = ov.tp ? tpSet() : null;
+    if (tps && tps.ranges[p] && tps.ranges[p][2] > tps.ranges[p][0]) {
+      const [a, m, e] = tps.ranges[p], tc = trigColours(th);
+      gl.disable(gl.DEPTH_TEST);
+      const Pl = V.progs.line.use();
+      Pl.v2('uCenter', v.cx, v.cy); Pl.v2('uHalf', v.hx, v.hy); Pl.v2('uOff', 0, 0);
+      Pl.f('uMode', 0); Pl.f('uDash', 0); Pl.f('uSelOn', 0); Pl.f('uSelPass', 0); Pl.f('uTruthOn', 0); Pl.f('uTruthSel', 0);
+      attrOff(gl, 1, 0); attrOff(gl, 2, -1); attrOff(gl, 3, -1);
+      const bars = (s0, n, col, alpha) => { if (!n) return; Pl.v3('uColor', rgb(col)); Pl.f('uAlpha', alpha); attrF(gl, 0, tps.seg, 2, s0 * 16); gl.drawArrays(gl.LINES, 0, 2 * n); };
+      bars(a, m - a, tc.tp, 0.6); bars(m, e - m, tc.ta, 0.9);
+      const P = V.progs.point.use();
+      P.v2('uCenter', v.cx, v.cy); P.v2('uHalf', v.hx, v.hy); P.f('uTruthOn', 0); P.f('uSelOn', 0);
+      pointsUniforms(P, 2, null, Math.max(2, baseSize * 0.9), th); P.f('uShapeOv', 3);
+      attrOff(gl, 1, 0); attrOff(gl, 2, 0); attrOff(gl, 3, 1); attrOff(gl, 4, -1); attrOff(gl, 5, -1);
+      const sq = (s0, n, col, alpha) => { if (!n) return; P.v3('uUniform', rgb(col)); P.f('uAlpha', alpha); attrF(gl, 0, tps.pos, 2, s0 * 8); gl.drawArrays(gl.POINTS, 0, n); };
+      sq(a, m - a, tc.tp, 0.55); sq(m, e - m, tc.ta, 0.9);
+      P.f('uShapeOv', 0);
+    }
     // 4. lines: mc (dashed), shower outline, tracks
     // lines: GL_LINES from the segment buffer (consecutive vertex pairs), widened by repeating the pass
     // with 1 device-px offsets. (Instanced screen-space quads were 5x slower under software GL.)
@@ -969,6 +1063,7 @@ function renderOv() {
       const tv = S.bundle.meta.truth && S.bundle.meta.truth['vertex2d' + sf] && S.bundle.meta.truth['vertex2d' + sf][p];
       if (ov.truth && tv) { const [x, y] = toPx(p, tv[0], tv[1]); drawMarkers(g, 'X', [x, y], th.mctrack, th.axes_bg); }
     }
+    drawTrigger(g, p, r, th);
     // hover ring
     if (V.hover && V.hover.p === p) {
       const [x, y] = toPx(p, V.hover.h, V.hover.v);
@@ -1001,6 +1096,60 @@ function renderOv() {
     g.fillText(`${sp.title || ''}   (${(L_count(p)).toLocaleString()} hits)`, r.px, r.py - 6);
     if (v.link && V.linkW && wire && views.length > 1) { g.fillStyle = th.fg_muted; g.font = '9px system-ui, sans-serif'; g.textAlign = 'right'; g.fillText('w linked', r.px + r.pw, r.py - 6); }
   }
+}
+
+/** Trigger candidates (time bands, a solid line at the candidate time) and activities (boxes around
+ *  their primitives) in panel p. Few objects: Canvas2D. */
+function drawTrigger(g, p, r, th) {
+  const b = V.S.bundle, ov = V.app.state.ov, wire = V.space === 'wire', sf = sfx(), col = trigColours(th);
+  if (!(ov.ta || ov.tc) || !b.get('tc/tick')) return;
+  const rect = (h0, h1, v0, v1) => {         // css px rectangle; infinite h spans the panel
+    const [xa, ya] = toPx(p, Number.isFinite(h0) ? h0 : 0, v1), [xb, yb] = toPx(p, Number.isFinite(h1) ? h1 : 0, v0);
+    return [Number.isFinite(h0) ? xa : r.px, ya, Number.isFinite(h1) ? xb : r.px + r.pw, yb];
+  };
+  g.font = '10px system-ui, sans-serif'; g.textBaseline = 'top'; g.textAlign = 'left';
+  if (ov.tc) {
+    const bands = [];
+    if (wire) {
+      const bx = b.get(`tc2d${sf}/box`), pa = b.get(`tc2d${sf}/panel`), vc = b.get(`tc2d${sf}/vc`), ix = b.get(`tc2d${sf}/index`);
+      if (bx) for (let k = 0; k < pa.length; k++) if (pa[k] === p) bands.push([bx[4 * k], bx[4 * k + 1], bx[4 * k + 2], bx[4 * k + 3], vc[k], ix[k]]);
+    } else {
+      const t0 = b.get('tc/tick0'), t1 = b.get('tc/tick1'), tk = b.get('tc/tick');
+      for (let j = 0; j < t0.length; j++) bands.push([-Infinity, Infinity, t0[j], t1[j], tk[j], j]);
+    }
+    for (const [h0, h1, v0, v1, vc, j] of bands) {
+      const [x0, y0, x1, y1] = rect(h0, h1, v0, v1);
+      g.fillStyle = col.tc; g.globalAlpha = 0.09; g.fillRect(x0, y0, x1 - x0, y1 - y0);
+      g.globalAlpha = 0.8; g.strokeStyle = col.tc; g.lineWidth = 1; g.setLineDash([4, 3]);
+      g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y0); g.moveTo(x0, y1); g.lineTo(x1, y1); g.stroke();
+      g.setLineDash([]);
+      if (Number.isFinite(vc)) { const y = toPx(p, 0, vc)[1]; g.lineWidth = 1.5; g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke(); }
+      g.globalAlpha = 1; g.fillStyle = col.tc;
+      g.fillText(`TC ${j}`, Math.max(x0, r.px) + 3, Math.max(Math.min(y0, y1), r.py) + 2);
+    }
+  }
+  if (ov.ta) {
+    let bx, pa, ix;
+    if (wire) { bx = b.get(`ta2d${sf}/box`); pa = b.get(`ta2d${sf}/panel`); ix = b.get(`ta2d${sf}/index`); }
+    else {
+      bx = b.get('ta_ro/box'); ix = b.get('ta_ro/index');
+      const cv = b.get('ta_ro/panel'), byView = readoutPanelOf();
+      pa = cv ? Array.from(cv, (c) => { const k = byView.get(c); return k === undefined ? -1 : k; }) : null;
+    }
+    if (bx && pa) {
+      g.strokeStyle = col.ta; g.lineWidth = 1.5;
+      for (let k = 0; k < pa.length; k++) {
+        if (pa[k] !== p) continue;
+        const [x0, y0, x1, y1] = rect(bx[4 * k], bx[4 * k + 1], bx[4 * k + 2], bx[4 * k + 3]);
+        g.fillStyle = col.ta; g.globalAlpha = 0.06; g.fillRect(x0, y0, x1 - x0, y1 - y0);
+        g.globalAlpha = 0.95; g.strokeRect(x0, y0, x1 - x0, y1 - y0);
+        g.globalAlpha = 1; g.fillStyle = col.ta; g.textAlign = 'right';
+        g.fillText(`TA ${ix[k]}`, Math.min(x1, r.px + r.pw) - 3, Math.max(Math.min(y0, y1), r.py) + 2);
+        g.textAlign = 'left';
+      }
+    }
+  }
+  g.globalAlpha = 1;
 }
 
 function L_count(p) { const L = layout(); const [s, e] = L.ranges[p] || [0, 0]; return e - s; }
@@ -1087,6 +1236,19 @@ function updateLegend() {
       if (ov.truth && av(`mc2d${sf}/points`)) html += line(th.mctrack, 'true trajectories', true);
       if (ov.dep && av('dep/xyz')) html += `<div><span class="sw" style="background:${th.truth}"></span>true deposits</div>`;
       if ((ov.vtx || ov.pvtx) && av(`vtx2d${sf}/hv`)) html += `<div><span class="sw" style="background:${th.vertex}"></span>vertices (${[ov.pvtx ? 'x' : '', ov.vtx ? 'D o' : ''].filter(Boolean).join(' ')})</div>`;
+    }
+    const tm = V.S.bundle.meta.trigger;
+    if (tm) {
+      const ov = st.ov, c = trigColours(th);
+      const sq = (col, name) => `<div><span class="sw" style="background:${col};border-radius:0"></span>${name}</div>`;
+      if (ov.tp) {
+        html += sq(c.tp, `TPs (${tm.n_tp.toLocaleString()})`);
+        if (tm.n_ta) html += sq(c.ta, 'TPs in an activity');
+        const amb = tm.placement && tm.placement.ambiguous;
+        if (V.space === 'wire' && amb) html += `<div style="color:var(--muted)">${amb.toLocaleString()} TPs on an ambiguous wire: readout view only</div>`;
+      }
+      if (ov.ta && tm.n_ta) html += `<div><span class="ln" style="border-color:${c.ta}"></span>TA box (${tm.n_ta})</div>`;
+      if (ov.tc && tm.n_tc) html += `<div><span class="ln" style="border-color:${c.tc};border-top-style:dashed"></span>TC window (${tm.n_tc})</div>`;
     }
   }
   if (html !== V.lastLegend) { V.legend.innerHTML = html; V.lastLegend = html; }
@@ -1255,8 +1417,49 @@ function objectsOf(o) {
   return { pfp: gp ? gp[o] : -1, slice: gs ? gs[o] : -1 };
 }
 
+function hitPxDist(hit, px, py) {
+  const L = layout(), [x, y] = toPx(hit.p, L.pos.data[2 * hit.i], L.pos.data[2 * hit.i + 1]);
+  return Math.hypot(x - px, y - py);
+}
+
+function showTip(lines, px, py) {
+  V.tip.textContent = lines.join('\n');
+  V.tip.style.display = 'block';
+  const cr = V.container.getBoundingClientRect();
+  let tx = px + 14, ty = py + 14;
+  const tw = V.tip.offsetWidth, th = V.tip.offsetHeight;
+  if (tx + tw > cr.width - 4) tx = px - tw - 10;
+  if (ty + th > cr.height - 4) ty = py - th - 10;
+  V.tip.style.left = `${Math.max(2, tx)}px`; V.tip.style.top = `${Math.max(2, ty)}px`;
+}
+
+const PLACE_TEXT = ['unique wire', 'wire of the matching hit', 'ambiguous wire', 'no active wire'];
+
+function tpTip(tp) {
+  const b = V.S.bundle, i = tp.i, at = (n) => { const a = b.get(n); return a ? a[i] : null; };
+  const set = tpSet(), hh = set.pos.data[2 * tp.k], vv = set.pos.data[2 * tp.k + 1];
+  V.hover = { p: tp.p, h: hh, v: vv };
+  const view = ['U', 'V', 'Z'][at('tp/chan_view')] || '?';
+  const lines = [`TP  channel ${at('tp/channel')} (${view})`,
+    `peak tick ${at('tp/tick').toFixed(1)}   start ${at('tp/tick0').toFixed(1)}`,
+    `over threshold ${at('tp/tot').toFixed(1)} ticks`,
+    `ADC sum ${fmt(at('tp/adc'))}   peak ${fmt(at('tp/peak'))}`];
+  if (V.space === 'wire') lines.push(`w ${hh.toFixed(1)} cm   x ${vv.toFixed(1)} cm   (${PLACE_TEXT[at('tp/place')] || ''})`);
+  const ta = at('tp/ta');
+  if (ta >= 0) { const tc = b.get('ta/tc'); lines.push(`in TA ${ta}${tc && tc[ta] >= 0 ? `  ->  TC ${tc[ta]}` : ''}`); }
+  else lines.push('in no activity');
+  return lines;
+}
+
 function updateHover(px, py, e) {
-  const hit = hitAtPx(px, py);
+  let hit = hitAtPx(px, py);
+  const tp = tpAtPx(px, py);
+  if (tp && (!hit || tp.d < hitPxDist(hit, px, py))) {
+    V.app.hoverObject(null);
+    showTip(tpTip(tp), px, py);
+    schedule(false, true);
+    return;
+  }
   if (!hit) {
     if (V.hover) { V.hover = null; schedule(false, true); }
     const ml = mcLineAt(px, py);
@@ -1360,6 +1563,8 @@ export default {
   /** test hook: synchronous render with GPU sync; returns ms */
   debugRender() { const t = performance.now(); renderGL(); V.gl.finish(); return performance.now() - t; },
   debugHitPx(p, k) { const L = layout(), i = L.ranges[p][0] + k; return toPx(p, L.pos.data[2 * i], L.pos.data[2 * i + 1]); },
+  /** test hook: css px of the k-th trigger primitive of panel p that belongs to an activity (inTa) or not */
+  debugTpPx(p, k, inTa) { const s = tpSet(); if (!s) return null; const i = s.ranges[p][inTa ? 1 : 0] + k; return i < s.ranges[p][inTa ? 2 : 1] ? toPx(p, s.pos.data[2 * i], s.pos.data[2 * i + 1]) : null; },
   debugState() { return { views: V.views, rects: V.rects, space: V.space, key: vk(), lastRenderMs: V.lastRenderMs }; },
   /** test hook: what a pointer at css px (x, y) of the panel container would pick -> {hit, mc} */
   debugPickAt(x, y) { return { hit: !!hitAtPx(x, y), mc: mcLineAt(x, y) }; },

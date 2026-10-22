@@ -473,3 +473,44 @@ Files: `export.py`, `cache.py` (`BUNDLE_VERSION` 3), new `static/truth.js`, `sel
 A filter click costs the JS above plus one ordinary frame (the frame with a changed filter is the same as the frame without any change, so the filter itself adds nothing measurable to the rendering): about 30-45 ms from click to redraw, below the 50 ms target, except when hundreds of thousands of extra trajectories are switched on, where it is the software rasteriser drawing 3.6M line indices (99-137 ms). 2-D (PDSP e3): JS 3.5-6 ms, the 2-D frame is 98 ms with or without a change (FD with 307k deposits shown: ~790 ms, unchanged from `origin/main`). 3-D pick: median 0.3 ms with the interaction only; the first pick after switching the cosmics on 168 ms (the background prewarm normally absorbs it), then median 4 ms / max 8 ms with 584k extra trajectories; 2-D mc-line pick median 0.1 ms. Event load is unchanged within noise (`setEvent` PDSP e3 599 ms vs 593 ms on `origin/main`, FD 218 vs 196 ms; `view3d.setEvent` alone 117-137 vs 140-158 ms).
 
 **Known gaps.** The matplotlib PDF / PNG / GIF exports ignore the species / origin / per-particle filters and the highlight (only the all-or-nothing `rad` is derived); 2-D lines of non-interaction particles do not exist on PDSP (mc2d scope); the highlight ribbon is 3 px in 3-D only, 2-D uses the 3-px pass; in 3-D a trajectory is only picked where no reco object is within the pick radius; the tri-state box shows the state of the particle, not of a hidden ancestor (a visible child of a hidden parent is checked, as asked); reco-truth matches follow the exporter's labels (on PDSP only particles of the interaction can be matched; e.g. PDSP entry 1 has none); the first hover of a true particle per event pays the tree build (13-72 ms); bundles written before version 3 are not served (the cache key includes the version); the drawer open state, tab and tree expansion are not in the URL; deposits without a trajectory use the interaction / any-other-origin rule rather than their generator; `Esc` / `f` / `[ ] , .` are ignored while a text field has focus.
+
+## Trigger primitives, activities and candidates (2026-10-22)
+
+Files carrying the online trigger chain of `dunetrigger` (`dunedaq::trgdataformats::TriggerPrimitive`,
+`TriggerActivityData`, `TriggerCandidateData` and the TA<->TP, TA<->TC associations) get three extra
+2-D overlays, **TPs**, **TAs** and **TCs**, in a toolbar group that only appears when the event has
+them. Reference sample: ProtoDUNE-HD BSM MC `prod_protodunehd_beamneutrino_*_gen_g4_detsim_trigger_reco_stage1_reco_stage2.root`
+(process `TriggersimProtoduneHDSimpleThrSimpleWinSimpleWin`: SimpleThreshold TPs, ADCSimpleWindow
+TAs on the collection plane, one TC per TA; ~30-55k TPs per event, TAs/TCs in 3 of 10 events).
+
+**Decoding** is `pylario.Event.trigger()` (`TriggerChain`): times go from the 62.5 MHz DTS clock to
+TPC ticks with the file's own `DetectorClocksService.ClockSpeedTPC` (`ticks = DTS * 2 / 62.5` for
+this MC). The TP times are all multiples of 32 DTS and reach 6138 reco ticks in a 6000-tick
+window, which fits TPs found on a 512 ns raw grid and hits on the 500 ns reco one. Checked against `hitpdune` peaks on the same channels: a constant offset per plane, the
+same at every drift time (hit - TP = +10 U, +5 V, -2 Z ticks; the TP peaks on the raw pulse, the
+hit on the deconvolved one). TPs are shown at their own times, not shifted. Absolute DAQ timestamps
+(data) are refused: placing them needs the readout window's start, not implemented.
+
+**Placement** (`web/trigger.py`). A TP has only a channel. Collection channels have one wire in an
+active volume; an induction channel has one or two there. Two: the wire of the disambiguated hit
+on the same channel whose peak, less the plane's offset measured in the event, falls in the TP's
+time over threshold (+-10 ticks). Without one the TP is "ambiguous" and drawn in the readout view
+only (2% of the TPs in the reference event). `tp/place` records which rule applied. Volumes whose
+drift is under a quarter of the longest (the 1.5 cm behind each ProtoDUNE-HD APA) are not active.
+
+**Bundle** (version 4): `tp/{channel,tick,tick0,tot,adc,peak,ta,chan_view,h,v,dvdt,place,panel,panel_view,panel_none}`
+(`v` is x at the peak, `dvdt` cm per tick of the TP's plane, so the client draws the time over
+threshold as a bar); `ta/{tick0,tick1,tick_peak,adc,adc_peak,ch_peak,alg,tc,n_tp}`;
+`tc/{tick0,tick1,tick,type,alg,n_ta}`; per grouping `ta2d{sf}/{box,panel,index}` (box `[h0,h1,v0,v1]`
+around the activity's TPs per panel and plane, spanning its time window) and `tc2d{sf}/{box,vc,panel,index}`
+(the window in every active plane of every panel, clipped to the volume, planes with the same drift
+range merged); readout boxes `ta_ro/{box,panel (= view),index}`; readout TC bands come from `tc/*`.
+`meta.trigger`: counts, `placement`, `hit_tp_offset`, `match_hits`, enum names. `available.trigger`.
+Summary lines list every TC and TA.
+
+**Frontend** (`view2d.js`). TPs: one GL_LINES bar over the time over threshold plus a square marker
+(`uShapeOv` in the point shader) at the peak, cyan; those in an activity drawn last in the activity
+colour. TA boxes and TC bands (dashed edges, solid line at the candidate time) are Canvas2D on the
+overlay. Hovering a TP (nearer than the nearest hit) shows channel, times, ADC sum and peak, how its
+wire was chosen and its TA -> TC. URL: overlays `tp`, `ta`, `tc` (TAs and TCs on by default).
+Not shown in 3-D.

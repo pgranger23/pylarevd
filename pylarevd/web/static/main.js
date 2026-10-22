@@ -52,8 +52,8 @@ import './exports.js';
 import { initSelection } from './select.js';
 import { initTruth } from './truth.js';
 
-const OVERLAYS = ['truth', 'dep', 'tracks', 'showers', 'pvtx', 'vtx', 'labels', 'pd'];
-const OV_DEFAULT = ['truth', 'tracks', 'showers', 'pvtx', 'vtx', 'pd'];
+const OVERLAYS = ['truth', 'dep', 'tracks', 'showers', 'pvtx', 'vtx', 'labels', 'pd', 'tp', 'ta', 'tc'];
+const OV_DEFAULT = ['truth', 'tracks', 'showers', 'pvtx', 'vtx', 'pd', 'ta', 'tc'];
 const VIEW_PANELS = {
   '3d': ['view3d'], '2d': ['view2d'], 'light': ['viewlight'],
   'charge+light': ['view3d', 'viewlight'], '2d+3d': ['view2d', 'view3d'],
@@ -369,6 +369,7 @@ async function loadEvent() {
     if (meta.flash_tag && meta.flash_tag !== state.flash) patch.flash = meta.flash_tag;
     if (Object.keys(patch).length) setState(patch);
     setSummary(meta.summary || []);
+    $('trig-group').hidden = !(meta.available && meta.available.trigger);
     const t2 = performance.now();
     for (const v of Object.values(app.views)) guard(v, 'setEvent', bundle, app.geometry);
     for (const fn of listeners.event.slice()) fn(bundle, app.geometry);

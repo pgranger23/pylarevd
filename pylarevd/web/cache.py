@@ -13,7 +13,7 @@ import tempfile
 _EVENT_FILES: dict = {}     # per-process: path -> EventFile (workers reuse it)
 
 # Bump whenever the bundle contents change, so stale caches are not served.
-BUNDLE_VERSION = 3
+BUNDLE_VERSION = 4
 
 
 def _root() -> str:
