@@ -41,9 +41,9 @@ const V = {
   gl: null, glc: null, ovc: null, ov: null, W: 0, H: 0, dpr: 1, cw: 0, ch: 0,
   progs: {}, lutTex: null, lutName: null,
   S: null,                       // per-event state
-  views: {},                     // space -> [{cx,cy,hx,hy,link,init:{hx,hy}}]
+  views: {},                     // space -> [{cx,cy,hx,hy,link,init:{hx,hy}}]; link = drift group or -1
   rects: [],                     // layout per panel (css px)
-  space: 'wire', linkW: true, size: 3,
+  space: 'wire', linkD: true, size: 3,
   bar: {}, legend: null, tip: null, hover: null,
   needGL: false, needOv: false, raf: 0, drag: null, shot: null,
   lastRenderMs: 0, lastLegend: '',
@@ -264,14 +264,14 @@ function init(container, app) {
   const bar = document.createElement('div'); bar.className = 'v2d-bar';
   bar.innerHTML = '<label title="how wire-plane hits are grouped into panels">panels <select class="mg"><option value="orientation">by wire orientation</option><option value="view">by view (U/V/Z)</option><option value="none">split every face</option></select></label>' +
     '<label>space <select class="sp"><option value="wire">wire (w, x)</option><option value="readout">readout (channel, tick)</option></select></label>' +
-    '<label title="share the w axis across panels (pan/zoom together)"><input type="checkbox" class="lk" checked> link w</label>' +
+    '<label title="share the drift axis (x, or tick in readout space) across panels covering the same drift volume (pan/zoom together)"><input type="checkbox" class="lk" checked> link drift</label>' +
     '<label>size <input type="range" class="sz" min="1" max="10" step="0.5" value="3"></label>' +
     '<button class="rs" title="reset zoom of all panels (or double-click)">reset zoom</button>';
   container.appendChild(bar);
   V.bar = { mg: bar.querySelector('.mg'), sel: bar.querySelector('.sp'), lk: bar.querySelector('.lk'), sz: bar.querySelector('.sz'), rs: bar.querySelector('.rs') };
   V.bar.mg.addEventListener('change', () => app.setState({ merge2d: V.bar.mg.value }));
   V.bar.sel.addEventListener('change', () => app.setState({ space2d: V.bar.sel.value }));
-  V.bar.lk.addEventListener('change', () => { V.linkW = V.bar.lk.checked; if (V.linkW) syncLinked(-1); schedule(true, true); });
+  V.bar.lk.addEventListener('change', () => { V.linkD = V.bar.lk.checked; if (V.linkD) syncLinked(-1); schedule(true, true); });
   V.bar.sz.addEventListener('input', () => { V.size = parseFloat(V.bar.sz.value); schedule(true, false); });
   V.bar.rs.addEventListener('click', () => resetViews());
   V.legend = document.createElement('div'); V.legend.className = 'hud-legend v2d-legend'; container.appendChild(V.legend);
@@ -756,6 +756,29 @@ function dataExtent(L, p) {
   return [x0, x1, y0, y1];
 }
 
+/** Drift groups: panels whose drift (vertical) ranges mostly overlap share that axis. The w axes
+ *  are never shared: U, V and Z wire coordinates are different projections, so a common w range
+ *  only lines up by accident. Readout panels all share the tick axis. Returns a group per panel,
+ *  -1 for a panel alone in its group. */
+function driftGroups(specs, ext, space) {
+  const n = specs.length, g = new Array(n).fill(-1);
+  const rng = specs.map((s, p) => s.vrange || [ext[p][2], ext[p][3]]);
+  const overlap = (a, b) => {
+    const lo = Math.max(a[0], b[0]), hi = Math.min(a[1], b[1]);
+    return hi - lo > 0.5 * Math.min(a[1] - a[0], b[1] - b[0]);
+  };
+  let k = 0;
+  for (let p = 0; p < n; p++) {
+    if (g[p] >= 0) continue;
+    g[p] = k;
+    for (let q = p + 1; q < n; q++) if (g[q] < 0 && (space === 'readout' || overlap(rng[p], rng[q]))) g[q] = k;
+    k++;
+  }
+  const size = new Map();
+  for (const x of g) size.set(x, (size.get(x) || 0) + 1);
+  return g.map((x) => (size.get(x) > 1 ? x : -1));
+}
+
 function frameViews(space) {
   const L = layout(), specs = L.specs;
   const ext = specs.map((s, p) => {
@@ -764,17 +787,19 @@ function frameViews(space) {
     return e;
   });
   const pad = (lo, hi) => { const d = (hi - lo) || 1; return [lo - 0.03 * d, hi + 0.03 * d]; };
-  let pl = Infinity, ph = -Infinity;
-  for (const e of ext) { pl = Math.min(pl, e[0]); ph = Math.max(ph, e[1]); }
-  const pooled = ph - pl;
+  const groups = driftGroups(specs, ext, space);
+  const pooled = new Map();          // group -> [lo, hi] of its panels' drift extents
+  groups.forEach((k, p) => {
+    if (k < 0) return;
+    const c = pooled.get(k), e = ext[p];
+    pooled.set(k, c ? [Math.min(c[0], e[2]), Math.max(c[1], e[3])] : [e[2], e[3]]);
+  });
   return specs.map((s, p) => {
-    const e = ext[p];
-    const own = e[1] - e[0];
-    const share = space === 'wire' && specs.length > 1 && !(pooled > 0 && own < 0.35 * pooled);
-    const [x0, x1] = share ? pad(pl, ph) : pad(e[0], e[1]);
-    const [y0, y1] = pad(e[2], e[3]);
+    const e = ext[p], k = groups[p];
+    const [x0, x1] = pad(e[0], e[1]);
+    const [y0, y1] = k >= 0 ? pad(...pooled.get(k)) : pad(e[2], e[3]);
     const hx = (x1 - x0) / 2, hy = (y1 - y0) / 2;
-    return { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, hx, hy, link: share, init: { hx, hy } };
+    return { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, hx, hy, link: k, init: { hx, hy } };
   });
 }
 
@@ -792,11 +817,15 @@ function resetViews() {
   schedule(true, true);
 }
 
+/** Copy panel src's drift range to the rest of its group; src < 0 aligns every group on its first
+ *  panel. */
 function syncLinked(src) {
-  const vs = V.views[vk()]; if (!vs || !V.linkW) return;
-  let ref = src >= 0 ? vs[src] : vs.find((v) => v.link);
-  if (!ref) return;
-  for (const v of vs) if (v.link && v !== ref) { v.cx = ref.cx; v.hx = ref.hx; }
+  const vs = V.views[vk()]; if (!vs || !V.linkD) return;
+  const refs = src >= 0 ? [vs[src]] : vs.filter((v, i) => v.link >= 0 && vs.findIndex((q) => q.link === v.link) === i);
+  for (const ref of refs) {
+    if (!ref || !(ref.link >= 0)) continue;
+    for (const v of vs) if (v.link === ref.link && v !== ref) { v.cy = ref.cy; v.hy = ref.hy; }
+  }
 }
 
 // ---------------------------------------------------------------------------- layout / geometry of the canvas
@@ -1096,7 +1125,7 @@ function renderOv() {
     g.save(); g.translate(r.x + 11, r.py + r.ph / 2); g.rotate(-Math.PI / 2); g.fillText(sp.vlabel || '', 0, 0); g.restore();
     g.fillStyle = th.fg; g.font = '11px system-ui, sans-serif'; g.textAlign = 'left';
     g.fillText(`${sp.title || ''}   (${(L_count(p)).toLocaleString()} hits)`, r.px, r.py - 6);
-    if (v.link && V.linkW && wire && views.length > 1) { g.fillStyle = th.fg_muted; g.font = '9px system-ui, sans-serif'; g.textAlign = 'right'; g.fillText('w linked', r.px + r.pw, r.py - 6); }
+    if (v.link >= 0 && V.linkD) { g.fillStyle = th.fg_muted; g.font = '9px system-ui, sans-serif'; g.textAlign = 'right'; g.fillText(wire ? 'drift linked' : 'ticks linked', r.px + r.pw, r.py - 6); }
   }
 }
 
@@ -1203,10 +1232,20 @@ function fitTrigger(sel) {
     const t0 = b.get('tc/tick0'), t1 = b.get('tc/tick1');
     if (t0) for (let p = 0; p < views.length; p++) add(p, NaN, NaN, t0[sel.i], t1[sel.i]);
   }
-  for (const [p, [h0, h1, v0, v1]] of per) {
+  // linked panels get the union of their group's drift windows, so they stay aligned
+  const span = new Map();
+  for (const [p, [, , v0, v1]] of per) {
     const v = views[p]; if (!v) continue;
-    v.cy = 0.5 * (v0 + v1); v.hy = Math.max(0.5 * (v1 - v0) * 1.4, 0.02 * v.init.hy);
-    if (sel.kind === 'ta' && Number.isFinite(h0)) { v.cx = 0.5 * (h0 + h1); v.hx = Math.max(0.5 * (h1 - h0) * 1.3, 0.02 * v.init.hx); if (V.linkW && wire) syncLinked(p); }
+    const k = V.linkD && v.link >= 0 ? 'g' + v.link : 'p' + p, c = span.get(k);
+    span.set(k, c ? [Math.min(c[0], v0), Math.max(c[1], v1)] : [v0, v1]);
+  }
+  views.forEach((v, p) => {
+    const w = span.get(V.linkD && v.link >= 0 ? 'g' + v.link : 'p' + p); if (!w) return;
+    v.cy = 0.5 * (w[0] + w[1]); v.hy = Math.max(0.5 * (w[1] - w[0]) * 1.4, 0.02 * v.init.hy);
+  });
+  if (sel.kind === 'ta') for (const [p, [h0, h1]] of per) {
+    const v = views[p];
+    if (v && Number.isFinite(h0)) { v.cx = 0.5 * (h0 + h1); v.hx = Math.max(0.5 * (h1 - h0) * 1.3, 0.02 * v.init.hx); }
   }
 }
 
@@ -1344,10 +1383,7 @@ function zoomAt(p, px, py, fx, fy) {
   const vs = V.views[vk()], v = vs[p];
   const [dx, dy] = toData(p, px, py);
   const lim = (view, f, h) => Math.min(view.init[h] * 30, Math.max(view.init[h] / 2000, f));
-  if (fx !== 1) {
-    const ap = vs.filter((q, i) => i === p || (V.linkW && v.link && q.link));
-    for (const q of ap) { const nh = lim(q, q.hx / fx, 'hx'); const f = q.hx / nh; q.cx = dx - (dx - q.cx) / f; q.hx = nh; }
-  }
+  if (fx !== 1) { const nh = lim(v, v.hx / fx, 'hx'); const f = v.hx / nh; v.cx = dx - (dx - v.cx) / f; v.hx = nh; }
   if (fy !== 1) { const nh = lim(v, v.hy / fy, 'hy'); const f = v.hy / nh; v.cy = dy - (dy - v.cy) / f; v.hy = nh; }
   syncLinked(p);
 }
