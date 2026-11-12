@@ -89,7 +89,8 @@ def place_primitives(ev, tr, hits):
         return row, place, None, {}
 
     # candidate segments per channel, active volumes only
-    seg = np.flatnonzero(np.isin(g.w_tpc, _active_tpcs(g)))
+    active = _active_tpcs(g)
+    seg = np.flatnonzero(np.isin(g.w_tpc, active))
     seg = seg[np.argsort(g.w_chan[seg], kind="stable")]
     seg_chan = g.w_chan[seg].astype(np.int64)
     ch = tr.tp_channel.astype(np.int64)
@@ -125,7 +126,7 @@ def place_primitives(ev, tr, hits):
         for i in np.flatnonzero(b > a):
             j = a[i] + int(np.argmin(np.abs(ht[a[i]:b[i]] - want[i])))
             r = hrow[j]
-            if g.w_chan[r] == ch[amb[i]] and np.isin(g.w_tpc[r], _active_tpcs(g)):
+            if g.w_chan[r] == ch[amb[i]] and np.isin(g.w_tpc[r], active):
                 row[amb[i]] = r
                 place[amb[i]] = PLACE_HIT
     return row, place, h, off
