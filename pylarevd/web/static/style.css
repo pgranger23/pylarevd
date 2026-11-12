@@ -26,12 +26,11 @@ body {
 #toolbar .group { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 #toolbar label { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); white-space: nowrap; }
 #toolbar .overlays label { color: var(--fg); }
-select, input[type=number], button {
+select, input[type=number], input[type=text], button {
   background: var(--axes-bg); color: var(--fg); border: 1px solid var(--legend-edge);
   border-radius: 4px; padding: 2px 6px; font: inherit;
 }
 input[type=number] { width: 5em; }
-input[type=text] { background: var(--axes-bg); color: var(--fg); border: 1px solid var(--legend-edge); border-radius: 4px; padding: 2px 6px; font: inherit; }
 #inp-open { width: 22em; }
 button:disabled, input:disabled { opacity: 0.5; cursor: not-allowed; }
 .open-msg { color: var(--muted); max-width: 40em; white-space: normal; }
@@ -42,25 +41,16 @@ button:hover { border-color: var(--accent); }
 .evlabel span { color: var(--fg); min-width: 11em; text-align: center; display: inline-block; font-variant-numeric: tabular-nums; }
 #main { flex: 1; min-height: 0; position: relative; display: grid; gap: 2px; background: var(--grid); --cols: 1fr; --tw: 340px; grid-template-columns: var(--cols); }
 .panel { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--axes-bg); display: none; }
-/* view layouts: which panels are visible and how they tile (--cols = the view panels; the truth drawer adds one column) */
-#main[data-view="3d"] { --cols: 1fr; }
-#main[data-view="3d"] #panel-3d { display: block; }
-#main[data-view="2d"] { --cols: 1fr; }
-#main[data-view="2d"] #panel-2d { display: block; }
-#main[data-view="light"] { --cols: 1fr; }
-#main[data-view="light"] #panel-light { display: block; }
-#main[data-view="optical"] { --cols: 1fr; }
-#main[data-view="optical"] #panel-optical { display: block; }
-#main[data-view="flash3d"] { --cols: 1fr; }
-#main[data-view="flash3d"] #panel-3d { display: block; }
+/* view layouts (main.js VIEW_PANELS): which panels each view shows and how they tile (--cols = the view
+   panels, one 1fr column unless set here; the truth drawer adds one column) */
 #main[data-view="charge+light"] { --cols: 3fr 2fr; }
-#main[data-view="charge+light"] #panel-3d, #main[data-view="charge+light"] #panel-light { display: block; }
-#main[data-view="2d+3d"] { --cols: 1fr 1fr; }
-#main[data-view="2d+3d"] #panel-3d, #main[data-view="2d+3d"] #panel-2d { display: block; }
-#main[data-view="trigger"] { --cols: 1fr; }
-#main[data-view="trigger"] #panel-trigger { display: block; }
-#main[data-view="trigger+2d"] { --cols: 1fr 1fr; }
-#main[data-view="trigger+2d"] #panel-trigger, #main[data-view="trigger+2d"] #panel-2d { display: block; }
+#main[data-view="2d+3d"], #main[data-view="trigger+2d"] { --cols: 1fr 1fr; }
+#main[data-view="3d"] #panel-3d, #main[data-view="flash3d"] #panel-3d,
+#main[data-view="charge+light"] #panel-3d, #main[data-view="2d+3d"] #panel-3d,
+#main[data-view="2d"] #panel-2d, #main[data-view="2d+3d"] #panel-2d, #main[data-view="trigger+2d"] #panel-2d,
+#main[data-view="light"] #panel-light, #main[data-view="charge+light"] #panel-light,
+#main[data-view="optical"] #panel-optical,
+#main[data-view="trigger"] #panel-trigger, #main[data-view="trigger+2d"] #panel-trigger { display: block; }
 #main.tdrawer-open { grid-template-columns: var(--cols) minmax(0, var(--tw)); }
 .panel canvas { display: block; width: 100%; height: 100%; }
 #summary-bar {
@@ -132,7 +122,6 @@ button.small { padding: 0 6px; font-size: 12px; }
 #truth-drawer .td-tabs button.on { color: var(--fg); box-shadow: inset 0 -2px 0 var(--accent); }
 #truth-drawer .td-body { flex: 1; min-height: 0; overflow: auto; padding: 4px 8px; }
 #truth-drawer #td-part { display: flex; flex-direction: column; overflow: hidden; padding: 4px 0 0; }
-#truth-drawer #td-part[hidden] { display: none; }
 #truth-drawer .td-foot { padding: 4px 8px; border-top: 1px solid var(--legend-edge); color: var(--muted); }
 #truth-drawer .td-sec { display: flex; justify-content: space-between; margin: 8px 0 3px; color: var(--muted); }
 #truth-drawer .td-sec:first-child { margin-top: 2px; }
@@ -168,9 +157,9 @@ button.small { padding: 0 6px; font-size: 12px; }
 #truth-drawer .tri.s1 { background: var(--accent); border-color: var(--accent); }
 #truth-drawer .tri.s1::after { content: ""; position: absolute; left: 3px; top: 0px; width: 3px; height: 7px; border: solid var(--axes-bg); border-width: 0 2px 2px 0; transform: rotate(45deg); }
 #truth-drawer .tri.s2 { border-color: var(--accent); background: linear-gradient(90deg, var(--accent) 50%, transparent 50%); }
+#main.tdrawer-open #sel-card.right { right: calc(var(--tw) + 8px); }
 @media (max-width: 900px) {
   #main.tdrawer-open { grid-template-columns: var(--cols); }
   #truth-drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(340px, 92%); grid-column: auto; box-shadow: -4px 0 12px rgba(0,0,0,.35); }
+  #main.tdrawer-open #sel-card.right { right: 8px; }
 }
-#main.tdrawer-open #sel-card.right { right: calc(var(--tw) + 8px); }
-@media (max-width: 900px) { #main.tdrawer-open #sel-card.right { right: 8px; } }
