@@ -21,7 +21,7 @@ the charge colormaps by hue. Six ramps between them cover most of colour space,
 and a joint solve that also satisfies contrast and colour-vision constraints
 only returns neon. Overlays are told apart from hits by *shape and casing*
 instead -- dashed vs solid, star vs cross, and a contrasting outline drawn
-under every overlay marker and line (see ``_CASING`` in :mod:`pylarevd.display`).
+under every overlay marker and line (see ``_casing`` in :mod:`pylarevd.display`).
 """
 
 from __future__ import annotations
