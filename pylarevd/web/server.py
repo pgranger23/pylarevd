@@ -31,6 +31,7 @@ _EOS_REDIRECTORS = (("/eos/user/", "eosuser.cern.ch"),
                     ("/eos/experiment/", "eospublic.cern.ch"),
                     ("/eos/", "eospublic.cern.ch"))
 _DOT_SEGMENT = re.compile(r"(^|/)\.\.?(/|$)")
+_CACHED_EVENT = re.compile(r"(\d+)_(.+)_(.+)\.evdb$")     # cache.entry_path file names
 
 MIME = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
         ".html": "text/html; charset=utf-8", ".json": "application/json",
@@ -117,6 +118,11 @@ def _gz_path(dest: str) -> str:
     return dest + ".gz"
 
 
+def _built(dest: str) -> bool:
+    """Are the raw bundle and its gzip both in the cache?"""
+    return os.path.exists(dest) and os.path.exists(_gz_path(dest))
+
+
 def _write_gz(dest: str) -> None:
     from . import cache
     with open(dest, "rb") as fh:
@@ -176,7 +182,8 @@ class FileInfo:
                 self._tags = (self._pick_hit(), self._pick_flash())
             return self._tags
 
-    def _tag_list(self, products):
+    @staticmethod
+    def _tag_list(products):
         out = []
         for p in products:
             parts = str(p).split("_")
@@ -318,6 +325,19 @@ class App:
                     self.workers, mp_context=multiprocessing.get_context("forkserver"))
             return self._pool
 
+    def _drop_pool(self):
+        """Forget a broken pool; the next ``pool()`` starts a fresh one."""
+        with self.lock:
+            self._pool = None
+
+    def _pool_submit(self, fn, *args) -> Future:
+        """Submit to the pool, restarting it once if a worker died."""
+        try:
+            return self.pool().submit(fn, *args)
+        except BrokenProcessPool:
+            self._drop_pool()
+            return self.pool().submit(fn, *args)
+
     def shutdown(self):
         with self.lock:
             if self._pool is not None:
@@ -337,11 +357,7 @@ class App:
         self.jobs[key] = job
         self.counters["builds"] += 1
         from .cache import _root
-        try:
-            fut = self.pool().submit(_build_job, *key, _root())
-        except BrokenProcessPool:
-            self._pool = None
-            fut = self.pool().submit(_build_job, *key, _root())
+        fut = self._pool_submit(_build_job, *key, _root())
         fut.add_done_callback(lambda f, j=job: self._done(j, f))
 
     def _done(self, job: Job, fut):
@@ -353,8 +369,7 @@ class App:
                                     "prefetch": not job.explicit})
         except BaseException as exc:
             if isinstance(exc, BrokenProcessPool):
-                with self.lock:
-                    self._pool = None
+                self._drop_pool()
             self.counters["errors"] += 1
             job.future.set_exception(exc)
         with self.lock:
@@ -376,8 +391,7 @@ class App:
             if pre >= max(1, limit):
                 return
             key = (self.queue or self.bg).popleft()
-            if key in self.jobs or os.path.exists(self.dest_for(key)) and \
-                    os.path.exists(self.dest_for(key) + ".gz"):
+            if key in self.jobs or _built(self.dest_for(key)):
                 continue
             self._submit(Job(key, False, self._label(key)))
 
@@ -388,8 +402,7 @@ class App:
     def ensure(self, key) -> str:
         """Return the cache path of the finished raw bundle, building if needed."""
         dest = self.dest_for(key)
-        gz = dest + ".gz"
-        if os.path.exists(dest) and os.path.exists(gz):
+        if _built(dest):
             self.counters["hits"] += 1
             return dest
         with self.lock:
@@ -443,7 +456,7 @@ class App:
             cached = []
             try:
                 for n in os.listdir(cache.cache_dir(info.path)):
-                    m = re.match(r"(\d+)_(.+)_(.+)\.evdb$", n)
+                    m = _CACHED_EVENT.match(n)
                     if m:
                         cached.append(int(m.group(1)))
             except OSError:
@@ -475,6 +488,22 @@ def _int(q, name, default=None):
 def _tag(q, name):
     v = q.get(name, [None])[0]
     return v or None
+
+
+def _event_args(info, q, list_available: bool) -> tuple:
+    """(entry, hit_tag, flash_tag) of an event request, validated against ``info``;
+    ``list_available`` appends the file's tags to an unknown-tag error."""
+    entry = _int(q, "entry")
+    if not 0 <= entry < info.n_events:
+        raise HttpError(400, f"entry {entry} out of range (0..{info.n_events - 1})")
+    dh, df = info.default_tags()
+    hit = _tag(q, "hits") or dh
+    flash = _tag(q, "flash") or df
+    for what, tag, known in (("hit", hit, info.hit_tags()), ("flash", flash, info.flash_tags())):
+        if tag and known and tag not in known:
+            raise HttpError(400, f"no {what} product with tag {tag!r}"
+                                 + (f"; available: {', '.join(known)}" if list_available else ""))
+    return entry, hit, flash
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -516,51 +545,53 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):
-        self._t0 = time.time()
-        try:
-            u = urlsplit(self.path)
-            q = parse_qs(u.query, keep_blank_values=True)
-            route = u.path
-            if route.startswith("/api/"):
-                self._api(route, q)
-            else:
-                self._static(route)
-        except HttpError as e:
-            self._error(e.status, str(e))
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        except Exception as e:      # never a stack trace page
-            self._error(500, f"{type(e).__name__}: {e}")
+        self._handle(self._get)
 
     def do_POST(self):
+        self._handle(self._post)
+
+    def _handle(self, method):
+        """Run a request method; every failure becomes a JSON error, never a stack trace page."""
         self._t0 = time.time()
         try:
-            u = urlsplit(self.path)
-            n = int(self.headers.get("Content-Length") or 0)
-            if n > 1 << 20:
-                raise HttpError(413, "request too large")
-            raw = self.rfile.read(n) if n else b""
-            if u.path != "/api/open":
-                raise HttpError(404, "not found")
-            if not self.app.may_open():
-                raise HttpError(403, "opening files by path is disabled when bound "
-                                     "beyond localhost (use --allow-open-under DIR "
-                                     "or --allow-remote-open)")
-            try:
-                body = json.loads(raw or b"{}")
-                path = body["path"]
-                if not isinstance(path, str):
-                    raise TypeError
-            except Exception:
-                raise HttpError(400, 'expected JSON body {"path": "..."}')
-            info = self.app.open_file(path, restricted=True)
-            self._json(self._file_entry(info))
+            method()
         except HttpError as e:
             self._error(e.status, str(e))
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
             self._error(500, f"{type(e).__name__}: {e}")
+
+    def _get(self):
+        u = urlsplit(self.path)
+        q = parse_qs(u.query, keep_blank_values=True)
+        route = u.path
+        if route.startswith("/api/"):
+            self._api(route, q)
+        else:
+            self._static(route)
+
+    def _post(self):
+        u = urlsplit(self.path)
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > 1 << 20:
+            raise HttpError(413, "request too large")
+        raw = self.rfile.read(n) if n else b""
+        if u.path != "/api/open":
+            raise HttpError(404, "not found")
+        if not self.app.may_open():
+            raise HttpError(403, "opening files by path is disabled when bound "
+                                 "beyond localhost (use --allow-open-under DIR "
+                                 "or --allow-remote-open)")
+        try:
+            body = json.loads(raw or b"{}")
+            path = body["path"]
+            if not isinstance(path, str):
+                raise TypeError
+        except Exception:
+            raise HttpError(400, 'expected JSON body {"path": "..."}')
+        info = self.app.open_file(path, restricted=True)
+        self._json(self._file_entry(info))
 
     # -- api
     @staticmethod
@@ -585,20 +616,10 @@ class Handler(BaseHTTPRequestHandler):
             dest = app.ensure(("geometry", info.path, 0, None, None))
             return self._bundle(dest)
         if route == "/api/event":
-            entry = _int(q, "entry")
-            if not 0 <= entry < info.n_events:
-                raise HttpError(400, f"entry {entry} out of range (0..{info.n_events - 1})")
-            dh, df = info.default_tags()
-            hit = _tag(q, "hits") or dh
-            flash = _tag(q, "flash") or df
-            if hit and info.hit_tags() and hit not in info.hit_tags():
-                raise HttpError(400, f"no hit product with tag {hit!r}; "
-                                     f"available: {', '.join(info.hit_tags())}")
-            if flash and info.flash_tags() and flash not in info.flash_tags():
-                raise HttpError(400, f"no flash product with tag {flash!r}; "
-                                     f"available: {', '.join(info.flash_tags())}")
-            cached = os.path.exists(app.dest_for(("event", info.path, entry, hit, flash)) + ".gz")
-            dest = app.ensure(("event", info.path, entry, hit, flash))
+            entry, hit, flash = _event_args(info, q, list_available=True)
+            key = ("event", info.path, entry, hit, flash)
+            cached = os.path.exists(_gz_path(app.dest_for(key)))
+            dest = app.ensure(key)
             try:
                 self._bundle(dest, note=f"{'cached' if cached else 'built'} hits={hit} flash={flash}")
             finally:
@@ -609,32 +630,18 @@ class Handler(BaseHTTPRequestHandler):
     def _export(self, info, q):
         from . import render
         app = self.app
-        entry = _int(q, "entry")
-        if not 0 <= entry < info.n_events:
-            raise HttpError(400, f"entry {entry} out of range (0..{info.n_events - 1})")
-        dh, df = info.default_tags()
-        hit = _tag(q, "hits") or dh
-        flash = _tag(q, "flash") or df
-        if hit and info.hit_tags() and hit not in info.hit_tags():
-            raise HttpError(400, f"no hit product with tag {hit!r}")
-        if flash and info.flash_tags() and flash not in info.flash_tags():
-            raise HttpError(400, f"no flash product with tag {flash!r}")
+        entry, hit, flash = _event_args(info, q, list_available=False)
         flat = {k: v[0] for k, v in q.items() if v}
         try:
             p = render.parse_export(flat)
         except ValueError as exc:
             raise HttpError(400, str(exc))
-        try:
-            fut = app.pool().submit(render.render_export, info.path, entry, hit, flash, p)
-        except BrokenProcessPool:
-            app._pool = None
-            fut = app.pool().submit(render.render_export, info.path, entry, hit, flash, p)
+        fut = app._pool_submit(render.render_export, info.path, entry, hit, flash, p)
         app.counters["exports"] += 1
         try:
             res = fut.result()
         except BrokenProcessPool:
-            with app.lock:
-                app._pool = None
+            app._drop_pool()
             raise HttpError(500, "worker process died while rendering; retry")
         if not res["ok"]:
             raise HttpError(res["status"], res["error"])
@@ -651,9 +658,10 @@ class Handler(BaseHTTPRequestHandler):
         hdr = {"Cache-Control": "no-store", "Vary": "Accept-Encoding"}
         try:
             if gz_ok:
-                if not os.path.exists(dest + ".gz"):
+                gz = _gz_path(dest)
+                if not os.path.exists(gz):
                     _write_gz(dest)
-                with open(dest + ".gz", "rb") as fh:
+                with open(gz, "rb") as fh:
                     body = fh.read()
                 hdr["Content-Encoding"] = "gzip"
             else:
