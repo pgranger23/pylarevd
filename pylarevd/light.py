@@ -1182,7 +1182,7 @@ class _MplScene:
     def __init__(self, anim: LightAnimation, dpi: int | None = None):
         import matplotlib.colors as mcolors
         from matplotlib.collections import PolyCollection
-        from matplotlib.patches import Ellipse, Rectangle
+        from matplotlib.patches import Rectangle
 
         plt = _pyplot()
         self.a = a = anim
@@ -1220,7 +1220,7 @@ class _MplScene:
         else:
             wall_w = avail_w
             wall_h = [wall_w * r for r in aspects]
-            cap = 6.4 / max(1, n_w) if n_w > 1 else 6.4
+            cap = 6.4 / n_w
             if max(wall_h) > cap:              # tall detector: shrink width
                 f = cap / max(wall_h)
                 wall_h = [h * f for h in wall_h]
@@ -1237,10 +1237,8 @@ class _MplScene:
             return [x0 / fig_w, y0 / fig_h, w / fig_w, h / fig_h]
 
         # ---- walls
-        self.wall_axes, self.tiles, self.ellipses = [], [], []
+        self.wall_axes, self.tiles = [], []
         top = fig_h - head_h
-        cmap = a._cmap()
-        lo, hi = a.pe_range
         tile_idx = []
         for w in range(W.n_walls):
             if side:
@@ -1281,7 +1279,41 @@ class _MplScene:
             self.wall_axes.append(ax)
         self.tile_idx = tile_idx
 
-        # flashes: one ellipse (+ label) per flash and wall it was seen on
+        self._build_flashes()
+        self._build_vertex()
+
+        # colourbar
+        lo, hi = a.pe_range
+        cax = fig.add_axes(frac(wall_left + wall_w + 0.18, fig_h - head_h - block_h,
+                                0.16, block_h))
+        sm = plt.cm.ScalarMappable(norm=mcolors.LogNorm(vmin=lo, vmax=hi),
+                                   cmap=a._cmap())
+        cb = fig.colorbar(sm, cax=cax)
+        _style_colorbar(cb, "PE per detector" + (" (afterglow)" if a.fill ==
+                                                 "afterglow" else " (so far)"),
+                        t, fonts)
+
+        self._build_strip(frac(left, bottom, wall_left + wall_w - left, strip_h))
+        self._build_header(fig_w, fig_h, left, wall_left + wall_w, head_h)
+        self._fg_rgba = np.array(mcolors.to_rgba(t.fg))
+
+        # ---- 3-D charge, beside the walls
+        self.tiles3d = None
+        self.front3d = []
+        self.bars3d = []
+        if charge is not None:
+            block_bottom = fig_h - head_h - block_h
+            ax3 = fig.add_axes(frac(left - 0.55, block_bottom - 0.45,
+                                    c3d_w + 0.1, block_h + 0.35),
+                               projection="3d")
+            self._build_charge3d(ax3, charge)
+
+    def _build_flashes(self) -> None:
+        """One ellipse, centre and (for the brightest) label per flash and
+        wall it was seen on; hidden until :meth:`update` shows them."""
+        from matplotlib.patches import Ellipse
+        a, t, fonts = self.a, self.t, self.fonts
+        W = a.walls
         f = a.flashes
         widths = _pe_width(f["pe"], lo=0.8, hi=3.2)
         self.flash_art = []           # (flash j, ellipse, centre, label|None)
@@ -1310,7 +1342,9 @@ class _MplScene:
                                   visible=False, clip_on=True)
                 self.flash_art.append((j, el, c, lab))
 
-        # true vertex, projected onto every wall
+    def _build_vertex(self) -> None:
+        """The true vertex, projected onto every wall."""
+        a, t = self.a, self.t
         tv = a.true_vertex
         self.has_vertex = tv is not None and np.isfinite(tv).all()
         self.vertex_art = []
@@ -1321,18 +1355,13 @@ class _MplScene:
                              markeredgewidth=1.0, linestyle="none", zorder=8)
                 self.vertex_art.append(v)
 
-        # colourbar
-        cax = fig.add_axes(frac(wall_left + wall_w + 0.18, fig_h - head_h - block_h,
-                                0.16, block_h))
-        sm = plt.cm.ScalarMappable(norm=mcolors.LogNorm(vmin=lo, vmax=hi),
-                                   cmap=cmap)
-        cb = fig.colorbar(sm, cax=cax)
-        _style_colorbar(cb, "PE per detector" + (" (afterglow)" if a.fill ==
-                                                 "afterglow" else " (so far)"),
-                        t, fonts)
-
-        # ---- strip
-        sax = fig.add_axes(frac(left, bottom, wall_left + wall_w - left, strip_h))
+    def _build_strip(self, rect) -> None:
+        """The time strip: PE per frame, flash stems, t0, elapsed time and
+        the playhead."""
+        from matplotlib.patches import Rectangle
+        a, t, fonts = self.a, self.t, self.fonts
+        f = a.flashes
+        sax = self.fig.add_axes(rect)
         self.strip_ax = sax
         sax.set_facecolor(t.axes_bg)
         n = a.n_frames
@@ -1379,8 +1408,13 @@ class _MplScene:
                          facecolor=t.legend_bg, edgecolor=t.legend_edge,
                          labelcolor=t.fg, framealpha=0.85, ncol=3)
         leg.set_zorder(10)
+        self._cum = np.cumsum(inside + outside)
 
-        # ---- header
+    def _build_header(self, fig_w, fig_h, left, right, head_h) -> None:
+        """Title, truth headline, clock, status line and symbol key; ``left``
+        and ``right`` are the x extent in inches."""
+        a, t, fonts, fig = self.a, self.t, self.fonts, self.fig
+        f = a.flashes
         head = a._truth_headline()
         fig.text(left / fig_w, 1 - 0.14 / fig_h, a._title(),
                  fontsize=fonts["suptitle"], color=t.fg, ha="left", va="top")
@@ -1391,8 +1425,7 @@ class _MplScene:
         self.clock = fig.text(left / fig_w, 1 - (head_h - 0.12) / fig_h, "",
                               fontsize=fonts["suptitle"] * 1.35, color=t.fg,
                               ha="left", va="bottom", family="monospace")
-        self.status = fig.text((wall_left + wall_w) / fig_w,
-                               1 - (head_h - 0.12) / fig_h, "",
+        self.status = fig.text(right / fig_w, 1 - (head_h - 0.12) / fig_h, "",
                                fontsize=fonts["label"], color=t.fg_muted,
                                ha="right", va="bottom")
         key = []
@@ -1401,22 +1434,9 @@ class _MplScene:
         if len(f["pe"]):
             key.append("◯ flash ±1σ")
         key.append("□ outline: light this frame")
-        fig.text((wall_left + wall_w) / fig_w, 1 - 0.40 / fig_h,
+        fig.text(right / fig_w, 1 - 0.40 / fig_h,
                  "     ".join(key), fontsize=fonts["legend"],
                  color=t.fg_muted, ha="right", va="top")
-        self._cum = np.cumsum(inside + outside)
-        self._fg_rgba = np.array(mcolors.to_rgba(t.fg))
-
-        # ---- 3-D charge, beside the walls
-        self.tiles3d = None
-        self.front3d = []
-        self.bars3d = []
-        if charge is not None:
-            block_bottom = fig_h - head_h - block_h
-            ax3 = fig.add_axes(frac(left - 0.55, block_bottom - 0.45,
-                                    c3d_w + 0.1, block_h + 0.35),
-                               projection="3d")
-            self._build_charge3d(ax3, charge)
 
     def _dynamic(self) -> list:
         """Artists that change between frames, in drawing (z) order."""
