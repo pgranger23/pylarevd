@@ -84,6 +84,15 @@ export function polylineIndex(offsets) {
   return idx;
 }
 
+/** Length of the polyline made of rows [start, end) of a flat (m,3) point array. */
+export function polylineLength(points, start, end) {
+  let L = 0;
+  for (let k = start; k < end - 1; k++) {
+    L += Math.hypot(points[3 * k + 3] - points[3 * k], points[3 * k + 4] - points[3 * k + 1], points[3 * k + 5] - points[3 * k + 2]);
+  }
+  return L;
+}
+
 /** Expand a per-object array to per-row values through offsets: out[row] = f(obj). */
 export function expandRagged(offsets, perObject, OutType = Float32Array) {
   const out = new OutType(offsets[offsets.length - 1]);
@@ -106,16 +115,20 @@ export function percentileRange(arr, lo = 0.02, hi = 0.98, maxSamples = 20000) {
 }
 
 // ---------------------------------------------------------------- API client
-async function getJson(url, signal) {
+/** fetch(url) that throws on an HTTP error, with the start of the response body in the message. */
+async function fetchOk(url, signal) {
   const r = await fetch(url, { signal });
   if (!r.ok) throw new Error(`${url}: HTTP ${r.status} ${await r.text().catch(() => '')}`.slice(0, 300));
-  return r.json();
+  return r;
+}
+
+async function getJson(url, signal) {
+  return (await fetchOk(url, signal)).json();
 }
 
 async function getBundle(url, signal) {
   const t0 = performance.now();
-  const r = await fetch(url, { signal });
-  if (!r.ok) throw new Error(`${url}: HTTP ${r.status} ${await r.text().catch(() => '')}`.slice(0, 300));
+  const r = await fetchOk(url, signal);
   const buf = await r.arrayBuffer();
   const t1 = performance.now();
   const b = parseEvdb(buf);

@@ -48,6 +48,7 @@ export function makeLutTexture(name) {
   return tex;
 }
 
+/** Refill a makeLutTexture texture with another colormap. */
 export function updateLutTexture(tex, name) {
   const lut = getLut(name);
   const d = tex.image.data;
