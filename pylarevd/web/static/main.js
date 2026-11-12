@@ -27,15 +27,17 @@
 //   app.state                         current state object (read-only for views; use setState)
 //   app.setState(patch)               merge, update URL, notify every view and subscriber
 //   app.registerParam(name, default)  declare an extra string state key that is saved in / restored
-//                                     from the URL (e.g. viewlight registers 'tmode', 't', 'play').
+//                                     from the URL (e.g. view2d registers 'space2d', 'merge2d').
 //                                     Call from init(); the value is then in app.state[name].
 //   app.on(type, fn) -> unsubscribe   type 'state' fn(state, changed) | 'event' fn(bundle, geometry)
 //                                     | 'geometry' fn(geometry) | 'selection' fn(app.selection) (select.js)
 //                                     | 'truth' fn(model) true-particle filter / highlight changed (truth.js)
+//                                     | 'trigger' fn({type, ...}) trigger-object select / hover (viewtrigger.js)
 //   app.bundle / app.geometry         the current event / geometry Bundles (may be null)
 //   app.theme                         current theme colours (colormaps.js THEMES entry)
-//   app.views                         registry {view3d, view2d, viewlight} -> module objects, so
-//                                     viewlight can call app.views.view3d.setPdColors(rgb)
+//   app.views                         registry {view3d, view2d, viewlight, viewoptical, viewtrigger}
+//                                     -> module objects, so viewlight can call
+//                                     app.views.view3d.setPdColors(rgb)
 //   app.status(text, isError)         set the status line
 //   app.requestLayout()               ask main to re-run resize() on visible views
 // Bundle API (data.js): bundle.meta, bundle.get(name) -> typed array|null, bundle.has(name),
@@ -108,7 +110,7 @@ function readUrl() {
     for (const o of OVERLAYS) state.ov[o] = on.has(o);
     app.legacyRad = on.has('rad');   // the old "radiologicals" box: truth.js maps it to "all origins visible"
   }
-  for (const [name] of Object.entries(extraParams)) if (p.has(name)) state[name] = p.get(name);
+  for (const name of Object.keys(extraParams)) if (p.has(name)) state[name] = p.get(name);
 }
 
 function urlFor() {
@@ -152,8 +154,18 @@ function afterChange(changed) {
   if (changed.has('view')) applyLayout();
   writeUrl();
   syncControls();
-  for (const v of Object.values(app.views)) guard(v, 'onState', state, changed);
-  for (const fn of listeners.state.slice()) fn(state, changed);
+  eachView('onState', state, changed);
+  notify('state', state, changed);
+}
+
+/** Call fn(...args) of every listener of `type`; unlike app.emit, a throwing listener propagates. */
+function notify(type, ...args) {
+  for (const fn of listeners[type].slice()) fn(...args);
+}
+
+/** Call the optional method `fn` of every view module (errors are logged, see guard). */
+function eachView(fn, ...args) {
+  for (const v of Object.values(app.views)) guard(v, fn, ...args);
 }
 
 function guard(mod, fn, ...args) {
@@ -203,9 +215,10 @@ function syncControls() {
   $('sel-cmap').value = state.cmap;
   $('sel-theme').value = state.theme;
   for (const cb of document.querySelectorAll('[data-ov]')) cb.checked = !!state.ov[cb.dataset.ov];
-  if (state.file && $('sel-file').value !== state.file) $('sel-file').value = state.file;
-  if (state.hits && $('sel-hits').value !== state.hits) $('sel-hits').value = state.hits;
-  if (state.flash && $('sel-flash').value !== state.flash) $('sel-flash').value = state.flash;
+  for (const k of ['file', 'hits', 'flash']) {
+    const sel = $(`sel-${k}`);
+    if (state[k] && sel.value !== state[k]) sel.value = state[k];
+  }
 }
 
 function bindControls() {
@@ -309,6 +322,13 @@ let events = [];
 let loadToken = 0;
 let abortCtl = null;
 
+/** Abort the request in flight (file or event) and return the signal of a new one. */
+function newSignal() {
+  if (abortCtl) abortCtl.abort();
+  abortCtl = new AbortController();
+  return abortCtl.signal;
+}
+
 function currentIndex() { return events.findIndex((e) => e.entry === state.entry); }
 
 function updateEventLabel() {
@@ -335,9 +355,7 @@ async function openFile(path, entry) {
   const tok = ++loadToken;
   status(`opening ${path} ...`);
   try {
-    if (abortCtl) abortCtl.abort();
-    abortCtl = new AbortController();
-    const sig = abortCtl.signal;
+    const sig = newSignal();
     const [evs, geo] = await Promise.all([api.events(path, sig), api.geometry(path, sig)]);
     if (tok !== loadToken) return;
     events = evs;
@@ -347,8 +365,8 @@ async function openFile(path, entry) {
     // changing file resets the per-file selections
     const fileChanged = !!state.file && state.file !== path;
     setState({ file: path, entry: e ? e.entry : 0, ...(fileChanged && entry === 0 ? { hits: '', flash: '' } : {}) });
-    for (const fn of listeners.geometry.slice()) fn(geo);
-    for (const v of Object.values(app.views)) guard(v, 'setGeometry', geo);
+    notify('geometry', geo);
+    eachView('setGeometry', geo);
     updateEventLabel();
     await loadEvent();
   } catch (e) {
@@ -359,9 +377,7 @@ async function openFile(path, entry) {
 
 async function loadEvent() {
   const tok = ++loadToken;
-  if (abortCtl) abortCtl.abort();
-  abortCtl = new AbortController();
-  const sig = abortCtl.signal;
+  const sig = newSignal();
   const t0 = performance.now();
   status(`loading entry ${state.entry} ...`);
   try {
@@ -370,7 +386,7 @@ async function loadEvent() {
     const t1 = performance.now();
     app.bundle = bundle;
     guard(app, 'resetTruth', bundle);           // truth.js: filter model of the new event (before the selection)
-    guard(app, 'resetSelection', bundle);       // selection.js: new tables, drop/restore the selection
+    guard(app, 'resetSelection', bundle);       // select.js: new tables, drop/restore the selection
     updateEventLabel();
     const meta = bundle.meta;
     fillSelect($('sel-hits'), (meta.hit_tags || []).map((t) => [t, t]), meta.hit_tag || state.hits);
@@ -383,18 +399,17 @@ async function loadEvent() {
     setSummary(meta.summary || []);
     $('trig-group').hidden = !(meta.available && meta.available.trigger);
     const t2 = performance.now();
-    for (const v of Object.values(app.views)) guard(v, 'setEvent', bundle, app.geometry);
-    for (const fn of listeners.event.slice()) fn(bundle, app.geometry);
+    eachView('setEvent', bundle, app.geometry);
+    notify('event', bundle, app.geometry);
     const t3 = performance.now();
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const t4 = performance.now();
-      window.__evdTiming = {
+      const tm = window.__evdTiming = {
         fetch: bundle.timing ? bundle.timing.fetch : t1 - t0, parse: bundle.timing ? bundle.timing.parse : 0,
         setEvent: t3 - t2, firstPaintAfterLoad: t4 - t1, MB: bundle.byteLength / 1e6,
       };
-      status(`entry ${state.entry}: fetch ${window.__evdTiming.fetch.toFixed(0)} ms, parse ${window.__evdTiming.parse.toFixed(0)} ms, ` +
-        `build ${window.__evdTiming.setEvent.toFixed(0)} ms, paint ${window.__evdTiming.firstPaintAfterLoad.toFixed(0)} ms ` +
-        `(${window.__evdTiming.MB.toFixed(1)} MB)`);
+      status(`entry ${state.entry}: fetch ${tm.fetch.toFixed(0)} ms, parse ${tm.parse.toFixed(0)} ms, ` +
+        `build ${tm.setEvent.toFixed(0)} ms, paint ${tm.firstPaintAfterLoad.toFixed(0)} ms (${tm.MB.toFixed(1)} MB)`);
     }));
   } catch (e) {
     if (e.name === 'AbortError') return;
@@ -461,8 +476,7 @@ async function boot() {
   applySummaryOpen();
   syncControls();
   applyLayout();
-  const all = new Set(['file', 'entry', 'hits', 'flash', 'view', 'color', 'scale', 'cmap', 'theme', 'ov', ...Object.keys(extraParams)]);
-  for (const v of Object.values(app.views)) guard(v, 'onState', state, all);
+  eachView('onState', state, new Set([...Object.keys(DEFAULTS), 'ov', ...Object.keys(extraParams)]));
   try {
     files = await api.files();
     // a link to a file the server has not opened yet: ask it to (EOS permissions decide)
