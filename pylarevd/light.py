@@ -327,7 +327,7 @@ class PhotonDetectorWalls:
                 half_y[m] = np.maximum(real[m, 1], floor_y)
                 half_z[m] = np.maximum(real[m, 2], min(floor_z, floor_y))
         return cls(x=x, y=y, z=z, half_y=half_y, half_z=half_z,
-                   wall=wall.astype(np.int64), wall_x=wall_x,
+                   wall=wall, wall_x=wall_x,
                    channels=per_tile, chan_tile=chan_tile, projected=projected)
 
 
@@ -1160,7 +1160,7 @@ class _MplScene:
 
     def __init__(self, anim: LightAnimation, dpi: int | None = None):
         import matplotlib.colors as mcolors
-        from matplotlib.collections import LineCollection, PolyCollection
+        from matplotlib.collections import PolyCollection
         from matplotlib.patches import Ellipse, Rectangle
 
         plt = _pyplot()
@@ -1436,12 +1436,14 @@ class _MplScene:
                     # the colours of a 3-D collection are applied when it is
                     # projected, not when they are set
                     art.do_3d_projection()
-                art.axes.draw_artist(art) if art.axes is not None \
-                    else self.fig.draw_artist(art)
+                if art.axes is not None:
+                    art.axes.draw_artist(art)
+                else:
+                    self.fig.draw_artist(art)
         return np.asarray(canvas.buffer_rgba())[..., :3].copy()
 
     def update(self, k: int | None) -> None:
-        a, t = self.a, self.t
+        a = self.a
         if k is None:
             vals = a.collected
             new = np.zeros(len(a.walls), bool)
@@ -1485,7 +1487,6 @@ class _MplScene:
         what = "PE in the window" if k is None else "PE so far"
         self.status.set_text(f"{pe_so_far:,.0f} {what}   \u00b7   "
                              f"{nflash} flash{'es' * (nflash != 1)}")
-
 
     def _build_charge3d(self, ax, d3) -> None:
         """Space points, tracks and the true vertex, with the PD wall in place.
@@ -1767,7 +1768,6 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
     the traces. Sending whole traces each frame made the figure 5.4 MB and
     took 5 s to build for 120 frames of a 480-detector wall.
     """
-    import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
     t = a.theme
