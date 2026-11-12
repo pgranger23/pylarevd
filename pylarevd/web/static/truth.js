@@ -30,6 +30,7 @@
 //             siblings(row), depositCount(row), triState(row), openDrawer(tab), closeDrawer().
 
 import { PDG_CLASSES, pdgClass, pdgSymbol } from './colormaps.js';
+import { polylineLength } from './data.js';
 
 const N_SP = PDG_CLASSES.length;
 const TEX_W = 2048;
@@ -92,7 +93,7 @@ export function initTruth(app) {
 
   const ui = {
     open: false, tab: 'cat', expanded: new Set(), groups: new Set(), pages: new Map(), search: '', hits: null,
-    capped: false,
+    capped: false, hoverEl: null, searchTimer: 0, lastTreeMs: 0,
   };
 
   // ------------------------------------------------------------------ model
@@ -251,12 +252,7 @@ export function initTruth(app) {
     return Int32Array.from(out);
   }
 
-  function lengthOf(r) {
-    const off = M.off, p = M.pts;
-    let L = 0;
-    for (let k = off[r]; k < off[r + 1] - 1; k++) L += Math.hypot(p[3 * k + 3] - p[3 * k], p[3 * k + 4] - p[3 * k + 1], p[3 * k + 5] - p[3 * k + 2]);
-    return L;
-  }
+  const lengthOf = (r) => polylineLength(M.pts, M.off[r], M.off[r + 1]);
   const procOf = (r) => (M.proc ? (M.procNames[M.proc[r]] || '') : '');
   function depositCount(r) {
     const dm = M.b.get('dep/mc');
@@ -311,9 +307,9 @@ export function initTruth(app) {
       const m = /^(\d+)s$/.exec(tok);
       if (m) {
         const r = rowOfTid(parseInt(m[1], 10));
-        if (r >= 0) { if (!M.hid) M.hid = new Uint8Array(M.n); setHid(subtree(r), 1); }
+        if (r >= 0) setHid(subtree(r), 1);
       } else {
-        for (const x of parseRanges(tok)) { const r = rowOfTid(x); if (r >= 0) { if (!M.hid) M.hid = new Uint8Array(M.n); setHid([r], 1); } }
+        for (const x of parseRanges(tok)) { const r = rowOfTid(x); if (r >= 0) setHid([r], 1); }
       }
     }
     if (!M.nHid) M.hid = null;
@@ -326,10 +322,13 @@ export function initTruth(app) {
     if (urlToo) writeUrlSoon();
   }
 
-  function setSpecies(i, on) {
+  function showSpecies(i, on) {
     const name = PDG_CLASSES[i].name;
     if (on) spHidden.delete(name); else spHidden.add(name);
     if (M) M.spOn[i] = on ? 1 : 0;
+  }
+  function setSpecies(i, on) {
+    showSpecies(i, on);
     changed();
   }
   function setOrigin(oi, on) {
@@ -340,7 +339,7 @@ export function initTruth(app) {
   }
   function setAll(section, on) {
     if (!M) return;
-    if (section === 'sp') { PDG_CLASSES.forEach((c, i) => { if (on) spHidden.delete(c.name); else spHidden.add(c.name); M.spOn[i] = on ? 1 : 0; }); }
+    if (section === 'sp') PDG_CLASSES.forEach((c, i) => showSpecies(i, on));
     else { togAll = !!on; togDiff.clear(); for (const o of M.origins) M.orgOn[o.id] = on ? 1 : 0; }
     changed();
   }
@@ -520,7 +519,8 @@ export function initTruth(app) {
   function matchRows(q) {
     q = q.trim();
     if (!q) return null;
-    let m, rows = [], rowSet = null;
+    let m;
+    const rows = [];
     const perOrigin = new Int32Array(M.nO);
     let capped = false;
     const take = (i) => { if (perOrigin[M.oid[i]] >= MAX_MATCH) { capped = true; return; } perOrigin[M.oid[i]]++; rows.push(i); };
@@ -543,22 +543,23 @@ export function initTruth(app) {
       }
       for (let i = 0; i < M.n; i++) if (pdgSet.has(M.pdg[i])) take(i);
     }
-    rowSet = rows;
     const t = ensureTree();
     const mark = new Uint8Array(M.n);
-    for (const r of rowSet) { mark[r] = 2; let a = t.momRow[r], g = 0; while (a >= 0 && !mark[a] && g++ < 100000) { mark[a] = 1; a = t.momRow[a]; } }
+    for (const r of rows) { mark[r] = 2; let a = t.momRow[r], g = 0; while (a >= 0 && !mark[a] && g++ < 100000) { mark[a] = 1; a = t.momRow[a]; } }
     ui.capped = capped;
     return { rows, mark };
   }
 
-  const rowCls = (r) => (!M.spOn[M.cls[r]] || !M.orgOn[M.oid[r]]);
+  const catHidden = (r) => (!M.spOn[M.cls[r]] || !M.orgOn[M.oid[r]]);
+  /** a tree row is open when expanded by hand, or when it leads to a search match and was not collapsed (-1 - r) */
+  const isOpen = (r) => ui.expanded.has(r) || (ui.hits && ui.hits.mark[r] === 1 && !ui.expanded.has(-1 - r));
   function rowHtml(r, depth, t) {
     const nk = t.start[r + 1] - t.start[r];
     const st = triState(r);
-    const open = ui.expanded.has(r) || (ui.hits && ui.hits.mark[r] === 1 && !ui.expanded.has(-1 - r));
+    const open = isOpen(r);
     const sel = app.selection && app.selection.kind === 'mc' && app.selection.id === r;
-    const dim = rowCls(r) || st === 0;
-    const cat = rowCls(r);
+    const cat = catHidden(r);
+    const dim = cat || st === 0;
     const len = lengthOf(r);
     const tip = `track id ${M.tid[r]}, ${pdgSymbol(M.pdg[r])} (pdg ${M.pdg[r]}), ${procOf(r) || 'no process'}, ${len.toFixed(1)} cm, ${M.off[r + 1] - M.off[r]} points`;
     return `<div class="tr${sel ? ' sel' : ''}${dim ? ' dim' : ''}${ui.hits && ui.hits.mark[r] === 2 ? ' hit' : ''}" data-row="${r}" style="padding-left:${4 + 13 * depth}px" title="${esc(tip)}${cat ? ' -- hidden by the species/origin filter' : ''}">` +
@@ -570,10 +571,9 @@ export function initTruth(app) {
       `${t.desc[r] ? `<span class="ds">(+${fmtN(t.desc[r])})</span>` : ''}</div>`;
   }
 
-  function nodeHtml(r, depth, t, out, budget) {
+  function nodeHtml(r, depth, t, out) {
     out.push(rowHtml(r, depth, t));
-    const open = ui.expanded.has(r) || (ui.hits && ui.hits.mark[r] === 1 && !ui.expanded.has(-1 - r));
-    if (!open || t.start[r + 1] === t.start[r]) return;
+    if (!isOpen(r) || t.start[r + 1] === t.start[r]) return;
     let list = t.kids.subarray(t.start[r], t.start[r + 1]);
     const showAll = ui.expanded.has(r);
     if (ui.hits && !showAll) list = list.filter((k) => ui.hits.mark[k]);
@@ -605,6 +605,12 @@ export function initTruth(app) {
     elTree.innerHTML = out.join('');
     ui.lastTreeMs = performance.now() - t0;
     updateInfo();
+  }
+  /** re-render the tree, keeping its scroll position */
+  function rerenderTree() {
+    const top = elTree.scrollTop;
+    renderTree();
+    elTree.scrollTop = top;
   }
 
   function updateInfo() {
@@ -644,11 +650,7 @@ export function initTruth(app) {
   /** cheap refresh after a filter change: re-render only the visible tab */
   function refreshUi() {
     if (!ui.open) return;
-    if (ui.tab === 'cat') renderCats(); else {
-      const top = elTree.scrollTop;
-      renderTree();
-      elTree.scrollTop = top;
-    }
+    if (ui.tab === 'cat') renderCats(); else rerenderTree();
     renderFoot();
   }
   function markSelectedRow() {
@@ -696,13 +698,13 @@ export function initTruth(app) {
     });
     elTree.addEventListener('click', (e) => {
       const more = e.target.closest('[data-more]');
-      if (more) { const k = more.dataset.more; ui.pages.set(k, (ui.pages.get(k) || PAGE) + PAGE); const top = elTree.scrollTop; renderTree(); elTree.scrollTop = top; return; }
+      if (more) { const k = more.dataset.more; ui.pages.set(k, (ui.pages.get(k) || PAGE) + PAGE); rerenderTree(); return; }
       const g = e.target.closest('.tg');
       if (g) {
         if (e.target.tagName === 'INPUT') return;
         const id = parseInt(g.dataset.g, 10);
         if (ui.groups.has(id)) ui.groups.delete(id); else ui.groups.add(id);
-        const top = elTree.scrollTop; renderTree(); elTree.scrollTop = top;
+        rerenderTree();
         return;
       }
       const row = e.target.closest('.tr'); if (!row) return;
@@ -712,7 +714,7 @@ export function initTruth(app) {
       if (act === 'car') {
         if (ui.hits && ui.hits.mark[r] === 1 && !ui.expanded.has(r)) { if (ui.expanded.has(-1 - r)) ui.expanded.delete(-1 - r); else ui.expanded.add(-1 - r); }
         else if (ui.expanded.has(r)) ui.expanded.delete(r); else ui.expanded.add(r);
-        const top = elTree.scrollTop; renderTree(); elTree.scrollTop = top;
+        rerenderTree();
         return;
       }
       app.clickMc(r);
