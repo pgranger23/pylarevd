@@ -42,8 +42,7 @@ _DISPLAY_EXPORTS = {
 _LIGHT_EXPORTS = {"LightAnimation", "ChargeLightAnimation",
                   "PhotonDetectorWalls"}
 
-__all__ = sorted(list(_PYLARIO_EXPORTS) + list(_DISPLAY_EXPORTS)
-                 + list(_LIGHT_EXPORTS))
+__all__ = sorted(_PYLARIO_EXPORTS | _DISPLAY_EXPORTS | _LIGHT_EXPORTS)
 
 
 def __getattr__(name: str):
@@ -52,8 +51,7 @@ def __getattr__(name: str):
     if name in _LIGHT_EXPORTS:
         return getattr(import_module(".light", __name__), name)
     if name in _DISPLAY_EXPORTS:
-        disp = import_module(".display", __name__)
-        return getattr(disp, name)
+        return getattr(import_module(".display", __name__), name)
     if name in _PYLARIO_EXPORTS:
         import pylario
         return getattr(pylario, name)
