@@ -50,6 +50,11 @@ _URL_CONTROLS = (("file", False), ("entry", False), ("tag", False),
                  ("flash-tag", False), ("light-scale", False),
                  ("light-fill", False))
 
+#: The view dropdown: (value, label).
+_MODES = (("2d", "2D physical"), ("readout", "2D readout (channel/tick)"),
+          ("3d", "3D space points"), ("optical", "Optical (PDS)"),
+          ("flash3d", "Flashes 3D (PDS)"), ("light", "Light vs time (PDS)"),
+          ("chargelight", "Charge + light (3D + PDS)"))
 #: Views that read the photon-detector products rather than TPC hits.
 _OPTICAL_MODES = ("optical", "flash3d", "light", "chargelight")
 #: Views that animate the light (clock and tile controls apply).
@@ -763,18 +768,8 @@ def build_app(paths: list[str], geometry: str | None = None,
                     html.Div([html.Label("view", style=_LABEL),
                               dcc.Dropdown(
                                   id="mode",
-                                  options=[
-                                      {"label": "2D physical", "value": "2d"},
-                                      {"label": "2D readout (channel/tick)",
-                                       "value": "readout"},
-                                      {"label": "3D space points", "value": "3d"},
-                                      {"label": "Optical (PDS)", "value": "optical"},
-                                      {"label": "Flashes 3D (PDS)",
-                                       "value": "flash3d"},
-                                      {"label": "Light vs time (PDS)",
-                                       "value": "light"},
-                                      {"label": "Charge + light (3D + PDS)",
-                                       "value": "chargelight"}],
+                                  options=[{"label": label, "value": value}
+                                           for value, label in _MODES],
                                   value="2d", clearable=False,
                                   style={"width": "210px", **_CTL})]),
                     html.Div([html.Label("panels", style=_LABEL),
@@ -965,21 +960,14 @@ def build_app(paths: list[str], geometry: str | None = None,
             + [{"label": mark(n, caps.get(f"group:{n}", False)), "value": n,
                 "disabled": not caps.get(f"group:{n}", False)}
                for n in ("track", "shower", "pfparticle", "cluster", "slice")])
-        mode_opts = [
-            {"label": "2D physical", "value": "2d"},
-            {"label": "2D readout (channel/tick)", "value": "readout"},
-            {"label": mark("3D space points", caps["spacepoints"]), "value": "3d",
-             "disabled": not caps["spacepoints"]},
-            {"label": mark("Optical (PDS)", caps["optical"]), "value": "optical",
-             "disabled": not caps["optical"]},
-            {"label": mark("Flashes 3D (PDS)", caps["optical"]), "value": "flash3d",
-             "disabled": not caps["optical"]},
-            {"label": mark("Light vs time (PDS)", caps["optical"]),
-             "value": "light", "disabled": not caps["optical"]},
-            {"label": mark("Charge + light (3D + PDS)",
-                           caps["optical"] and caps["spacepoints"]),
-             "value": "chargelight",
-             "disabled": not (caps["optical"] and caps["spacepoints"])}]
+        # what each view needs from the file; the 2-D views only need hits
+        needs = {"3d": caps["spacepoints"], "optical": caps["optical"],
+                 "flash3d": caps["optical"], "light": caps["optical"],
+                 "chargelight": caps["optical"] and caps["spacepoints"]}
+        mode_opts = [{"label": label, "value": value} if value not in needs else
+                     {"label": mark(label, needs[value]), "value": value,
+                      "disabled": not needs[value]}
+                     for value, label in _MODES]
         # Several flash finders can run on the same OpHits (opflash, opslicer)
         # and they disagree -- opflash drops some interactions' flashes -- so
         # the choice is the user's, not a hardcoded preference.
