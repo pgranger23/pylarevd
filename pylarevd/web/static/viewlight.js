@@ -10,7 +10,7 @@
 // URL params (registered): lclock log|linear, lfill afterglow|cumulative, lframes, lfps, lpers,
 // lwlo / lwhi (window relative to t0, us), lt0 (absolute us, '' = auto), lt (frame | 'all'), lplay 0|1.
 
-import { getLut } from './colormaps.js';
+import { getLut, hexToRgb } from './colormaps.js';
 
 const PE_FLOOR = 0.5, PE_OFF = 0.2, PE_SIZE_MAX = 3e5, MAX_FLASHES = 50;
 const DEF = { lclock: 'log', lfill: 'afterglow', lframes: '120', lfps: '12', lpers: '0.7',
@@ -369,7 +369,6 @@ function bursts() {
 // ------------------------------------------------------------------ the animation arrays
 function rebuild() {
   const d = V.data, g = V.geo;
-  const R = V.R;
   if (!d || !g) {
     V.A = null; updateEmpty(); layout(); updateNotes(); requestFrame(); return;
   }
@@ -500,7 +499,7 @@ function buildPalette() {
     const i = clamp(Math.round(tt * 255), 0, 255);
     put(j, [lut[3 * i], lut[3 * i + 1], lut[3 * i + 2]]);
   }
-  V.pal = { pal8, palf, pal32: new Uint32Array(pal8.buffer), lut: pal8 };
+  V.pal = { pal8, palf, pal32: new Uint32Array(pal8.buffer) };
 }
 
 // ------------------------------------------------------------------ frame -> buffers (the hot path)
@@ -610,7 +609,6 @@ function layout() {
   }
   if (!(s > 0)) s = 0.1;
   V.cells = boxes.map((b, w) => ({ w, ...b, s }));
-  V.layoutDone = true;
   drawStatic();
   requestFrame();
 }
@@ -628,11 +626,10 @@ function winOf(c, out = null) {
 // ------------------------------------------------------------------ static canvas
 function fontCss(px, mono = false) { return `${px}px ${mono ? 'ui-monospace, Menlo, monospace' : 'system-ui, -apple-system, "Segoe UI", sans-serif'}`; }
 
-function drawStatic(ctxIn = null, scaleOut = 1) {
-  const R = V.R, th = T();
-  const cv = R.static;
-  const ctx = ctxIn || cv.getContext('2d');
-  if (!ctxIn) ctx.setTransform(V.dpr, 0, 0, V.dpr, 0, 0);
+function drawStatic() {
+  const th = T();
+  const ctx = V.R.static.getContext('2d');
+  ctx.setTransform(V.dpr, 0, 0, V.dpr, 0, 0);
   ctx.clearRect(0, 0, V.W, V.H);
   ctx.fillStyle = th.fig_bg; ctx.fillRect(0, 0, V.W, V.H);
   const g = V.geo;
@@ -664,7 +661,7 @@ function drawStatic(ctxIn = null, scaleOut = 1) {
     ctx.textBaseline = 'middle';
     ctx.fillStyle = th.fg_muted;
     ctx.fillText('z [cm]  (beam)', c.x + c.cw / 2, c.y + c.ch + 24);
-    if (g.nw === 1 || g.side ? c.w === 0 : true) {
+    if ((g.nw === 1 || g.side) ? c.w === 0 : true) {   // y label on every stacked wall, else on the first
       ctx.save(); ctx.translate(c.x - 38, c.y + c.ch / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center';
       ctx.fillText('y [cm]', 0, 0); ctx.restore();
     }
@@ -700,10 +697,10 @@ function drawColorbar(ctx) {
 }
 
 // ------------------------------------------------------------------ dynamic canvas
-function drawDyn(ctx = null) {
-  const R = V.R, th = T(), A = V.A, g = V.geo;
-  const own = !ctx;
-  if (own) { ctx = R.dyn.getContext('2d'); ctx.setTransform(V.dpr, 0, 0, V.dpr, 0, 0); ctx.clearRect(0, 0, V.W, V.H); }
+function drawDyn() {
+  const th = T(), A = V.A, g = V.geo;
+  const ctx = V.R.dyn.getContext('2d');
+  ctx.setTransform(V.dpr, 0, 0, V.dpr, 0, 0); ctx.clearRect(0, 0, V.W, V.H);
   if (!g || !A) return;
   const k = V.k, pers = A.persistence;
   // HUD
@@ -763,7 +760,7 @@ function drawDyn(ctx = null) {
 
 // ------------------------------------------------------------------ strip
 const stripM = { l: 52, r: 36, t: 8, b: 40 };
-function stripY(A, v, floor, topv, h) {
+function stripY(v, floor, topv, h) {
   const a = Math.log10(floor), b = Math.log10(topv);
   return stripM.t + h * (1 - (Math.log10(clamp(v, floor, topv)) - a) / (b - a));
 }
@@ -785,7 +782,7 @@ function drawStripCache() {
   for (let k = 0; k < n; k++) topPe = Math.max(topPe, A.inside[k], A.outside[k]);
   for (const f of A.flashes) topPe = Math.max(topPe, f.pe);
   const floor = 0.3, topv = topPe * 3;
-  const X = (xf) => stripM.l + xf / n * pw, Y = (v) => stripY(A, v, floor, topv, ph);
+  const X = (xf) => stripM.l + xf / n * pw, Y = (v) => stripY(v, floor, topv, ph);
   ctx.fillStyle = th.axes_bg; ctx.fillRect(stripM.l, stripM.t, pw, ph);
   ctx.save(); ctx.beginPath(); ctx.rect(stripM.l, stripM.t, pw, ph); ctx.clip();
   ctx.font = fontCss(10.5); ctx.textBaseline = 'middle'; ctx.textAlign = 'right';
@@ -884,7 +881,7 @@ function renderNow(sync = false) {
   if (V.A && V.geo) {
     applyFrame();
     drawGL();
-    drawDyn_();
+    drawDyn();
     drawStrip();
     push3d();
   } else {
@@ -894,13 +891,6 @@ function renderNow(sync = false) {
   const dt = performance.now() - t0;
   const s = V.stats; s.last = dt; s.n++; s.avg += (dt - s.avg) / Math.min(s.n, 30);
   if (sync && V.G) { const px = new Uint8Array(4); V.G.gl.readPixels(0, 0, 1, 1, V.G.gl.RGBA, V.G.gl.UNSIGNED_BYTE, px); }
-}
-
-function drawDyn_() {
-  const ctx = V.R.dyn.getContext('2d');
-  ctx.setTransform(V.dpr, 0, 0, V.dpr, 0, 0);
-  ctx.clearRect(0, 0, V.W, V.H);
-  drawDyn(ctx);
 }
 
 function clearCanvases() {
@@ -925,7 +915,7 @@ function sync3dAnimating() {
 
 // ------------------------------------------------------------------ playback
 function play(on) {
-  if (on && (!V.A)) on = false;
+  if (on && !V.A) on = false;
   if (on === V.playing) return;
   V.playing = on;
   if (on) {
@@ -1121,7 +1111,7 @@ function bindInteraction() {
     const tw = R.tip.offsetWidth, th = R.tip.offsetHeight;
     R.tip.style.left = `${Math.min(x + 14, V.W - tw - 4)}px`; R.tip.style.top = `${Math.min(y + 14, V.H - th - 4)}px`;
   });
-  const up = (e) => { drag = null; try { dyn.releasePointerCapture(e.pointerId); } catch (err) { /* not captured */ } };
+  const up = (e) => { drag = null; try { dyn.releasePointerCapture(e.pointerId); } catch (_) { /* not captured */ } };
   dyn.addEventListener('pointerup', up); dyn.addEventListener('pointercancel', up);
   dyn.addEventListener('pointerleave', () => { if (V.hover >= 0) { V.hover = -1; requestFrame(); } R.tip.style.display = 'none'; });
   dyn.addEventListener('dblclick', () => { V.zoom = 1; V.u = 0.5; V.v = 0.5; drawStatic(); requestFrame(); });
@@ -1135,7 +1125,7 @@ function bindInteraction() {
   };
   sc.addEventListener('pointerdown', (e) => { if (!V.A) return; scrub = true; sc.setPointerCapture(e.pointerId); if (V.playing) play(false); setK(frameAt(e)); });
   sc.addEventListener('pointermove', (e) => { if (scrub) setK(frameAt(e)); });
-  const sup = (e) => { if (!scrub) return; scrub = false; try { sc.releasePointerCapture(e.pointerId); } catch (err) { /* */ } commit(); };
+  const sup = (e) => { if (!scrub) return; scrub = false; try { sc.releasePointerCapture(e.pointerId); } catch (_) { /* not captured */ } commit(); };
   sc.addEventListener('pointerup', sup); sc.addEventListener('pointercancel', sup);
 
   // controls
@@ -1188,15 +1178,12 @@ export default {
     try { V.G = initGL(V.R.gl); } catch (e) { console.error('viewlight: WebGL', e); V.G = null; app.status('light view: WebGL unavailable', true); }
     V.ready = true;
     bindInteraction();
-    new ResizeObserver(() => { if (V.visible) { layout(); drawStripCache(); requestFrame(); } }).observe(V.R.walls);
-    new ResizeObserver(() => { if (V.visible) { layout(); drawStripCache(); requestFrame(); } }).observe(V.R.strip);
+    const ro = new ResizeObserver(() => { if (V.visible) { layout(); drawStripCache(); requestFrame(); } });
+    ro.observe(V.R.walls); ro.observe(V.R.strip);
     this.updateTheme();
     window.__evdLight = this;
   },
-  updateTheme() {
-    const th = V.app.theme, x = parseInt(th.fg.slice(1), 16);
-    V.fgRgb = [(x >> 16 & 255) / 255, (x >> 8 & 255) / 255, (x & 255) / 255];
-  },
+  updateTheme() { V.fgRgb = hexToRgb(V.app.theme.fg); },
   setGeometry(geometry) { setGeometry(geometry); },
   setEvent(bundle, geometry) { if (!V.geo && geometry) setGeometry(geometry); setEvent(bundle, geometry); },
   onState(state, changed) {
@@ -1209,7 +1196,7 @@ export default {
     if (REBUILD_KEYS.some((k) => changed.has(k)) && V.data) rebuild();
     if (changed.has('lt')) {
       const k = state.lt === 'all' || state.lt === '' ? -1 : (parseInt(state.lt, 10) || 0);
-      if (V.A && k !== V.k) { V.k = clamp(k, -1, V.A.n - 1); V.committedLt = state.lt; requestFrame(); }
+      if (V.A && k !== V.k) { V.k = clamp(k, -1, V.A.n - 1); requestFrame(); }
       V.committedLt = state.lt;
     }
     if (changed.has('lplay') && !changed.has('lt0')) {
