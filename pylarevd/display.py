@@ -38,7 +38,9 @@ SAVE_DPI = 180
 #: Interaction settings, shared so a shown figure behaves like a saved one.
 _PLOTLY_CONFIG = {"scrollZoom": True, "displaylogo": False}
 
-#: A trajectory step longer than this is a gap, not a segment.
+#: A trajectory step longer than this is a gap, not a segment. Real steps are
+#: sub-centimetre; reconstruction occasionally leaves metre-scale holes, and
+#: joining across one draws a line through detector the particle never crossed.
 MAX_STEP_CM = 20.0
 
 #: Font sizes per output target, scaled with the figure. Authoring at the final
@@ -73,9 +75,8 @@ def _fonts(preset: str) -> dict:
 
 def charge_cmap(theme: Theme, name: str = DEFAULT_COLORMAP):
     """The charge ramp, trimmed so both ends stay visible on this theme."""
-    import matplotlib as mpl
     import matplotlib.colors as mcolors
-    base = mpl.colormaps[resolve_colormap(name).name]
+    base = matplotlib.colormaps[resolve_colormap(name).name]
     lo, hi = theme.cmap_floor, theme.cmap_ceiling
     return mcolors.LinearSegmentedColormap.from_list(
         f"{name}_{theme.name}", base(np.linspace(lo, hi, 256)))
@@ -100,11 +101,11 @@ def _sample_colorscale(scale, value, lo, hi) -> str:
 
 def charge_colorscale(theme: Theme, name: str = DEFAULT_COLORMAP) -> list[list]:
     """The same ramp as a plotly colorscale, so both backends match."""
-    import matplotlib as mpl
-    base = mpl.colormaps[resolve_colormap(name).name]
+    import matplotlib.colors as mcolors
+    base = matplotlib.colormaps[resolve_colormap(name).name]
     lo, hi = theme.cmap_floor, theme.cmap_ceiling
     stops = np.linspace(0.0, 1.0, 32)
-    return [[float(s), mpl.colors.to_hex(base(lo + s * (hi - lo)))]
+    return [[float(s), mcolors.to_hex(base(lo + s * (hi - lo)))]
             for s in stops]
 
 
@@ -124,6 +125,19 @@ def _join(polylines):
     return np.concatenate(ws), np.concatenate(xs)
 
 
+def _nan_stack(polylines, split=None) -> np.ndarray:
+    """(N, 3) polylines of at least two points, each followed by a NaN row.
+
+    ``split``, if given, is applied to each polyline first (gap-breaking).
+    """
+    usable = [np.asarray(p) for p in polylines if len(p) >= 2]
+    if not usable:
+        return np.zeros((0, 3))
+    sep = np.full((1, 3), np.nan)
+    return np.vstack([np.vstack([split(p) if split else p, sep])
+                      for p in usable])
+
+
 def _join_segments(segments) -> np.ndarray:
     """NaN-separate polylines WITHOUT gap-breaking inside them.
 
@@ -131,11 +145,7 @@ def _join_segments(segments) -> np.ndarray:
     is not just unnecessary -- it splits the segment's own two endpoints and
     nothing is drawn.
     """
-    usable = [np.asarray(p) for p in segments if len(p) >= 2]
-    if not usable:
-        return np.zeros((0, 3))
-    sep = np.full((1, 3), np.nan)
-    return np.vstack([np.vstack([p, sep]) for p in usable])
+    return _nan_stack(segments)
 
 
 def _join3d(polylines, max_step: float = MAX_STEP_CM) -> np.ndarray:
@@ -146,12 +156,7 @@ def _join3d(polylines, max_step: float = MAX_STEP_CM) -> np.ndarray:
     learned this already (:func:`_join`) -- this is the same trick in 3-D, and
     it keeps both backends drawing from one array.
     """
-    usable = [np.asarray(p) for p in polylines if len(p) >= 2]
-    if not usable:
-        return np.zeros((0, 3))
-    sep = np.full((1, 3), np.nan)
-    return np.vstack([np.vstack([_split_polyline(p, max_step), sep])
-                      for p in usable])
+    return _nan_stack(polylines, lambda p: _split_polyline(p, max_step))
 
 
 def _hover_template(readout: bool, xlabel: str, ylabel: str) -> str:
@@ -169,12 +174,6 @@ def _hover_template(readout: bool, xlabel: str, ylabel: str) -> str:
         rows = ["channel %{customdata[0]:d}",
                 "tick %{customdata[1]:.1f}"] + rows
     return head + "<br>".join(rows) + "<extra></extra>"
-
-
-#: A trajectory step longer than this is a gap, not a segment. Real steps are
-#: sub-centimetre; reconstruction occasionally leaves metre-scale holes, and
-#: joining across one draws a line through detector the particle never crossed.
-MAX_STEP_CM = 20.0
 
 
 def _gap_breaks(xyz: np.ndarray, max_step: float = MAX_STEP_CM) -> np.ndarray:
@@ -210,7 +209,6 @@ def _vector_text() -> None:
     Type 3 extracts as text but is rejected or flagged by many journal
     production pipelines, and some RIPs render it poorly at small sizes.
     """
-    import matplotlib
     matplotlib.rcParams["pdf.fonttype"] = 42
     matplotlib.rcParams["ps.fonttype"] = 42
 
@@ -286,10 +284,11 @@ def _pyplot():
 
 
 def _style_axes(ax, t: Theme, fonts: dict, *, three_d: bool = False) -> None:
-    """Apply the dark theme to one axes.
+    """Apply theme *t* to one axes.
 
-    Matplotlib defaults to black text, which is invisible on ``AXES_BG``, so
-    every text and line element has to be recoloured explicitly.
+    Matplotlib's default text and line colours ignore the theme (black text
+    vanishes on the dark ``axes_bg``), so every element is recoloured
+    explicitly.
     """
     import matplotlib.colors as mcolors
     ax.set_facecolor(t.axes_bg)
@@ -366,6 +365,83 @@ def _style_colorbar(cb, label: str, t: Theme, fonts: dict) -> None:
     cb.outline.set_edgecolor(t.grid)
     for lbl in cb.ax.get_yticklabels():
         lbl.set_color(t.fg_muted)
+
+
+def _vertex_roles(event, n: int) -> tuple[list, list, list]:
+    """(secondary, primary-daughter, interaction) indices into *n* vertices."""
+    roles = getattr(event, "vertex_roles",
+                    lambda: {"interaction": [], "primary_daughters": [],
+                             "secondary": []})()
+    return tuple([i for i in roles.get(key, []) if i < n]
+                 for key in ("secondary", "primary_daughters", "interaction"))
+
+
+def _vertex_hover_head(inter) -> str:
+    """The interaction as hover HTML for a true-vertex marker."""
+    html = getattr(inter, "html", "")
+    if html:
+        return html
+    if hasattr(inter, "latex") and inter.latex:
+        return format_latex_html(getattr(inter, "latex", ""))
+    return inter.headline() if inter else "true vertex"
+
+
+def _log_colour_axis(raw, vmin, vmax, cbar: dict):
+    """(log10 values, log10 vmin, log10 vmax), relabelling *cbar*'s ticks.
+
+    plotly has no logarithmic colour axis for markers, so colour by log10 and
+    label the ticks with the original values.
+    """
+    cvals = np.log10(np.where(raw > 0, raw, vmin))
+    vmin, vmax = np.log10(vmin), np.log10(vmax)
+    decades = np.arange(np.ceil(vmin), np.floor(vmax) + 1)
+    if decades.size >= 2:
+        cbar.update(tickvals=decades.tolist(),
+                    ticktext=[f"10<sup>{int(d)}</sup>" for d in decades])
+    else:
+        # Less than two full decades: whole-decade labels would leave the bar
+        # with one tick or none, so label actual values instead.
+        vals = np.linspace(vmin, vmax, 5)
+        cbar.update(tickvals=vals.tolist(),
+                    ticktext=[_si(10 ** v) for v in vals])
+    return cvals, vmin, vmax
+
+
+def _colour_norm(cvals, vmin, vmax, log: bool):
+    """(values, matplotlib norm) for a continuous colour quantity."""
+    from matplotlib.colors import LogNorm, Normalize
+    if not log:
+        return cvals, Normalize(vmin=vmin, vmax=vmax)
+    # LogNorm cannot represent non-positive values; clamp them to the bottom of
+    # the scale rather than dropping those entries entirely.
+    return (np.where(cvals > 0, cvals, vmin),
+            LogNorm(vmin=vmin, vmax=vmax, clip=True))
+
+
+def _categorical_colours(t: Theme, groups) -> np.ndarray:
+    """One colour per entry, cycling the palette and greying the orphans (-1)."""
+    cols = np.array([t.unassociated] * len(groups), dtype=object)
+    known = groups >= 0
+    cols[known] = [t.categorical[i % len(t.categorical)] for i in groups[known]]
+    return cols
+
+
+def _save_figure(fig, path: str, dpi, **savefig) -> str:
+    """Write a matplotlib figure on its own background, then release it."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    # without facecolor= the saved file gets a white border round the panels
+    fig.savefig(path, dpi=dpi, bbox_inches="tight",
+                facecolor=fig.get_facecolor(), **savefig)
+    _pyplot().close(fig)
+    return path
+
+
+def _write_html(fig, path: str, bundle_plotlyjs: bool, **write) -> str:
+    """Write a plotly figure as a standalone page."""
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    fig.write_html(path, include_plotlyjs=("inline" if bundle_plotlyjs else "cdn"),
+                   **write)
+    return path
 
 
 @dataclass(frozen=True)
@@ -537,6 +613,7 @@ class _TruthInfo:
 
     @property
     def neutrino(self):
+        """The true interaction, or None. Cheap: the event memoises it."""
         try:
             return self.event.neutrino()
         except Exception:
@@ -643,6 +720,14 @@ class _TruthInfo:
 
         from pylario.physics import particle_symbol, particle_latex
 
+        def label(particles, m, pos, kind, index, hover_head) -> dict:
+            tid, pdg = int(particles.track_id[m]), int(particles.pdg[m])
+            sym, lat = particle_symbol(pdg), particle_latex(pdg)
+            return {"pos": pos, "text": f"{sym} ({tid})",
+                    "hover": f"{hover_head}{sym} (${lat}$)<br>PDG: {pdg}  trackID: {tid}",
+                    "kind": kind, "index": index, "tid": tid, "pdg": pdg,
+                    "symbol": sym, "latex": lat}
+
         # 1. Match Reco Tracks: the true particle whose trajectory passes
         # closest, on average, to ~15 points sampled along the track.
         # Vectorised: a ProtoDUNE-SP event matched 165 tracks against 20k
@@ -692,22 +777,8 @@ class _TruthInfo:
                 k = int(np.argmin(per))
                 min_d, best_m = float(per[k]), int(qo[starts[k]])
                 if min_d < _CUT:
-                    tid = int(mc.track_id[best_m])
-                    pdg = int(mc.pdg[best_m])
-                    sym = particle_symbol(pdg)
-                    lat = particle_latex(pdg)
-                    mid = pts[len(pts) // 2]
-                    labels.append({
-                        "pos": mid,
-                        "text": f"{sym} ({tid})",
-                        "hover": f"Reco Track {i}<br>True: {sym} (${lat}$)<br>PDG: {pdg}  trackID: {tid}",
-                        "kind": "track",
-                        "index": i,
-                        "tid": tid,
-                        "pdg": pdg,
-                        "symbol": sym,
-                        "latex": lat,
-                    })
+                    labels.append(label(mc, best_m, pts[len(pts) // 2],
+                                        "track", i, f"Reco Track {i}<br>True: "))
 
         # 2. Match Reco Showers: the true particle starting nearest the shower
         if self.showers is not None and len(self.showers) and mc is not None and len(mc):
@@ -720,24 +791,10 @@ class _TruthInfo:
                 best_m = int(np.argmin(dist))
                 min_d = float(dist[best_m])
                 if min_d < 25.0:
-                    tid = int(mc.track_id[best_m])
-                    pdg = int(mc.pdg[best_m])
-                    sym = particle_symbol(pdg)
-                    lat = particle_latex(pdg)
-                    direction = self.showers.direction[j]
-                    length = self.showers.length[j]
-                    mid = st + 0.4 * length * direction
-                    labels.append({
-                        "pos": mid,
-                        "text": f"{sym} ({tid})",
-                        "hover": f"Reco Shower {j}<br>True: {sym} (${lat}$)<br>PDG: {pdg}  trackID: {tid}",
-                        "kind": "shower",
-                        "index": j,
-                        "tid": tid,
-                        "pdg": pdg,
-                        "symbol": sym,
-                        "latex": lat,
-                    })
+                    mid = (st + 0.4 * self.showers.length[j]
+                           * self.showers.direction[j])
+                    labels.append(label(mc, best_m, mid, "shower", j,
+                                        f"Reco Shower {j}<br>True: "))
 
         # 3. If truth trajectories are drawn without reco match, label visible true particles
         if (self.tracks is None or len(self.tracks) == 0) and self.mc is not None and len(self.mc):
@@ -745,25 +802,11 @@ class _TruthInfo:
                 pts = self.mc.points[m]
                 if len(pts) == 0:
                     continue
-                pdg = int(self.mc.pdg[m])
                 # Skip neutrinos as they do not leave visible tracks/deposits in the detector
-                if abs(pdg) in (12, 14, 16):
+                if abs(int(self.mc.pdg[m])) in (12, 14, 16):
                     continue
-                tid = int(self.mc.track_id[m])
-                sym = particle_symbol(pdg)
-                lat = particle_latex(pdg)
-                mid = pts[len(pts) // 2]
-                labels.append({
-                    "pos": mid,
-                    "text": f"{sym} ({tid})",
-                    "hover": f"True Particle<br>{sym} (${lat}$)<br>PDG: {pdg}  trackID: {tid}",
-                    "kind": "mc",
-                    "index": m,
-                    "tid": tid,
-                    "pdg": pdg,
-                    "symbol": sym,
-                    "latex": lat,
-                })
+                labels.append(label(self.mc, m, pts[len(pts) // 2], "mc", m,
+                                    "True Particle<br>"))
 
         return labels
 
@@ -862,12 +905,7 @@ class EventDisplay(_TruthInfo):
 
     def group_colours(self) -> np.ndarray:
         """One colour per hit, cycling the palette and greying the orphans."""
-        t = self.theme
-        g = self.groups
-        cols = np.array([t.unassociated] * len(g), dtype=object)
-        known = g >= 0
-        cols[known] = [t.categorical[i % len(t.categorical)] for i in g[known]]
-        return cols
+        return _categorical_colours(self.theme, self.groups)
 
     def group_marker_batches(self, plotly: bool = False):
         """Yield (mask, colour, marker) so identity survives without colour.
@@ -987,11 +1025,9 @@ class EventDisplay(_TruthInfo):
         costs 40 s for one panel of a radiological sample's 34k true
         trajectories; this costs milliseconds.
         """
-        usable = [xyz for xyz in points if len(xyz) >= 2]
-        if not usable:
+        stacked = _nan_stack(points)
+        if not len(stacked):
             return []
-        sep = np.full((1, 3), np.nan)
-        stacked = np.vstack([np.vstack([xyz, sep]) for xyz in usable])
         pr = self.project_points(panel, stacked[:, 0], stacked[:, 1], stacked[:, 2])
         if pr is None:
             return []
@@ -999,8 +1035,7 @@ class EventDisplay(_TruthInfo):
         # Break where a step is implausibly long; the NaN separators already
         # break between polylines, and NaN steps compare False here.
         with np.errstate(invalid="ignore"):
-            step = np.linalg.norm(np.diff(stacked, axis=0), axis=1)
-            gaps = np.flatnonzero(step > MAX_STEP_CM) + 1
+            gaps = _gap_breaks(stacked)
         if len(gaps):
             w = np.insert(w, gaps, np.nan)
             x = np.insert(x, gaps, np.nan)
@@ -1144,14 +1179,6 @@ class EventDisplay(_TruthInfo):
                 f"   -   {len(self.hits)} hits   "
                 f"({self.hits.label.split('[')[0].strip()})")
 
-    @property
-    def neutrino(self):
-        """The true interaction, or None. Cheap: the event memoises it."""
-        try:
-            return self.event.neutrino()
-        except Exception:
-            return None          # truth is a bonus; never break a display for it
-
     def _plotly_title(self) -> str:
         """Title plus the interaction, as HTML for plotly's title slot."""
         inter = self.true_interaction
@@ -1222,15 +1249,7 @@ class EventDisplay(_TruthInfo):
         log = self.use_log
         vmin, vmax = _charge_scale(cvals, log=log)
         cmap = charge_cmap(t, self.colormap)
-        if log:
-            from matplotlib.colors import LogNorm
-            norm = LogNorm(vmin=vmin, vmax=vmax, clip=True)
-            # LogNorm cannot represent non-positive values; clamp them to the
-            # bottom of the scale rather than dropping those hits entirely.
-            cvals = np.where(cvals > 0, cvals, vmin)
-        else:
-            from matplotlib.colors import Normalize
-            norm = Normalize(vmin=vmin, vmax=vmax)
+        cvals, norm = _colour_norm(cvals, vmin, vmax, log)
 
         hx, hy, xlabel, ylabel = self._axes
         readout = self.space == "readout"
@@ -1246,8 +1265,10 @@ class EventDisplay(_TruthInfo):
         mscale = float(np.clip(spec["panel_width"] / 7.0, 0.45, 1.6))
         marker_size = marker_size * mscale ** 1.5
         sc = None
-        _legend_rows = 0
         drew_truth = False
+        show_syms = self.particle_symbols if particle_symbols is None else particle_symbols
+        # Matched once for the figure: the match is panel-independent.
+        matched = self._matched_particle_labels() if show_syms and not readout else []
         for i, (ax, p) in enumerate(zip(axes.flat, self.panels)):
             m = p.mask
             tw = None if readout else self._truth_wx(p)
@@ -1299,10 +1320,7 @@ class EventDisplay(_TruthInfo):
                             rasterized=True)
                 vx = self._vertex_wx(p)
                 if vx is not None:
-                    roles = getattr(self.event, "vertex_roles", lambda: {"interaction": [], "primary_daughters": [], "secondary": []})()
-                    sec_idx = [i for i in roles.get("secondary", []) if i < len(vx[0])]
-                    d_idx = [i for i in roles.get("primary_daughters", []) if i < len(vx[0])]
-                    pan_idx = [i for i in roles.get("interaction", []) if i < len(vx[0])]
+                    sec_idx, d_idx, pan_idx = _vertex_roles(self.event, len(vx[0]))
 
                     # Secondary / decay vertices: circle
                     if sec_idx and self.secondary_vertices:
@@ -1325,28 +1343,25 @@ class EventDisplay(_TruthInfo):
                 ax.plot([tv[0]], [tv[1]], "X", color=t.mctrack, markersize=7,
                         markeredgecolor=t.axes_bg, markeredgewidth=0.8,
                         zorder=7, label="true vertex", linestyle="none")
-            show_syms = self.particle_symbols if particle_symbols is None else particle_symbols
-            if not readout and show_syms:
-                matched = self._matched_particle_labels()
-                for m in matched:
-                    pos = m["pos"]
-                    pr = self.project_points(p, [pos[0]], [pos[1]], [pos[2]], clip=True)
-                    if pr is not None:
-                        w, x = pr
-                        if np.isfinite(w[0]) and np.isfinite(x[0]):
-                            ax.plot(w[0], x[0], "o", color="#38bdf8", markersize=4,
-                                    markeredgecolor=t.axes_bg, markeredgewidth=0.5, zorder=8)
-                            ax.text(w[0], x[0], m["text"], color=t.fg, fontsize=7.5,
-                                    fontweight="bold", zorder=9,
-                                    bbox=dict(boxstyle="round,pad=0.2", facecolor=t.legend_bg,
-                                              edgecolor=t.legend_edge, alpha=0.85))
+            for lbl in matched:
+                pos = lbl["pos"]
+                pr = self.project_points(p, [pos[0]], [pos[1]], [pos[2]], clip=True)
+                if pr is not None:
+                    w, x = pr
+                    if np.isfinite(w[0]) and np.isfinite(x[0]):
+                        ax.plot(w[0], x[0], "o", color="#38bdf8", markersize=4,
+                                markeredgecolor=t.axes_bg, markeredgewidth=0.5, zorder=8)
+                        ax.text(w[0], x[0], lbl["text"], color=t.fg, fontsize=7.5,
+                                fontweight="bold", zorder=9,
+                                bbox=dict(boxstyle="round,pad=0.2", facecolor=t.legend_bg,
+                                          edgecolor=t.legend_edge, alpha=0.85))
             if not readout:
                 # Frame the DATA, then draw the reference lines without letting
                 # them reopen the range. axhline participates in autoscale, so
                 # an anode at x = 0 and an edge at x = -746 forced every panel
                 # to the full drift span -- on a sparse event that left the
                 # hits in 26% of the panel height with the rest empty.
-                ylo, yhi = _data_ylim(hy[p.mask])
+                ylo, yhi = _data_ylim(hy[m])
                 if ylo is not None:
                     ax.set_ylim(ylo, yhi)
                 for k, xa in enumerate(_anode_positions(self.hits, self.geometry, p)):
@@ -1361,12 +1376,12 @@ class EventDisplay(_TruthInfo):
                                           if (k == 0 and i == 0) else None))
                 if ylo is not None:
                     ax.set_ylim(ylo, yhi)      # axhline reopened it; pin again
-            ax.set_title(p.title, fontsize=9)
-            ax.set_xlabel(xlabel, fontsize=8)
-            ax.set_ylabel(ylabel, fontsize=8)
+            ax.set_title(p.title)              # sizes come from _style_axes
+            ax.set_xlabel(xlabel)
+            ax.set_ylabel(ylabel)
             _style_axes(ax, t, fonts)
             if wlim:
-                own = hx[p.mask]
+                own = hx[m]
                 own = own[np.isfinite(own)]
                 pooled = wlim[1] - wlim[0]
                 if len(own) and pooled > 0 and np.ptp(own) < 0.35 * pooled:
@@ -1376,6 +1391,7 @@ class EventDisplay(_TruthInfo):
                     ax.set_xlim(*wlim)
         for ax in axes.flat[n:]:
             ax.set_visible(False)
+        fig_w = spec["panel_width"] * ncols
         if (drew_truth or self.tracks or self.vertices is not None
                 or self.mc is not None or self.showers is not None
                 or self.neutrino is not None):
@@ -1394,10 +1410,8 @@ class EventDisplay(_TruthInfo):
                 # column it was authored for, so every font landed ~55% too
                 # small once a journal scaled it back down.
                 per_entry = 1.6 * (fonts["legend"] / _BASE_FONTS["legend"])
-                fig_w = spec["panel_width"] * ncols
                 max_cols = max(1, int(fig_w / max(per_entry, 0.1)))
                 n_cols = max(1, min(len(handles), max_cols))
-                _legend_rows = int(np.ceil(len(handles) / n_cols))
                 # Inside the first panel, not a figure-level legend: an
                 # "outside" location competes with the suptitle for the top
                 # band and the truth block for the bottom one, and every
@@ -1423,7 +1437,6 @@ class EventDisplay(_TruthInfo):
             # over each other whenever both were present.
             self._extra_note = (f"coloured by {self.colour_by}: {n_obj} objects "
                                 f"(colour x marker), {n_orphan} unassociated hits")
-        fig_w = spec["panel_width"] * ncols
         truth = self._truth_block()
         note = getattr(self, "_extra_note", "")
         head = truth.splitlines()[0] if truth else ""
@@ -1451,13 +1464,7 @@ class EventDisplay(_TruthInfo):
         _vector_text()
         fig = self.figure(**kwargs)
         dpi = PRESETS[self.preset]["dpi"] if dpi is None else dpi
-        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-        # without facecolor= the saved file gets a white border round the panels
-        fig.savefig(path, dpi=dpi, bbox_inches="tight",
-                    facecolor=fig.get_facecolor())
-        import matplotlib.pyplot as plt
-        plt.close(fig)
-        return path
+        return _save_figure(fig, path, dpi)
 
     # ---- interactive (plotly) ------------------------------------------
 
@@ -1482,27 +1489,21 @@ class EventDisplay(_TruthInfo):
         cvals, clabel = self._colour_values()
         log = self.use_log
         vmin, vmax = _charge_scale(cvals, log=log)
-        cmap = charge_cmap(t, self.colormap)
-        raw = cvals
         cbar = dict(title=clabel, thickness=12, len=0.9)
         if log:
-            # plotly has no logarithmic colour axis for markers, so colour by
-            # log10 and relabel the ticks with the original values.
-            cvals = np.log10(np.where(raw > 0, raw, vmin))
-            vmin, vmax = np.log10(vmin), np.log10(vmax)
-            decades = np.arange(np.ceil(vmin), np.floor(vmax) + 1)
-            if decades.size >= 2:
-                cbar.update(tickvals=decades.tolist(),
-                            ticktext=[f"10<sup>{int(t)}</sup>" for t in decades])
-            else:
-                # Less than two full decades: whole-decade labels would leave
-                # the bar with one tick or none, so label actual values instead.
-                vals = np.linspace(vmin, vmax, 5)
-                cbar.update(tickvals=vals.tolist(),
-                            ticktext=[_si(10 ** v) for v in vals])
+            cvals, vmin, vmax = _log_colour_axis(cvals, vmin, vmax, cbar)
         h = self.hits
         hx, hy, xlabel, ylabel = self._axes
         readout = self.space == "readout"
+        hover = _hover_template(readout, xlabel, ylabel)
+        show_syms = self.particle_symbols if particle_symbols is None else particle_symbols
+        # Matched once for the figure: the match is panel-independent.
+        matched = self._matched_particle_labels() if show_syms and not readout else []
+
+        def customdata(sel):
+            return np.column_stack([h.channel[sel], h.tick[sel], h.integral[sel],
+                                    h.amplitude[sel], h.tpc[sel], h.wire[sel],
+                                    h.multiplicity[sel]])
 
         for i, p in enumerate(self.panels):
             r, c = divmod(i, ncols)
@@ -1541,10 +1542,7 @@ class EventDisplay(_TruthInfo):
                         row=r + 1, col=c + 1)
                 vx = self._vertex_wx(p)
                 if vx is not None:
-                    roles = getattr(self.event, "vertex_roles", lambda: {"interaction": [], "primary_daughters": [], "secondary": []})()
-                    sec_idx = [i for i in roles.get("secondary", []) if i < len(vx[0])]
-                    d_idx = [i for i in roles.get("primary_daughters", []) if i < len(vx[0])]
-                    pan_idx = [i for i in roles.get("interaction", []) if i < len(vx[0])]
+                    sec_idx, d_idx, pan_idx = _vertex_roles(self.event, len(vx[0]))
 
                     # Secondary decay vertices
                     if sec_idx and self.secondary_vertices:
@@ -1576,7 +1574,7 @@ class EventDisplay(_TruthInfo):
             tv = self._true_vertex_wx(p)
             if tv is not None:
                 inter = self.true_interaction
-                head = getattr(inter, "html", "") or (format_latex_html(getattr(inter, "latex", "")) if hasattr(inter, "latex") and inter.latex else (inter.headline() if inter else "true vertex"))
+                head = _vertex_hover_head(inter)
                 v = self.true_vertex
                 fig.add_trace(go.Scattergl(
                     x=[tv[0]], y=[tv[1]], mode="markers",
@@ -1588,38 +1586,27 @@ class EventDisplay(_TruthInfo):
                                    f"<br>({v[0]:.1f}, {v[1]:.1f}, "
                                    f"{v[2]:.1f}) cm<extra></extra>")),
                     row=r + 1, col=c + 1)
-            show_syms = self.particle_symbols if particle_symbols is None else particle_symbols
-            if not readout and show_syms:
-                matched = self._matched_particle_labels()
-                if matched:
-                    m_wx = []
-                    for lbl in matched:
-                        pos = lbl["pos"]
-                        pr = self.project_points(p, [pos[0]], [pos[1]], [pos[2]], clip=True)
-                        if pr is not None:
-                            w, x = pr
-                            if np.isfinite(w[0]) and np.isfinite(x[0]):
-                                m_wx.append((float(w[0]), float(x[0]), lbl))
-                    if m_wx:
-                        xs = [mw[0] for mw in m_wx]
-                        ys = [mw[1] for mw in m_wx]
-                        texts = [mw[2]["text"] for mw in m_wx]
-                        hovers = [mw[2]["hover"] for mw in m_wx]
-                        fig.add_trace(go.Scatter(
-                            x=xs, y=ys, mode="markers+text",
-                            marker=dict(size=7, color="#0284c7", symbol="circle",
-                                        line=dict(color="#38bdf8", width=1.5)),
-                            text=texts,
-                            textposition="top center",
-                            textfont=dict(color="#38bdf8", size=10, family="system-ui, sans-serif"),
-                            hoverinfo="text", hovertext=hovers,
-                            name="particle symbols", legendgroup="syms",
-                            showlegend=(i == 0)),
-                            row=r + 1, col=c + 1)
-            custom = np.column_stack([
-                h.channel[m], h.tick[m], h.integral[m], h.amplitude[m],
-                h.tpc[m], h.wire[m], h.multiplicity[m],
-            ])
+            m_wx = []
+            for lbl in matched:
+                pos = lbl["pos"]
+                pr = self.project_points(p, [pos[0]], [pos[1]], [pos[2]], clip=True)
+                if pr is not None:
+                    w, x = pr
+                    if np.isfinite(w[0]) and np.isfinite(x[0]):
+                        m_wx.append((float(w[0]), float(x[0]), lbl))
+            if m_wx:
+                fig.add_trace(go.Scatter(
+                    x=[mw[0] for mw in m_wx], y=[mw[1] for mw in m_wx],
+                    mode="markers+text",
+                    marker=dict(size=7, color="#0284c7", symbol="circle",
+                                line=dict(color="#38bdf8", width=1.5)),
+                    text=[mw[2]["text"] for mw in m_wx],
+                    textposition="top center",
+                    textfont=dict(color="#38bdf8", size=10, family="system-ui, sans-serif"),
+                    hoverinfo="text", hovertext=[mw[2]["hover"] for mw in m_wx],
+                    name="particle symbols", legendgroup="syms",
+                    showlegend=(i == 0)),
+                    row=r + 1, col=c + 1)
             if self.is_categorical:
                 # One trace per colour x marker batch, as the static backend
                 # does. Colouring a single trace instead left identity resting
@@ -1635,11 +1622,8 @@ class EventDisplay(_TruthInfo):
                         x=hx[sel], y=hy[sel], mode="markers",
                         marker=dict(size=marker_size, color=colour,
                                     symbol=marker, opacity=_ALPHA),
-                        customdata=np.column_stack([
-                            h.channel[sel], h.tick[sel], h.integral[sel],
-                            h.amplitude[sel], h.tpc[sel], h.wire[sel],
-                            h.multiplicity[sel]]),
-                        hovertemplate=_hover_template(readout, xlabel, ylabel),
+                        customdata=customdata(sel),
+                        hovertemplate=hover,
                         name=label, legendgroup=label,
                         showlegend=(i == 0)),
                         row=r + 1, col=c + 1)
@@ -1651,8 +1635,8 @@ class EventDisplay(_TruthInfo):
                                     colorscale=charge_colorscale(t, self.colormap),
                                     cmin=vmin, cmax=vmax, opacity=_ALPHA,
                                     showscale=(i == 0), colorbar=cbar),
-                        customdata=custom,
-                        hovertemplate=_hover_template(readout, xlabel, ylabel),
+                        customdata=customdata(m),
+                        hovertemplate=hover,
                         name=p.title, showlegend=False),
                     row=r + 1, col=c + 1)
             if not readout:
@@ -1713,11 +1697,8 @@ class EventDisplay(_TruthInfo):
         works offline -- larger, but it renders anywhere. ``False`` loads it
         from a CDN instead: much smaller, but blank without internet access.
         """
-        fig = self.plotly_figure(**kwargs)
-        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-        fig.write_html(path, include_plotlyjs=("inline" if bundle_plotlyjs else "cdn"),
-                       config=_PLOTLY_CONFIG)
-        return path
+        return _write_html(self.plotly_figure(**kwargs), path, bundle_plotlyjs,
+                           config=_PLOTLY_CONFIG)
 
     def show(self, **kwargs) -> None:
         """Open the interactive figure (browser, or inline in a notebook)."""
@@ -1961,10 +1942,7 @@ class Display3D(_TruthInfo):
 
         if self.vertices is not None and len(self.vertices):
             v = self.vertices.xyz
-            roles = getattr(self.event, "vertex_roles", lambda: {"interaction": [], "primary_daughters": [], "secondary": []})()
-            sec_idx = [i for i in roles.get("secondary", []) if i < len(v)]
-            d_idx = [i for i in roles.get("primary_daughters", []) if i < len(v)]
-            pan_idx = [i for i in roles.get("interaction", []) if i < len(v)]
+            sec_idx, d_idx, pan_idx = _vertex_roles(self.event, len(v))
 
             # Secondary vertices: circles
             if sec_idx and self.secondary_vertices:
@@ -1997,9 +1975,7 @@ class Display3D(_TruthInfo):
         xyz = self.sp.xyz
         cvals, clabel, is_cat = self._colour_values()
         if is_cat:
-            cols = np.array([t.unassociated] * len(cvals), dtype=object)
-            known = cvals >= 0
-            cols[known] = [t.categorical[i % len(t.categorical)] for i in cvals[known]]
+            cols = _categorical_colours(t, cvals)
             fig.add_trace(go.Scatter3d(
                 x=xyz[:, 2], y=xyz[:, 0], z=xyz[:, 1], mode="markers",
                 marker=dict(size=marker_size, color=cols),
@@ -2008,20 +1984,10 @@ class Display3D(_TruthInfo):
                 hovertemplate="z %{x:.1f}<br>x %{y:.1f}<br>y %{z:.1f} cm<br>" + clabel + ": %{customdata}<extra></extra>"))
         else:
             log = self.use_log
-            raw = cvals
-            vmin, vmax = _charge_scale(raw, log=log)
+            vmin, vmax = _charge_scale(cvals, log=log)
             cbar = dict(title=clabel, thickness=12, len=0.75)
             if log:
-                cvals = np.log10(np.where(raw > 0, raw, vmin))
-                vmin, vmax = np.log10(vmin), np.log10(vmax)
-                decades = np.arange(np.ceil(vmin), np.floor(vmax) + 1)
-                if decades.size >= 2:
-                    cbar.update(tickvals=decades.tolist(),
-                                ticktext=[f"10<sup>{int(v)}</sup>" for v in decades])
-                else:
-                    vals = np.linspace(vmin, vmax, 5)
-                    cbar.update(tickvals=vals.tolist(),
-                                ticktext=[_si(10 ** v) for v in vals])
+                cvals, vmin, vmax = _log_colour_axis(cvals, vmin, vmax, cbar)
             fig.add_trace(go.Scatter3d(
                 x=xyz[:, 2], y=xyz[:, 0], z=xyz[:, 1], mode="markers",
                 marker=dict(size=marker_size, color=cvals, cmin=vmin, cmax=vmax,
@@ -2033,7 +1999,7 @@ class Display3D(_TruthInfo):
         tv = self.true_vertex
         if tv is not None and np.isfinite(tv).all():
             inter = self.true_interaction
-            head = getattr(inter, "html", "") or (format_latex_html(getattr(inter, "latex", "")) if hasattr(inter, "latex") and inter.latex else (inter.headline() if inter else "true vertex"))
+            head = _vertex_hover_head(inter)
             fig.add_trace(go.Scatter3d(
                 x=[tv[2]], y=[tv[0]], z=[tv[1]], mode="markers",
                 marker=dict(symbol="x", size=7, color=t.mctrack,
@@ -2108,11 +2074,8 @@ class Display3D(_TruthInfo):
 
     def save_html(self, path: str, *, bundle_plotlyjs: bool = True, **kwargs) -> str:
         """Write an interactive HTML page (see :meth:`EventDisplay.save_html`)."""
-        fig = self.plotly_figure(**kwargs)
-        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-        fig.write_html(path, include_plotlyjs=("inline" if bundle_plotlyjs else "cdn"),
-                       config=_PLOTLY_CONFIG)
-        return path
+        return _write_html(self.plotly_figure(**kwargs), path, bundle_plotlyjs,
+                           config=_PLOTLY_CONFIG)
 
     def show(self, **kwargs) -> None:
         self.plotly_figure(**kwargs).show(config=_PLOTLY_CONFIG)
@@ -2127,16 +2090,11 @@ class Display3D(_TruthInfo):
                particle_symbols: bool | None = None,
                zoom: float = 1.45, pad: float = 0.20,
                figsize: tuple[float, float] = (9.8, 8.2)):
-
-        import matplotlib
-        matplotlib.use("Agg")
         plt = _pyplot()
-
         t, fonts = self.theme, _fonts(self.preset)
         fig = plt.figure(figsize=figsize or _preset_figsize(self.preset, 11.0, 7.0))
         fig.patch.set_facecolor(t.fig_bg)
         ax = fig.add_subplot(111, projection="3d")
-        ax.set_anchor("W")
 
         if self.draw_tpcs and self.focus == "detector":
             for box in self.geometry.tpcs:
@@ -2160,10 +2118,7 @@ class Display3D(_TruthInfo):
                         linewidth=0.6, alpha=0.6, label="true trajectories")
         if self.vertices is not None and len(self.vertices):
             v = self.vertices.xyz
-            roles = getattr(self.event, "vertex_roles", lambda: {"interaction": [], "primary_daughters": [], "secondary": []})()
-            sec_idx = [i for i in roles.get("secondary", []) if i < len(v)]
-            d_idx = [i for i in roles.get("primary_daughters", []) if i < len(v)]
-            pan_idx = [i for i in roles.get("interaction", []) if i < len(v)]
+            sec_idx, d_idx, pan_idx = _vertex_roles(self.event, len(v))
 
             if sec_idx and self.secondary_vertices:
                 ax.scatter(v[sec_idx, 2], v[sec_idx, 0], v[sec_idx, 1], marker="o", s=30,
@@ -2204,31 +2159,22 @@ class Display3D(_TruthInfo):
         xyz = self.sp.xyz
         cvals, clabel, is_cat = self._colour_values()
         if is_cat:
-            cols = np.array([t.unassociated] * len(cvals), dtype=object)
-            known = cvals >= 0
-            cols[known] = [t.categorical[i % len(t.categorical)] for i in cvals[known]]
+            cols = _categorical_colours(t, cvals)
             sc = ax.scatter(xyz[:, 2], xyz[:, 0], xyz[:, 1], c=cols, s=marker_size,
                             linewidths=0, alpha=alpha, label="space points")
         else:
             log = self.use_log
             vmin, vmax = _charge_scale(cvals, log=log)
-            if log:
-                from matplotlib.colors import LogNorm
-                norm = LogNorm(vmin=vmin, vmax=vmax, clip=True)
-                cvals = np.where(cvals > 0, cvals, vmin)
-            else:
-                from matplotlib.colors import Normalize
-                norm = Normalize(vmin=vmin, vmax=vmax)
+            cvals, norm = _colour_norm(cvals, vmin, vmax, log)
             sc = ax.scatter(xyz[:, 2], xyz[:, 0], xyz[:, 1], c=cvals, s=marker_size,
                             cmap=charge_cmap(t, self.colormap), norm=norm, linewidths=0,
                             alpha=alpha, label="space points")
             cb = fig.colorbar(sc, ax=ax, shrink=0.88, fraction=0.035, pad=0.05)
             _style_colorbar(cb, clabel, t, fonts)
-            ax.set_anchor("W")
 
-        ax.set_xlabel("z [cm]  (beam)", fontsize=8)
-        ax.set_ylabel("x [cm]  (drift)", fontsize=8)
-        ax.set_zlabel("y [cm]  (up)", fontsize=8)
+        ax.set_xlabel("z [cm]  (beam)")          # sizes come from _style_axes
+        ax.set_ylabel("x [cm]  (drift)")
+        ax.set_zlabel("y [cm]  (up)")
         _style_axes(ax, t, fonts, three_d=True)
         if roll is not None:
             try:
@@ -2284,6 +2230,7 @@ class Display3D(_TruthInfo):
                             markerscale=_LEGEND_MARKERSCALE_3D,
                             loc="upper left", bbox_to_anchor=(0.01, 0.88))
             leg.set_zorder(10)
+        # Last, because fig.colorbar() re-anchors the parent axes.
         ax.set_anchor("W")
         fig.subplots_adjust(left=0.01, right=0.91, top=0.88, bottom=0.02)
         return fig
@@ -2298,12 +2245,7 @@ class Display3D(_TruthInfo):
         fig = self.figure(elev=elev, azim=azim, roll=roll, zoom=zoom, pad=pad,
                           marker_size=marker_size, alpha=alpha,
                           particle_symbols=particle_symbols, **kwargs)
-        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-        fig.savefig(path, dpi=dpi, bbox_inches="tight", pad_inches=0.3,
-                    facecolor=fig.get_facecolor())
-        import matplotlib.pyplot as plt
-        plt.close(fig)
-        return path
+        return _save_figure(fig, path, dpi, pad_inches=0.3)
 
     def rotate_gif(self, elev: float = 18.0, start_azim: float = -60.0,
                    step: int = 3, fps: int = 12,
@@ -2312,19 +2254,14 @@ class Display3D(_TruthInfo):
                    marker_size: float = 3.2, alpha: float = 1.0,
                    particle_symbols: bool | None = None) -> bytes:
         """Render a 360-degree rotating animated GIF of the 3D event."""
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        from PIL import Image
         import io
+        from PIL import Image
 
         fig = self.figure(elev=elev, azim=start_azim, figsize=figsize,
                           zoom=zoom, pad=pad,
                           marker_size=marker_size, alpha=alpha,
                           particle_symbols=particle_symbols)
         ax = fig.axes[0]
-        ax.set_anchor("W")
-        fig.subplots_adjust(left=0.01, right=0.91, top=0.88, bottom=0.02)
         frames = []
         for angle in range(0, 360, step):
             azim = (start_azim + angle) % 360
@@ -2332,7 +2269,7 @@ class Display3D(_TruthInfo):
             fig.canvas.draw()
             rgba = np.asarray(fig.canvas.buffer_rgba())
             frames.append(Image.fromarray(rgba).convert("P", palette=Image.ADAPTIVE))
-        plt.close(fig)
+        _pyplot().close(fig)
 
         buf = io.BytesIO()
         duration = int(1000 / fps)
@@ -2546,8 +2483,7 @@ class FlashDisplay3D(_TruthInfo):
 
         tv = self.true_vertex
         if tv is not None and np.isfinite(tv).all():
-            v = tv
-            ax.scatter([v[2]], [v[0]], [v[1]], marker="X", s=110,
+            ax.scatter([tv[2]], [tv[0]], [tv[1]], marker="X", s=110,
                        color=t.mctrack, edgecolors=t.axes_bg, linewidths=0.8,
                        label="true vertex")
 
@@ -2576,11 +2512,7 @@ class FlashDisplay3D(_TruthInfo):
         # CLI always passes dpi=a.dpi, which defaults to None.
         dpi = PRESETS[self.preset]["dpi"] if dpi is None else dpi
         fig = self.figure(**kwargs)
-        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-        fig.savefig(path, dpi=dpi, bbox_inches="tight",
-                    facecolor=fig.get_facecolor())
-        _pyplot().close(fig)
-        return path
+        return _save_figure(fig, path, dpi)
 
     # ---- interactive (plotly) ------------------------------------------
 
@@ -2650,11 +2582,10 @@ class FlashDisplay3D(_TruthInfo):
 
         tv = self.true_vertex
         if tv is not None and np.isfinite(tv).all():
-            v = tv
             inter = self.true_interaction
             head = inter.headline() if inter else "true vertex"
             fig.add_trace(go.Scatter3d(
-                x=[v[2]], y=[v[0]], z=[v[1]], mode="markers",
+                x=[tv[2]], y=[tv[0]], z=[tv[1]], mode="markers",
                 marker=dict(symbol="x", size=6, color=t.mctrack),
                 name="true vertex",
                 hovertemplate=(f"true vertex<br>{head}<extra></extra>")))
@@ -2676,10 +2607,9 @@ class FlashDisplay3D(_TruthInfo):
         return fig
 
     def save_html(self, path: str, *, bundle_plotlyjs: bool = True, **kwargs) -> str:
-        fig = self.plotly_figure()
-        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-        fig.write_html(path, include_plotlyjs="inline" if bundle_plotlyjs else "cdn")
-        return path
+        # kwargs are accepted for a uniform signature but, unlike the other
+        # displays, neither forwarded nor given _PLOTLY_CONFIG.
+        return _write_html(self.plotly_figure(), path, bundle_plotlyjs)
 
     def __repr__(self) -> str:
         return f"<FlashDisplay3D {self.event!r} flashes={len(self.flashes)}>"
@@ -2784,8 +2714,7 @@ class OpticalDisplay(_TruthInfo):
         o = self.op
         fig, axes = plt.subplots(
             2, 1, figsize=figsize or _preset_figsize(self.preset, 12.0, 6.0),
-            constrained_layout=True,
-                                 sharex=True)
+            constrained_layout=True, sharex=True)
         fig.patch.set_facecolor(t.fig_bg)
         hits, fl = self._mask(~o.is_flash), self._mask(o.is_flash)
 
@@ -2803,11 +2732,11 @@ class OpticalDisplay(_TruthInfo):
             # Fixed range, not the window's own min/max: the same OpHit changed
             # colour by 7.6x purely from zooming, and no two renders could be
             # compared. Same reasoning as PE_SIZE_RANGE for flash size.
+            from matplotlib.colors import LogNorm
             plo, phi = PE_SIZE_RANGE
             sc = ax.scatter(o.time[hits], hit_y[hits], c=pe, s=3,
                             cmap=charge_cmap(t, self.colormap),
-                            norm=__import__("matplotlib.colors", fromlist=["LogNorm"])
-                            .LogNorm(vmin=plo, vmax=phi, clip=True),
+                            norm=LogNorm(vmin=plo, vmax=phi, clip=True),
                             linewidths=0, rasterized=True)
             cb = fig.colorbar(sc, ax=ax, pad=0.01, fraction=0.03)
             _style_colorbar(cb, "photoelectrons", t, fonts)
@@ -2855,10 +2784,7 @@ class OpticalDisplay(_TruthInfo):
         # CLI always passes dpi=a.dpi, which defaults to None.
         dpi = PRESETS[self.preset]["dpi"] if dpi is None else dpi
         fig = self.figure(**kwargs)
-        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-        fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
-        _pyplot().close(fig)
-        return path
+        return _save_figure(fig, path, dpi)
 
     def plotly_figure(self, *, height: int = 700):
         import plotly.graph_objects as go
@@ -2929,11 +2855,8 @@ class OpticalDisplay(_TruthInfo):
         return fig
 
     def save_html(self, path: str, *, bundle_plotlyjs: bool = True, **kwargs) -> str:
-        fig = self.plotly_figure(**kwargs)
-        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-        fig.write_html(path, include_plotlyjs=("inline" if bundle_plotlyjs else "cdn"),
-                       config=_PLOTLY_CONFIG)
-        return path
+        return _write_html(self.plotly_figure(**kwargs), path, bundle_plotlyjs,
+                           config=_PLOTLY_CONFIG)
 
     def show(self, **kwargs) -> None:
         self.plotly_figure(**kwargs).show(config=_PLOTLY_CONFIG)
@@ -2965,6 +2888,16 @@ def _cap_truth(mc):
     return mc[keep], note
 
 
+def _load(wanted, event, product: str):
+    """``event.<product>()`` if *wanted*, else None; unreadable is None too."""
+    if not wanted:
+        return None
+    try:
+        return getattr(event, product)()
+    except Exception:
+        return None
+
+
 def display(event, tag: str | None = None, *, truth: bool = False,
             reco: bool = False, tracks: bool | None = None,
             vertices: bool | None = None, showers: bool | None = None,
@@ -2972,50 +2905,24 @@ def display(event, tag: str | None = None, *, truth: bool = False,
             secondary_vertices: bool = True, radiologicals: bool = True,
             particle_symbols: bool = False, **kwargs) -> EventDisplay:
     """Return an :class:`EventDisplay` for this event."""
-    deposits = None
     if kwargs.get("space") == "readout":
         truth = reco = False
-    if truth:
-        try:
-            deposits = event.truth_deposits()
-        except Exception:
-            deposits = None
-    want_trk = reco if tracks is None else tracks
-    want_vtx = reco if vertices is None else vertices
-    want_shw = reco if showers is None else showers
-    got = {}
-    if want_trk:
-        try:
-            got["tracks"] = event.tracks()
-        except Exception:
-            got["tracks"] = None
-    if want_vtx:
-        try:
-            got["vertices"] = event.vertices()
-        except Exception:
-            got["vertices"] = None
-    if want_shw:
-        try:
-            got["showers"] = event.showers()
-        except Exception:
-            got["showers"] = None
-    if truth or particle_symbols:
-        try:
-            got["mc"] = event.mc_particles()
-        except Exception:
-            got["mc"] = None
+    deposits = _load(truth, event, "truth_deposits")
+    trk = _load(reco if tracks is None else tracks, event, "tracks")
+    vtx = _load(reco if vertices is None else vertices, event, "vertices")
+    shw = _load(reco if showers is None else showers, event, "showers")
+    mc = _load(truth or particle_symbols, event, "mc_particles")
     if truth and not radiologicals:
-        deposits, got["mc"] = event._drop_radiologicals(deposits, got.get("mc"))
-    got["mc"], truth_note = _cap_truth(got.get("mc"))
+        deposits, mc = event._drop_radiologicals(deposits, mc)
+    mc, truth_note = _cap_truth(mc)
     d = EventDisplay(event, hits=event.hits(tag), truth=deposits,
-                        radiologicals=radiologicals,
-                        tracks=got.get("tracks"), vertices=got.get("vertices"),
-                        showers=got.get("showers"), mc=got.get("mc"),
-                        pandora_vertex=pandora_vertex,
-                        daughter_vertices=daughter_vertices,
-                        secondary_vertices=secondary_vertices,
-                        particle_symbols=particle_symbols,
-                        **kwargs)
+                     radiologicals=radiologicals,
+                     tracks=trk, vertices=vtx, showers=shw, mc=mc,
+                     pandora_vertex=pandora_vertex,
+                     daughter_vertices=daughter_vertices,
+                     secondary_vertices=secondary_vertices,
+                     particle_symbols=particle_symbols,
+                     **kwargs)
     d.truth_note = truth_note
     return d
 
@@ -3086,47 +2993,24 @@ def display_3d(event, spacepoint_tag: str | None = None, *, truth: bool = False,
                secondary_vertices: bool = True, radiologicals: bool = True,
                particle_symbols: bool = False, **kwargs) -> Display3D:
     """Return a :class:`Display3D` built from space points."""
-    deposits = None
-    if truth:
-        try:
-            deposits = event.truth_deposits()
-        except Exception:
-            deposits = None
-    polylines = None
-    if tracks:
-        try:
-            polylines = event.tracks()
-        except Exception:
-            polylines = None
-    extra = {}
-    if vertices:
-        try:
-            extra["vertices"] = event.vertices()
-        except Exception:
-            extra["vertices"] = None
-    if showers:
-        try:
-            extra["showers"] = event.showers()
-        except Exception:
-            extra["showers"] = None
-    mc = None
-    if truth or particle_symbols:
-        try:
-            mc = event.mc_particles()
-        except Exception:
-            mc = None
+    deposits = _load(truth, event, "truth_deposits")
+    polylines = _load(tracks, event, "tracks")
+    vtx = _load(vertices, event, "vertices")
+    shw = _load(showers, event, "showers")
+    mc = _load(truth or particle_symbols, event, "mc_particles")
     if truth and not radiologicals:
         deposits, mc = event._drop_radiologicals(deposits, mc)
     mc, truth_note = _cap_truth(mc)
     d = Display3D(event, spacepoints=event.spacepoints(spacepoint_tag),
-                     truth=deposits, tracks=polylines, mc=mc,
-                     radiologicals=radiologicals,
-                     pandora_vertex=pandora_vertex,
-                     daughter_vertices=daughter_vertices,
-                     secondary_vertices=secondary_vertices,
-                     show_tracks=tracks, show_showers=showers,
-                     particle_symbols=particle_symbols, **extra,
-                     **kwargs)
+                  truth=deposits, tracks=polylines, mc=mc,
+                  vertices=vtx, showers=shw,
+                  radiologicals=radiologicals,
+                  pandora_vertex=pandora_vertex,
+                  daughter_vertices=daughter_vertices,
+                  secondary_vertices=secondary_vertices,
+                  show_tracks=tracks, show_showers=showers,
+                  particle_symbols=particle_symbols,
+                  **kwargs)
     d.truth_note = truth_note
     return d
 
