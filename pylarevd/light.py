@@ -1760,10 +1760,10 @@ def _plotly_charge3d(a, fig, add) -> None:
              "cmin": a._OFF_LEVEL, "cmax": 1.0}, 1, wall3d, col=1)
 
     def bars(k, fresh):
-        on = np.ones(len(f["pe"]), bool) if k is None else (
-            (f["frame"] == k) if fresh else (f["frame"] < k))
-        if k is None and fresh:
-            on[:] = False
+        if k is None:                 # whole window: every flash is old
+            on = np.full(len(f["pe"]), not fresh)
+        else:
+            on = (f["frame"] == k) if fresh else (f["frame"] < k)
         sel = np.flatnonzero(on)
         xs, ys, zs = [], [], []
         for j in sel:
@@ -1822,8 +1822,7 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
     wcol = 1 if charge is None else 2
     cells = [(w + 1, wcol) for w in range(nw)]
     if side:
-        c0 = 1 if charge is None else 2
-        ncol = nw + c0 - 1
+        ncol = nw + wcol - 1
         row1 = ([{"type": "scene"}] if charge is not None else []) \
             + [{"type": "xy"} for _ in range(nw)]
         row1_titles = ([f"charge: {len(charge.sp):,} space points (grey: log "
@@ -1837,7 +1836,7 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
             horizontal_spacing=0.05, vertical_spacing=0.1,
             subplot_titles=row1_titles + [""])
         srow = 2
-        cells = [(1, c0 + w) for w in range(nw)]
+        cells = [(1, wcol + w) for w in range(nw)]
     elif charge is None:
         fig = make_subplots(rows=nw + 1, cols=1,
                             row_heights=wall_share + [strip_share],
