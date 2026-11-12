@@ -27,6 +27,7 @@
 // unreadable (available.pfp false) a minimal table is synthesised from the hit/space-point group ids.
 
 import { pdgSymbol } from './colormaps.js';
+import { polylineLength } from './data.js';
 
 const HOVER_MS = 30, CLEAR_MS = 120;
 const CARD_VIEWS = new Set(['2d', '3d', '2d+3d', 'charge+light']);
@@ -34,6 +35,13 @@ const PLANES = ['U', 'V', 'Z'];
 export { pdgSymbol };
 
 const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+/** ` <i>+N more</i>` when a list of `n` items is cut to `limit`. */
+const moreTag = (n, limit) => (n > limit ? ` <i>+${n - limit} more</i>` : '');
+/** The `.`-next / `,`-previous entry of the cyclic list `sib` from `id` (-1 if `id` has no sibling). */
+function stepSibling(sib, id, key) {
+  const i = sib.indexOf(id);
+  return i >= 0 && sib.length > 1 ? sib[(i + (key === '.' ? 1 : sib.length - 1)) % sib.length] : -1;
+}
 
 export function initSelection(app) {
   const $ = (id) => document.getElementById(id);
@@ -126,17 +134,13 @@ export function initSelection(app) {
     return { sel, kind: sel.kind, groupKind: isPfp ? 'pfparticle' : 'slice', mask, n, count, id: sel.id, root, stamp: ++stamp };
   }
 
-  function emit() {
-    app.emit('selection', app.selection);
-  }
-
   // ------------------------------------------------------------------ apply
   function apply(sel, { silentUrl = false } = {}) {
     state.sel = sel;
     app.selection = resolve(sel);
     if (!app.selection) state.sel = sel = null;
     renderCard();
-    emit();
+    app.emit('selection', app.selection);
     if (!silentUrl) {
       const pinned = sel && sel.pinned;
       const tid = pinned && sel.kind === 'mc' && app.truth.model ? String(app.truth.model.tid[sel.id]) : '';
@@ -144,8 +148,9 @@ export function initSelection(app) {
     }
   }
 
-  const sameSel = (a, b) => a === b || (a && b && a.kind === b.kind && a.id === b.id && a.pinned === b.pinned && a.family === b.family);
   const familyOn = () => state.fam === '1';
+  /** a selection is shown, or a pinned one is still in the URL */
+  const anySelection = () => !!(state.sel || state.pfp || state.slice || state.mc);
   const selOff = () => state.selby === 'none';
   /** Visibility (0..1) of everything outside the selection: URL/toolbar `dim`, in percent. */
   app.selDim = () => { const d = parseFloat(state.dim); return Number.isFinite(d) ? Math.min(1, Math.max(0, d / 100)) : 0.3; };
@@ -163,16 +168,23 @@ export function initSelection(app) {
     return null;
   }
 
+  /** Drop a pending hover and a pending clear. */
+  function cancelTimers() { clearTimeout(hoverTimer); clearTimeout(clearTimer); pendKey = ''; }
+  /** Clear a transient (unpinned) selection CLEAR_MS from now. */
+  function scheduleClear() {
+    clearTimer = setTimeout(() => { clearTimer = 0; if (!state.sel || !state.sel.pinned) apply(null, { silentUrl: true }); }, CLEAR_MS);
+  }
+
   // ------------------------------------------------------------- public API
   /** Select an object (programmatic / card links). sel = {kind, id, pinned?, family?}. */
   app.select = (sel) => {
-    clearTimeout(hoverTimer); clearTimeout(clearTimer); pendKey = '';
+    cancelTimers();
     if (!sel) return app.clearSelection();
     apply({ kind: sel.kind, id: sel.id, pinned: !!sel.pinned, family: sel.family != null ? !!sel.family : familyOn() });
   };
   app.clearSelection = () => {
-    clearTimeout(hoverTimer); clearTimeout(clearTimer); pendKey = '';
-    if (state.sel || state.pfp || state.slice || state.mc) apply(null);
+    cancelTimers();
+    if (anySelection()) apply(null);
   };
   app.selectionTables = () => T;
   /** true if reco vertex `v` (row of vtx/*) belongs to the selection, or there is no selection / no way to tell */
@@ -193,7 +205,7 @@ export function initSelection(app) {
     if (!t) {
       pendKey = '';
       clearTimeout(hoverTimer);
-      if (state.sel && !clearTimer && !cardHeld) clearTimer = setTimeout(() => { clearTimer = 0; if (!state.sel || !state.sel.pinned) apply(null, { silentUrl: true }); }, CLEAR_MS);
+      if (state.sel && !clearTimer && !cardHeld) scheduleClear();
       return;
     }
     clearTimeout(clearTimer); clearTimer = 0;
@@ -216,8 +228,8 @@ export function initSelection(app) {
   };
 
   function clickTarget(t) {
-    clearTimeout(hoverTimer); clearTimeout(clearTimer); clearTimer = 0; pendKey = '';
-    if (!t) { if (state.sel || state.pfp || state.slice || state.mc) apply(null); return; }
+    cancelTimers(); clearTimer = 0;
+    if (!t) { if (anySelection()) apply(null); return; }
     const s = state.sel;
     if (s && s.pinned && s.kind === t.kind && s.id === t.id) { apply(null); return; }
     apply({ kind: t.kind, id: t.id, pinned: true, family: familyOn() });
@@ -238,7 +250,7 @@ export function initSelection(app) {
   // Called by main.js after app.bundle changed and BEFORE the views' setEvent.
   app.resetSelection = (bundle) => {
     T = buildTables(bundle);
-    clearTimeout(hoverTimer); clearTimeout(clearTimer); clearTimer = 0; pendKey = '';
+    cancelTimers(); clearTimer = 0;
     let sel = null;
     if (firstEvent && T && !selOff()) {
       const pf = parseInt(state.pfp, 10), sl = parseInt(state.slice, 10);
@@ -284,7 +296,7 @@ export function initSelection(app) {
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === 'Shift') { if (!e.repeat && last.ids) app.hoverObject(last.ids, true); return; }
     const s = state.sel;
-    if (e.key === 'Escape') { if (s || state.pfp || state.slice || state.mc) { app.clearSelection(); e.preventDefault(); } return; }
+    if (e.key === 'Escape') { if (anySelection()) { app.clearSelection(); e.preventDefault(); } return; }
     if (e.key === 'f' && T && !selOff() && (T.hasPfp || (s && s.kind === 'mc'))) { app.setState({ fam: familyOn() ? '0' : '1' }); refamily(); syncToolbar(); return; }
     if (s && s.kind === 'mc' && app.truth.model) {         // true particle: [ mother, ] first daughter, , . siblings
       const tr = app.truth, M = tr.model;
@@ -292,11 +304,8 @@ export function initSelection(app) {
       const d = tr.describe(s.id);
       if (e.key === '[') to = d.motherRow;
       else if (e.key === ']') { const k = tr.kids(s.id); if (k.length) to = k[0]; }
-      else if (e.key === ',' || e.key === '.') {
-        const sib = Array.from(tr.siblings(s.id));
-        const i = sib.indexOf(s.id);
-        if (i >= 0 && sib.length > 1) to = sib[(i + (e.key === '.' ? 1 : sib.length - 1)) % sib.length];
-      } else return;
+      else if (e.key === ',' || e.key === '.') to = stepSibling(Array.from(tr.siblings(s.id)), s.id, e.key);
+      else return;
       e.preventDefault();
       if (to >= 0 && to < M.n) pinTo('mc', to);
       return;
@@ -308,8 +317,7 @@ export function initSelection(app) {
     else if (e.key === ',' || e.key === '.') {
       const par = T.parent[s.id];
       const sib = par >= 0 ? daughters(par) : Array.from({ length: T.nPfp }, (_, i) => i).filter((i) => T.parent[i] < 0);
-      const i = sib.indexOf(s.id);
-      if (i >= 0 && sib.length > 1) to = sib[(i + (e.key === '.' ? 1 : sib.length - 1)) % sib.length];
+      to = stepSibling(sib, s.id, e.key);
     } else return;
     e.preventDefault();
     if (to >= 0) pinTo('pfp', to);
@@ -325,7 +333,7 @@ export function initSelection(app) {
     card.addEventListener('pointerenter', () => { cardHeld = true; clearTimeout(clearTimer); clearTimer = 0; });
     card.addEventListener('pointerleave', () => {
       cardHeld = false;
-      if (state.sel && !state.sel.pinned) clearTimer = setTimeout(() => { clearTimer = 0; if (!state.sel || !state.sel.pinned) apply(null, { silentUrl: true }); }, CLEAR_MS);
+      if (state.sel && !state.sel.pinned) scheduleClear();
     });
     card.addEventListener('click', (e) => {
       const el = e.target.closest('[data-pfp],[data-slice],[data-mc],[data-act]');
@@ -341,7 +349,9 @@ export function initSelection(app) {
     });
   }
 
-  const link = (p) => `<a href="#" data-pfp="${p}" title="${esc(typeOf(p))}">${T.hasPfp ? T.id[p] : p}${T.hasPfp ? ` <i>${esc(typeOf(p))}</i>` : ''}</a>`;
+  /** PFParticle id and type (`3 <i>track-like</i>`), or the group number without a PFParticle table */
+  const pfpLabel = (p) => (T.hasPfp ? `${T.id[p]} <i>${esc(typeOf(p))}</i>` : `${p}`);
+  const link = (p) => `<a href="#" data-pfp="${p}" title="${esc(typeOf(p))}">${pfpLabel(p)}</a>`;
   const planes = (arr, i) => (arr ? PLANES.map((n, k) => `${n} ${arr[3 * i + k]}`).join(' / ') : '');
   const f1 = (v) => (Number.isFinite(v) ? v.toFixed(1) : '-');
 
@@ -362,15 +372,15 @@ export function initSelection(app) {
     h += `<div class="row"><b>process</b> ${esc(d.process || '-')} &middot; <b>length</b> ${d.length.toFixed(1)} cm <i>(${d.npts} points)</i></div>`;
     h += `<div class="row rel"><b>mother</b> ${d.motherRow >= 0 ? tlink(d.motherRow) : (d.motherTid > 0 ? `<i>#${d.motherTid} (not drawn)</i>` : '<i>none (primary)</i>')}</div>`;
     const kids = tr.kids(s.id);
-    h += `<div class="row rel"><b>daughters</b> ${kids.length ? Array.from(kids.subarray(0, 10)).map(tlink).join(' ') + (kids.length > 10 ? ` <i>+${kids.length - 10} more</i>` : '') + (d.nDesc > kids.length ? ` <i>(${d.nDesc} descendants)</i>` : '') : '<i>none</i>'}</div>`;
+    h += `<div class="row rel"><b>daughters</b> ${kids.length ? Array.from(kids.subarray(0, 10)).map(tlink).join(' ') + moreTag(kids.length, 10) + (d.nDesc > kids.length ? ` <i>(${d.nDesc} descendants)</i>` : '') : '<i>none</i>'}</div>`;
+    const rows = (app.selection && app.selection.mcRows) || [s.id];
     if (M.b.get('dep/mc')) {
-      let nd = 0; for (const r of (app.selection && app.selection.mcRows) || [s.id]) nd += tr.depositCount(r) || 0;
+      let nd = 0; for (const r of rows) nd += tr.depositCount(r) || 0;
       h += `<div class="row"><b>deposits</b> ${nd.toLocaleString('en-US')}${s.family ? ' <i>(whole subtree)</i>' : ''}</div>`;
     }
-    const rows = (app.selection && app.selection.mcRows) || [s.id];
     const set = new Set(rows), matched = [];
     if (T && T.hasPfp && T.true_mc) for (let p = 0; p < T.nPfp; p++) if (set.has(T.true_mc[p])) matched.push(p);
-    if (matched.length) h += `<div class="row rel"><b>reco matched</b> ${matched.slice(0, 12).map(link).join(' ')}${matched.length > 12 ? ` <i>+${matched.length - 12} more</i>` : ''}</div>`;
+    if (matched.length) h += `<div class="row rel"><b>reco matched</b> ${matched.slice(0, 12).map(link).join(' ')}${moreTag(matched.length, 12)}</div>`;
     else {
       const limited = ((M.b.meta && M.b.meta.notes) || []).some((x) => /matched to from_interaction/.test(x));
       h += `<div class="row note">no reconstructed particle matched this true ${s.family ? 'family' : 'particle'}${limited ? ' (in this event the reco-truth matching only considers particles of the interaction)' : ''}${T && T.hasPfp ? '' : ' (no PFParticle table)'}.</div>`;
@@ -382,14 +392,13 @@ export function initSelection(app) {
 
   function pfpCard(s) {
     const p = s.id, b = T.b;
-    let h = `<div class="hd"><span>${T.hasPfp ? 'Particle' : 'Group'} ${T.hasPfp ? T.id[p] : p}${T.hasPfp ? ` <i>${esc(typeOf(p))}</i>` : ''}</span>`;
-    h += hdButtons(s) + '</div>';
+    let h = `<div class="hd"><span>${T.hasPfp ? 'Particle' : 'Group'} ${pfpLabel(p)}</span>${hdButtons(s)}</div>`;
     if (T.hasPfp) {
       const sc = T.score[p];
       h += `<div class="row">${Number.isFinite(sc) ? `track score <b>${sc.toFixed(2)}</b> &middot; ` : ''}slice ${T.slice[p] >= 0 ? `<a href="#" data-slice="${T.slice[p]}">${T.slice[p]}</a>` : '-'}</div>`;
       const par = T.parent[p], dd = daughters(p);
       h += `<div class="row rel"><b>parent</b> ${par >= 0 ? link(par) : '<i>none (top level)</i>'}</div>`;
-      h += `<div class="row rel"><b>daughters</b> ${dd.length ? dd.slice(0, 12).map(link).join(' ') + (dd.length > 12 ? ` <i>+${dd.length - 12} more</i>` : '') : '<i>none</i>'}</div>`;
+      h += `<div class="row rel"><b>daughters</b> ${dd.length ? dd.slice(0, 12).map(link).join(' ') + moreTag(dd.length, 12) : '<i>none</i>'}</div>`;
     }
     const nh = T.hasPfp ? T.n_hits[p] : (T.n_hits ? T.n_hits[p] : 0);
     h += `<div class="row"><b>hits</b> ${nh}${T.hasPfp ? ` (${planes(T.n_hits_plane, p)})` : ''}</div>`;
@@ -398,8 +407,7 @@ export function initSelection(app) {
       const ti = T.track[p], si = T.shower[p];
       if (ti >= 0) {
         const pts = b.get('tracks/points'), off = b.get('tracks/offsets');
-        let L = 0;
-        if (pts && off) for (let k = off[ti]; k < off[ti + 1] - 1; k++) L += Math.hypot(pts[3 * k + 3] - pts[3 * k], pts[3 * k + 4] - pts[3 * k + 1], pts[3 * k + 5] - pts[3 * k + 2]);
+        const L = pts && off ? polylineLength(pts, off[ti], off[ti + 1]) : 0;
         h += `<div class="row"><b>track</b> length ${L.toFixed(1)} cm, ${off ? off[ti + 1] - off[ti] : 0} points</div>`;
       }
       if (si >= 0) {
@@ -427,7 +435,7 @@ export function initSelection(app) {
       h += `<div class="row"><b>${T.s_nu[i] ? 'neutrino particle' : 'top-level particle'}</b> ${top >= 0 ? link(top) : '<i>none</i>'}</div>`;
       const v = T.s_vertex;
       if (v && Number.isFinite(v[3 * i])) h += `<div class="row"><b>vertex</b> (${f1(v[3 * i])}, ${f1(v[3 * i + 1])}, ${f1(v[3 * i + 2])}) cm</div>`;
-      h += `<div class="row rel"><b>members</b> ${ps.slice(0, 24).map(link).join(' ')}${ps.length > 24 ? ` <i>+${ps.length - 24} more</i>` : ''}</div>`;
+      h += `<div class="row rel"><b>members</b> ${ps.slice(0, 24).map(link).join(' ')}${moreTag(ps.length, 24)}</div>`;
       h += trueLine(T.s_true_mc[i], T.s_true_pdg[i], T.s_true_tid[i]);
     } else h += '<div class="row note">no PFParticle table for this file</div>';
     return h;
