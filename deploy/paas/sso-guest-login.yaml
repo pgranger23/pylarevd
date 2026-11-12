@@ -1,0 +1,31 @@
+# Optional shared "guest" login next to the CERN SSO (strategic-merge patch on the proxy):
+# the sign-in page then shows a "Sign in with CERN" button and a username/password form.
+#   oc create secret generic guest-htpasswd --from-file=htpasswd=guest.htpasswd   # bcrypt ("htpasswd -B")
+#   oc patch deployment sso-cern-auth-proxy --type=strategic --patch-file deploy/paas/sso-guest-login.yaml
+# Undo: oc patch deployment sso-cern-auth-proxy --type=json \
+#   -p '[{"op":"remove","path":"/spec/template/spec/containers/0/args"},
+#        {"op":"remove","path":"/spec/template/spec/containers/0/volumeMounts"},
+#        {"op":"remove","path":"/spec/template/spec/volumes"}]'
+spec:
+  template:
+    spec:
+      volumes:
+        - name: guest-htpasswd
+          secret:
+            secretName: guest-htpasswd
+      containers:
+        - name: sso-proxy
+          args:
+            - "--htpasswd-file=/etc/guest-htpasswd/htpasswd"
+            # the proxy only admits sessions carrying the allowed role (authOptions.allowedRole)
+            - "--htpasswd-user-group=default-role"
+            - "--display-htpasswd-form=true"
+            # show the sign-in page instead of redirecting straight to auth.cern.ch
+            - "--skip-provider-button=false"
+            - "--provider-display-name=CERN"
+            - "--banner=pylarevd event display"
+            - "--footer=-"
+          volumeMounts:
+            - name: guest-htpasswd
+              mountPath: /etc/guest-htpasswd
+              readOnly: true

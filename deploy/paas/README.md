@@ -41,6 +41,10 @@ Who may log in is set on the Application Portal (link in the project's
 every CERN and eduGAIN account; restrict it to an e-group there. `route.public` in
 `sso-values.yaml` decides whether the site is reachable from outside the CERN network.
 
+To also admit people without a CERN or eduGAIN account, `sso-guest-login.yaml` adds a shared
+username/password next to the CERN button on the sign-in page (bcrypt htpasswd in a secret; the
+commands and the undo are at the top of the file).
+
 ## Data
 
 The `args` of the viewer container in `app.yaml` list what it serves: files or directories,
