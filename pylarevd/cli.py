@@ -26,7 +26,8 @@ def _parse_events(spec: str, n: int) -> list[int]:
         part = part.strip()
         if not part:
             continue
-        if "-" in part[1:] if part.startswith("-") else "-" in part:
+        # a range has a '-' after its first character; a leading one is a sign
+        if "-" in part[1:]:
             lo, _, hi = part.partition("-")
             a, b = int(lo), int(hi)
             if a < 0 or b < 0:
@@ -118,6 +119,33 @@ def _unique_path(path: str, taken: set[str]) -> str:
             taken.add(candidate)
             return candidate
         i += 1
+
+
+def _make_display(ev, a, window):
+    """The display ``--mode`` asks for, built for one event."""
+    style = dict(theme=a.theme, colormap=a.colormap, preset=a.preset)
+    if a.mode == "3d":
+        return ev.display_3d(truth=a.truth,
+                             radiologicals=not a.no_radiologicals, **style)
+    if a.mode == "flash3d":
+        return display_flashes_3d(ev, a.flash_tag, **style)
+    if a.mode == "optical":
+        return display_optical(ev, a.flash_tag, **style)
+    if a.mode in ("light", "chargelight"):
+        light = dict(time_scale=a.light_clock, fill=a.light_fill,
+                     n_frames=a.frames, window=window, t0=a.t0, **style)
+        if a.mode == "chargelight":
+            # tracks and vertices on by default, as in --mode 3d
+            return display_charge_light(
+                ev, a.flash_tag, truth=a.truth,
+                radiologicals=not a.no_radiologicals, **light)
+        return display_light(ev, a.flash_tag, **light)
+    return ev.display(a.tag, truth=a.truth, reco=a.reco,
+                      radiologicals=not a.no_radiologicals,
+                      colour_by=a.colour_by, colour_scale=a.colour_scale,
+                      merge=a.merge,
+                      space="readout" if a.mode == "readout" else a.space,
+                      **style)
 
 
 def main(argv=None) -> int:
@@ -271,32 +299,7 @@ def main(argv=None) -> int:
             print(f"[{n_done}/{len(entries)}] event {i}", flush=True)
         try:
             ev = f[i]
-            style = dict(theme=a.theme, colormap=a.colormap, preset=a.preset)
-            if a.mode == "3d":
-                disp = ev.display_3d(truth=a.truth,
-                                     radiologicals=not a.no_radiologicals,
-                                     **style)
-            elif a.mode == "flash3d":
-                disp = display_flashes_3d(ev, a.flash_tag, **style)
-            elif a.mode == "optical":
-                disp = display_optical(ev, a.flash_tag, **style)
-            elif a.mode in ("light", "chargelight"):
-                light = dict(time_scale=a.light_clock, fill=a.light_fill,
-                             n_frames=a.frames, window=window, t0=a.t0, **style)
-                if a.mode == "chargelight":
-                    # tracks and vertices on by default, as in --mode 3d
-                    disp = display_charge_light(
-                        ev, a.flash_tag, truth=a.truth,
-                        radiologicals=not a.no_radiologicals, **light)
-                else:
-                    disp = display_light(ev, a.flash_tag, **light)
-            else:
-                disp = ev.display(a.tag, truth=a.truth, reco=a.reco,
-                                  radiologicals=not a.no_radiologicals,
-                                  colour_by=a.colour_by,
-                                  colour_scale=a.colour_scale, merge=a.merge,
-                                  space="readout" if a.mode == "readout" else a.space,
-                                  **style)
+            disp = _make_display(ev, a, window)
             print(disp.summary())
             run, sub, evno = ev.id
             stem = os.path.join(a.outdir, f"r{run}_s{sub}_e{evno}")
@@ -323,9 +326,7 @@ def main(argv=None) -> int:
             print(f"  event {i}: {exc}", file=sys.stderr)
             # Failures belong in the manifest too: a partly-failed batch left
             # no record at all of which events failed or why.
-            rows.append({"entry": i, "run": "", "subrun": "", "event": "",
-                         "hits": "", "headline": "", "png": "", "html": "",
-                         "status": "failed", "error": str(exc)})
+            rows.append({"entry": i, "status": "failed", "error": str(exc)})
             failures += 1
 
     if rows:
