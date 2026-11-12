@@ -55,6 +55,10 @@ _OPTICAL_MODES = ("optical", "flash3d", "light", "chargelight")
 #: Views that animate the light (clock and tile controls apply).
 _LIGHT_MODES = ("light", "chargelight")
 
+#: A URL scheme (root://, https://, ...): such paths are passed to uproot as-is.
+_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+
 def url_params(values, event_id=None) -> str:
     """Serialise control values into a query string.
 
@@ -158,9 +162,17 @@ _BAND = {"display": "flex", "gap": "12px", "alignItems": "flex-end",
          "backgroundColor": AXES_BG, "padding": "8px 10px",
          "border": f"1px solid {GRID}", "borderRadius": "6px"}
 
+_BUTTON = {**_CTL, "marginRight": "6px", "padding": "6px 12px",
+           "cursor": "pointer", "borderRadius": "4px"}
+#: A toggle button while its state is on.
+_BUTTON_ON = {**_BUTTON, "backgroundColor": "#0284c7", "color": "#ffffff",
+              "fontWeight": "600", "border": "1px solid #38bdf8"}
 
-#: Dash gives a disabled checkbox no colour of its own, so the browser default
-#: (a dark grey) applies -- unreadable on this panel. State both states.
+
+#: Page template: dark/light styling for the checkboxes and dropdowns, and the
+#: script that keeps a 3-D camera the user moved across redraws. Dash gives a disabled
+#: checkbox no colour of its own, so the browser default (a dark grey) applies
+#: -- unreadable on this panel; both states are stated explicitly.
 _INDEX_TEMPLATE = """<!DOCTYPE html>
 <html>
   <head>
@@ -386,8 +398,6 @@ def _files_store(paths: list[str], geometry: str | None,
     return out
 
 
-_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
-
 #: CERN EOS instances, by the prefix of the namespace path they serve.
 _EOS_REDIRECTORS = (("/eos/user/", "eosuser.cern.ch"),
                     ("/eos/project", "eosproject.cern.ch"),
@@ -484,6 +494,65 @@ def _parse_reco(reco):
     return want_tracks, want_vertices, want_pandora
 
 
+def _style(theme, colormap) -> dict:
+    return dict(theme=theme or "dark", colormap=colormap or DEFAULT_COLORMAP)
+
+
+def _display_3d(ev, truth, reco, radiologicals, colour, scale,
+                particle_symbols, style):
+    """The 3-D space-point view for one control state."""
+    want_tracks, want_vertices, want_pandora = _parse_reco(reco)
+    return ev.display_3d(truth=truth,
+                         tracks=want_tracks,
+                         vertices=want_vertices or want_pandora,
+                         pandora_vertex=want_pandora,
+                         daughter_vertices=want_vertices,
+                         secondary_vertices=want_vertices,
+                         radiologicals=radiologicals,
+                         colour_by=colour or "integral",
+                         colour_scale=scale or "auto",
+                         particle_symbols=particle_symbols, **style)
+
+
+def _display_2d(ev, tag, truth, reco, radiologicals, colour, scale, merge,
+                mode, particle_symbols, style):
+    """The 2-D view (physical, or readout for ``mode="readout"``)."""
+    want_tracks, want_vertices, want_pandora = _parse_reco(reco)
+    return ev.display(tag, truth=truth,
+                      reco=want_tracks or want_vertices or want_pandora,
+                      tracks=want_tracks,
+                      vertices=want_vertices or want_pandora,
+                      pandora_vertex=want_pandora,
+                      daughter_vertices=want_vertices,
+                      secondary_vertices=want_vertices,
+                      colour_by=colour,
+                      radiologicals=radiologicals,
+                      colour_scale=scale, merge=merge or "orientation",
+                      space="readout" if mode == "readout" else "physical",
+                      particle_symbols=particle_symbols,
+                      **style)
+
+
+def _camera_view(cam) -> tuple[float, float, float]:
+    """(elev, azim, zoom) for matplotlib from a plotly scene camera.
+
+    Falls back to the default matplotlib view without a usable camera.
+    """
+    elev, azim, zoom = 18.0, -60.0, 1.15
+    if cam and isinstance(cam, dict) and "eye" in cam:
+        eye = cam["eye"]
+        center = cam.get("center", {"x": 0.0, "y": 0.0, "z": 0.0}) or {"x": 0.0, "y": 0.0, "z": 0.0}
+        dx = float(eye.get("x", 1.25)) - float(center.get("x", 0.0))
+        dy = float(eye.get("y", 1.25)) - float(center.get("y", 0.0))
+        dz = float(eye.get("z", 1.25)) - float(center.get("z", 0.0))
+        norm = float(np.sqrt(dx**2 + dy**2 + dz**2))
+        if norm > 1e-6:
+            elev = float(np.rad2deg(np.arcsin(np.clip(dz / norm, -1.0, 1.0))))
+            azim = float(np.rad2deg(np.arctan2(dy, dx)))
+            zoom = float(np.clip(1.15 * (2.165 / norm), 0.65, 1.80))
+    return elev, azim, zoom
+
+
 def light_display(ev, flash_tag=None, light_scale=None, light_fill=None,
                   style=None, *, charge=False, truth=False, reco=None,
                   radiologicals=True):
@@ -527,8 +596,7 @@ def render(files: dict[str, EventFile], path, entry, tag, colour, scale, mode,
         # inside the try: a stale entry number left over from a file switch
         # raises IndexError here, and must not escape the callback.
         ev = files[path][int(entry)]
-        style = dict(theme=theme or "dark", colormap=colormap or DEFAULT_COLORMAP)
-        want_tracks, want_vertices, want_pandora = _parse_reco(reco)
+        style = _style(theme, colormap)
         if mode == "flash3d":
             d = display_flashes_3d(ev, flash_tag, **style)
             return d.plotly_figure(height=None), d.summary()
@@ -541,30 +609,11 @@ def render(files: dict[str, EventFile], path, entry, tag, colour, scale, mode,
                               reco=reco, radiologicals=radiologicals)
             return d.plotly_figure(height=None), d.summary()
         if mode == "3d":
-            d = ev.display_3d(truth=want_truth,
-                              tracks=want_tracks,
-                              vertices=want_vertices or want_pandora,
-                              pandora_vertex=want_pandora,
-                              daughter_vertices=want_vertices,
-                              secondary_vertices=want_vertices,
-                              radiologicals=radiologicals,
-                              colour_by=colour or "integral",
-                              colour_scale=scale or "auto",
-                              particle_symbols=particle_symbols, **style)
+            d = _display_3d(ev, want_truth, reco, radiologicals, colour, scale,
+                            particle_symbols, style)
             return d.plotly_figure(height=None), d.summary()
-        d = ev.display(tag, truth=want_truth,
-                       reco=want_tracks or want_vertices or want_pandora,
-                       tracks=want_tracks,
-                       vertices=want_vertices or want_pandora,
-                       pandora_vertex=want_pandora,
-                       daughter_vertices=want_vertices,
-                       secondary_vertices=want_vertices,
-                       colour_by=colour,
-                       radiologicals=radiologicals,
-                       colour_scale=scale, merge=merge or "orientation",
-                       space="readout" if mode == "readout" else "physical",
-                       particle_symbols=particle_symbols,
-                       **style)
+        d = _display_2d(ev, tag, want_truth, reco, radiologicals, colour, scale,
+                        merge, mode, particle_symbols, style)
         note = ""
         if d.tracks is not None:
             note = f"\n  {len(d.tracks)} tracks, {len(d.vertices or [])} vertices"
@@ -628,9 +677,6 @@ def build_app(paths: list[str], geometry: str | None = None,
     # silently. open_file(geometry=None) lets each file name its own.
     geom = Geometry(geometry) if geometry else None
     app = Dash(__name__, title="pylarevd")
-    # Dash gives a disabled checkbox no colour of its own, so the browser
-    # default (dark grey) applies -- unreadable on this panel. State both the
-    # enabled and disabled colours explicitly.
     app.index_string = _INDEX_TEMPLATE.replace("__FG__", FG).replace(
         "__MUTED__", FG_MUTED).replace("__KEEP_VIEW__", KEEP_VIEW_JS)
 
@@ -788,27 +834,18 @@ def build_app(paths: list[str], geometry: str | None = None,
                   html.Div(style=_BAND, children=[
                     html.Div([
                         html.Button("◀ prev", id="prev", n_clicks=0,
-                                    style={**_CTL, "marginRight": "6px",
-                                           "padding": "6px 12px", "cursor": "pointer",
-                                           "borderRadius": "4px"}),
+                                    style=_BUTTON),
                         html.Button("next ▶", id="next", n_clicks=0,
-                                    style={**_CTL, "marginRight": "8px",
-                                           "padding": "6px 12px",
-                                           "cursor": "pointer", "borderRadius": "4px"}),
+                                    style={**_BUTTON, "marginRight": "8px"}),
                         html.Button("📌 fix perspective", id="fix-cam", n_clicks=0,
                                     title="Set/lock current 3D view as reference perspective",
-                                    style={**_CTL, "marginRight": "6px",
-                                           "padding": "6px 12px", "cursor": "pointer",
-                                           "borderRadius": "4px"}),
+                                    style=_BUTTON),
                         html.Button("🏷️ particle symbols", id="particle-symbols", n_clicks=0,
                                     title="Toggle true particle symbols on tracks and showers (2D & 3D)",
-                                    style={**_CTL, "marginRight": "6px",
-                                           "padding": "6px 12px", "cursor": "pointer",
-                                           "borderRadius": "4px"}),
+                                    style=_BUTTON),
                         html.Button("📷 snapshot (PDF)", id="snapshot-pdf", n_clicks=0,
                                     title="Save vector PDF from current perspective",
-                                    style={**_CTL, "marginRight": "6px", "padding": "6px 12px", "cursor": "pointer",
-                                           "borderRadius": "4px"}),
+                                    style=_BUTTON),
                         html.Button("🎞️ animated GIF", id="snapshot-gif", n_clicks=0,
                                     title=("Export an animated GIF: the light "
                                            "arriving in 'Light vs time', a "
@@ -928,7 +965,6 @@ def build_app(paths: list[str], geometry: str | None = None,
             + [{"label": mark(n, caps.get(f"group:{n}", False)), "value": n,
                 "disabled": not caps.get(f"group:{n}", False)}
                for n in ("track", "shower", "pfparticle", "cluster", "slice")])
-        has_reco = any(caps[k] for k in ("tracks", "vertices", "showers"))
         mode_opts = [
             {"label": "2D physical", "value": "2d"},
             {"label": "2D readout (channel/tick)", "value": "readout"},
@@ -993,10 +1029,8 @@ def build_app(paths: list[str], geometry: str | None = None,
                          "value": "on", "disabled": True}]
             return [{"label": f" {label}", "value": "on"}]
 
-        if not has_reco:
-            reco_opts = [{"label": " tracks + vertices (not in this file)", "value": "on", "disabled": True}]
-        elif not drawn:
-            reco_opts = [{"label": " tracks + vertices (not in this view)", "value": "on", "disabled": True}]
+        if not (has_reco and drawn):
+            reco_opts = option("tracks + vertices", has_reco)
         else:
             reco_opts = [
                 {"label": " tracks", "value": "tracks"},
@@ -1029,7 +1063,6 @@ def build_app(paths: list[str], geometry: str | None = None,
                   Input("jump", "value"), State("file", "value"),
                   prevent_initial_call=True)
     def _jump(value, path):
-        from dash import no_update
         if value is None or path not in files:
             return no_update
         return max(0, min(int(value), len(files[path]) - 1))
@@ -1145,15 +1178,11 @@ def build_app(paths: list[str], geometry: str | None = None,
     def _toggle_fix_cam(n_clicks, current_ref, relayout, current_cam):
         if current_ref is not None:
             # Release fixed perspective
-            return None, "📌 fix perspective", {**_CTL, "marginRight": "6px", "padding": "6px 12px", "cursor": "pointer", "borderRadius": "4px"}
+            return None, "📌 fix perspective", dict(_BUTTON)
 
         # Lock perspective
         cam = _extract_camera(relayout) or current_cam or {"eye": {"x": 1.25, "y": 1.25, "z": 1.25}}
-
-        fixed_style = {**_CTL, "marginRight": "6px", "padding": "6px 12px", "cursor": "pointer",
-                       "borderRadius": "4px", "backgroundColor": "#0284c7", "color": "#ffffff",
-                       "fontWeight": "600", "border": "1px solid #38bdf8"}
-        return cam, "✓ perspective fixed", fixed_style
+        return cam, "✓ perspective fixed", dict(_BUTTON_ON)
 
     @app.callback(Output("show-symbols", "data"),
                   Output("particle-symbols", "children"),
@@ -1162,31 +1191,28 @@ def build_app(paths: list[str], geometry: str | None = None,
                   State("show-symbols", "data"),
                   prevent_initial_call=True)
     def _toggle_symbols(n_clicks, current):
-        active = not bool(current)
-        if active:
-            style = {**_CTL, "marginRight": "6px", "padding": "6px 12px", "cursor": "pointer",
-                     "borderRadius": "4px", "backgroundColor": "#0284c7", "color": "#ffffff",
-                     "fontWeight": "600", "border": "1px solid #38bdf8"}
-            return True, "✓ particle symbols", style
-        style = {**_CTL, "marginRight": "6px", "padding": "6px 12px", "cursor": "pointer",
-                 "borderRadius": "4px"}
-        return False, "🏷️ particle symbols", style
+        if not current:
+            return True, "✓ particle symbols", dict(_BUTTON_ON)
+        return False, "🏷️ particle symbols", dict(_BUTTON)
+
+    # Both exports read the whole control state, in this order.
+    export_states = [
+        State("file", "value"), State("entry", "value"), State("tag", "value"),
+        State("colour", "value"), State("scale", "value"),
+        State("mode", "value"), State("truth", "value"),
+        State("merge", "value"), State("reco", "value"),
+        State("theme", "value"), State("colormap", "value"),
+        State("radio", "value"),
+        State("show-symbols", "data"),
+        State("fig", "relayoutData"),
+        State("camera-ref", "data"),
+        State("camera-current", "data"),
+        State("flash-tag", "value"),
+        State("light-scale", "value"),
+        State("light-fill", "value")]
 
     @app.callback(Output("download-snapshot", "data"),
-                  Input("snapshot-pdf", "n_clicks"),
-                  State("file", "value"), State("entry", "value"), State("tag", "value"),
-                  State("colour", "value"), State("scale", "value"),
-                  State("mode", "value"), State("truth", "value"),
-                  State("merge", "value"), State("reco", "value"),
-                  State("theme", "value"), State("colormap", "value"),
-                  State("radio", "value"),
-                  State("show-symbols", "data"),
-                  State("fig", "relayoutData"),
-                  State("camera-ref", "data"),
-                  State("camera-current", "data"),
-                  State("flash-tag", "value"),
-                  State("light-scale", "value"),
-                  State("light-fill", "value"),
+                  Input("snapshot-pdf", "n_clicks"), *export_states,
                   prevent_initial_call=True)
     def _snapshot(n_clicks, path, entry, tag, colour, scale, mode, truth,
                   merge, reco, theme, colormap, radio, show_symbols,
@@ -1199,50 +1225,24 @@ def build_app(paths: list[str], geometry: str | None = None,
             return no_update
         try:
             ev = files[path][int(entry)]
-            style = dict(theme=theme or "dark", colormap=colormap or DEFAULT_COLORMAP)
+            style = _style(theme, colormap)
             want_truth = bool(truth)
+            symbols = bool(show_symbols)
 
-            buf = io.BytesIO()
             run, subrun, ev_num = ev.id
             filename = f"pylarevd_run{run}_sub{subrun}_ev{ev_num}_{mode}.pdf"
 
+            save = dict(bbox_inches="tight")
             if mode == "3d":
-                cam = _extract_camera(relayout) or cam_ref or current_cam
-
-                elev = 18.0
-                azim = -60.0
-                zoom = 1.15
-                if cam and isinstance(cam, dict) and "eye" in cam:
-                    eye = cam["eye"]
-                    center = cam.get("center", {"x": 0.0, "y": 0.0, "z": 0.0}) or {"x": 0.0, "y": 0.0, "z": 0.0}
-                    dx = float(eye.get("x", 1.25)) - float(center.get("x", 0.0))
-                    dy = float(eye.get("y", 1.25)) - float(center.get("y", 0.0))
-                    dz = float(eye.get("z", 1.25)) - float(center.get("z", 0.0))
-                    norm = float(np.sqrt(dx**2 + dy**2 + dz**2))
-                    if norm > 1e-6:
-                        elev = float(np.rad2deg(np.arcsin(np.clip(dz / norm, -1.0, 1.0))))
-                        azim = float(np.rad2deg(np.arctan2(dy, dx)))
-                        zoom = float(np.clip(1.15 * (2.165 / norm), 0.65, 1.80))
-
-                want_tracks, want_vertices, want_pandora = _parse_reco(reco)
-                d = ev.display_3d(truth=want_truth,
-                                  tracks=want_tracks,
-                                  vertices=want_vertices or want_pandora,
-                                  pandora_vertex=want_pandora,
-                                  daughter_vertices=want_vertices,
-                                  secondary_vertices=want_vertices,
-                                  radiologicals=bool(radio), colour_by=colour or "integral",
-                                  colour_scale=scale or "auto",
-                                  particle_symbols=bool(show_symbols), **style)
+                elev, azim, zoom = _camera_view(
+                    _extract_camera(relayout) or cam_ref or current_cam)
+                d = _display_3d(ev, want_truth, reco, bool(radio), colour,
+                                scale, symbols, style)
                 fig_mpl = d.figure(elev=elev, azim=azim, zoom=zoom, pad=0.20,
-                                   particle_symbols=bool(show_symbols))
-                fig_mpl.savefig(buf, format="pdf", bbox_inches="tight", pad_inches=0.3, dpi=300)
-                plt.close(fig_mpl)
+                                   particle_symbols=symbols)
+                save["pad_inches"] = 0.3
             elif mode == "flash3d":
-                d = display_flashes_3d(ev, flash_tag, **style)
-                fig_mpl = d.figure()
-                fig_mpl.savefig(buf, format="pdf", bbox_inches="tight", dpi=300)
-                plt.close(fig_mpl)
+                fig_mpl = display_flashes_3d(ev, flash_tag, **style).figure()
             elif mode in _LIGHT_MODES:
                 # the static light map: every tile's PE over the whole window
                 d = light_display(ev, flash_tag, light_scale, light_fill, style,
@@ -1250,44 +1250,20 @@ def build_app(paths: list[str], geometry: str | None = None,
                                   truth=want_truth, reco=reco,
                                   radiologicals=bool(radio))
                 fig_mpl = d.figure(None)
-                fig_mpl.savefig(buf, format="pdf", dpi=300)
-                plt.close(fig_mpl)
+                save = {}
             elif mode == "optical":
-                d = display_optical(ev, flash_tag, **style)
-                fig_mpl = d.figure()
-                fig_mpl.savefig(buf, format="pdf", bbox_inches="tight", dpi=300)
-                plt.close(fig_mpl)
+                fig_mpl = display_optical(ev, flash_tag, **style).figure()
             else:
-                want_tracks, want_vertices, want_pandora = _parse_reco(reco)
-                d = ev.display(tag, truth=want_truth,
-                               reco=want_tracks or want_vertices or want_pandora,
-                               tracks=want_tracks,
-                               vertices=want_vertices or want_pandora,
-                               pandora_vertex=want_pandora,
-                               daughter_vertices=want_vertices,
-                               secondary_vertices=want_vertices,
-                               colour_by=colour,
-                               radiologicals=bool(radio), colour_scale=scale,
-                               merge=merge or "orientation",
-                               space="readout" if mode == "readout" else "physical",
-                               particle_symbols=bool(show_symbols),
-                               **style)
-                fig_mpl = d.figure(particle_symbols=bool(show_symbols))
-                fig_mpl.savefig(buf, format="pdf", bbox_inches="tight", dpi=300)
-                plt.close(fig_mpl)
-
-            buf.seek(0)
+                d = _display_2d(ev, tag, want_truth, reco, bool(radio), colour,
+                                scale, merge, mode, symbols, style)
+                fig_mpl = d.figure(particle_symbols=symbols)
+            buf = io.BytesIO()
+            fig_mpl.savefig(buf, format="pdf", dpi=300, **save)
+            plt.close(fig_mpl)
             data_bytes = buf.getvalue()
 
             # Also save to local evd_out/ directory as a backup
-            try:
-                os.makedirs("evd_out", exist_ok=True)
-                local_path = os.path.join("evd_out", filename)
-                with open(local_path, "wb") as f:
-                    f.write(data_bytes)
-                print(f"[pylarevd] Snapshot saved to {local_path} ({len(data_bytes)} bytes)")
-            except Exception as e:
-                print(f"[pylarevd] Note: could not write local backup: {e}", file=sys.stderr)
+            _save_backup(filename, data_bytes, "Snapshot")
 
             return dcc.send_bytes(data_bytes, filename=filename, type="application/pdf")
         except Exception as exc:
@@ -1297,20 +1273,7 @@ def build_app(paths: list[str], geometry: str | None = None,
             return no_update
 
     @app.callback(Output("download-gif", "data"),
-                  Input("snapshot-gif", "n_clicks"),
-                  State("file", "value"), State("entry", "value"), State("tag", "value"),
-                  State("colour", "value"), State("scale", "value"),
-                  State("mode", "value"), State("truth", "value"),
-                  State("merge", "value"), State("reco", "value"),
-                  State("theme", "value"), State("colormap", "value"),
-                  State("radio", "value"),
-                  State("show-symbols", "data"),
-                  State("fig", "relayoutData"),
-                  State("camera-ref", "data"),
-                  State("camera-current", "data"),
-                  State("flash-tag", "value"),
-                  State("light-scale", "value"),
-                  State("light-fill", "value"),
+                  Input("snapshot-gif", "n_clicks"), *export_states,
                   prevent_initial_call=True)
     def _snapshot_gif(n_clicks, path, entry, tag, colour, scale, mode, truth,
                       merge, reco, theme, colormap, radio, show_symbols,
@@ -1320,7 +1283,7 @@ def build_app(paths: list[str], geometry: str | None = None,
             return no_update
         try:
             ev = files[path][int(entry)]
-            style = dict(theme=theme or "dark", colormap=colormap or DEFAULT_COLORMAP)
+            style = _style(theme, colormap)
             want_truth = bool(truth)
 
             run, subrun, ev_num = ev.id
@@ -1336,33 +1299,10 @@ def build_app(paths: list[str], geometry: str | None = None,
                 return dcc.send_bytes(gif_bytes, filename=filename,
                                       type="image/gif")
             filename = f"pylarevd_run{run}_sub{subrun}_ev{ev_num}_3d_rotation.gif"
-
-            cam = _extract_camera(relayout) or cam_ref or current_cam
-            elev = 18.0
-            azim = -60.0
-            zoom = 1.15
-            if cam and isinstance(cam, dict) and "eye" in cam:
-                eye = cam["eye"]
-                center = cam.get("center", {"x": 0.0, "y": 0.0, "z": 0.0}) or {"x": 0.0, "y": 0.0, "z": 0.0}
-                dx = float(eye.get("x", 1.25)) - float(center.get("x", 0.0))
-                dy = float(eye.get("y", 1.25)) - float(center.get("y", 0.0))
-                dz = float(eye.get("z", 1.25)) - float(center.get("z", 0.0))
-                norm = float(np.sqrt(dx**2 + dy**2 + dz**2))
-                if norm > 1e-6:
-                    elev = float(np.rad2deg(np.arcsin(np.clip(dz / norm, -1.0, 1.0))))
-                    azim = float(np.rad2deg(np.arctan2(dy, dx)))
-                    zoom = float(np.clip(1.15 * (2.165 / norm), 0.65, 1.80))
-
-            want_tracks, want_vertices, want_pandora = _parse_reco(reco)
-            d = ev.display_3d(truth=want_truth,
-                              tracks=want_tracks,
-                              vertices=want_vertices or want_pandora,
-                              pandora_vertex=want_pandora,
-                              daughter_vertices=want_vertices,
-                              secondary_vertices=want_vertices,
-                              radiologicals=bool(radio), colour_by=colour or "integral",
-                              colour_scale=scale or "auto",
-                              particle_symbols=bool(show_symbols), **style)
+            elev, azim, zoom = _camera_view(
+                _extract_camera(relayout) or cam_ref or current_cam)
+            d = _display_3d(ev, want_truth, reco, bool(radio), colour, scale,
+                            bool(show_symbols), style)
             gif_bytes = d.rotate_gif(elev=elev, start_azim=azim, zoom=zoom, pad=0.20,
                                      particle_symbols=bool(show_symbols))
 
@@ -1378,8 +1318,7 @@ def build_app(paths: list[str], geometry: str | None = None,
     @app.callback(Output("app-container", "data-theme"),
                   Input("theme", "value"))
     def _theme_change(theme_name):
-        is_dark = (theme_name or "dark") == "dark"
-        return "dark" if is_dark else "light"
+        return "dark" if (theme_name or "dark") == "dark" else "light"
 
     # Left/right arrows step events: scanning many events should not mean
     # aiming at a button every time.
