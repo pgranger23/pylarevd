@@ -100,7 +100,7 @@ def report() -> str:
 
     rows = status()
     width = max(len(d.module) for d, _, _ in rows)
-    lines = [f"pylarevd environment",
+    lines = ["pylarevd environment",
              f"  python {sys.version.split()[0]}  ({sys.executable})"]
     try:
         from . import __version__
