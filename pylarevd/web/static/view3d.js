@@ -284,6 +284,23 @@ const V = {
 
 const sceneOf = (x, y, z, out) => out.set(z, y, -x);
 
+/** Has the camera (position, orientation, container size and, for a 10-long key, fov) changed since
+ *  the last call with this key array? Stores the new state in `key`. */
+function cameraChanged(key) {
+  const c = V.camera, p = c.position, q = c.quaternion;
+  const now = [p.x, p.y, p.z, q.x, q.y, q.z, q.w, V.container.clientWidth, V.container.clientHeight, c.fov];
+  let same = true;
+  for (let i = 0; i < key.length; i++) if (key[i] !== now[i]) { same = false; key[i] = now[i]; }
+  return !same;
+}
+
+/** detector coordinates -> clip space: projection * view * root (the detector -> scene rotation) */
+function clipMatrix(out) {
+  const c = V.camera;
+  c.updateMatrixWorld(); V.root.updateMatrixWorld(true);
+  return out.multiplyMatrices(c.projectionMatrix, c.matrixWorldInverse).multiply(V.root.matrixWorld).elements;
+}
+
 function mkUniforms() {
   const pal = Array.from({ length: 8 }, () => new THREE.Vector3());
   const pdg = Array.from({ length: PDG_CLASSES.length }, () => new THREE.Vector3());
@@ -469,9 +486,9 @@ function buildAxes(bb) {
   V.axisLabels.forEach((l, i) => { l.el.style.color = `var(--axis-${'xyz'[i]})`; });
 }
 
-function mkLabel(text, pos, color) {
+function mkLabel(text, pos) {
   const el = document.createElement('div');
-  el.className = 'hud-label'; el.textContent = text; if (color) el.style.color = color;
+  el.className = 'hud-label'; el.textContent = text;
   V.labelLayer.appendChild(el);
   return { el, x: pos[0], y: pos[1], z: pos[2], shown: true };
 }
@@ -891,12 +908,10 @@ function applyTheme() {
   setVec(M.sp.uniforms.uUnassoc.value, t.unassociated);
   setVec(M.sp.uniforms.uUniform.value, t.unassociated);
   t.categorical.forEach((h, i) => setVec(V.uni.uPal.value[i], h));
-  const key = t.name;
-  PDG_CLASSES.forEach((c, i) => setVec(V.uni.uPdg.value[i], c[key]));
+  PDG_CLASSES.forEach((c, i) => setVec(V.uni.uPdg.value[i], c[t.name]));
   V.uni.uCmapLo.value = t.cmap_floor; V.uni.uCmapHi.value = t.cmap_ceiling;
   colorMarkers();
-  if (!V.pdCustom) fillPdNeutral();
-  M.pd.uniforms.uAlpha.value = V.pdCustom ? M.pd.uniforms.uAlpha.value : V.pdAlpha;
+  if (!V.pdCustom) { fillPdNeutral(); M.pd.uniforms.uAlpha.value = V.pdAlpha; }
 }
 
 function applyOverlays() {
@@ -1004,7 +1019,7 @@ function applyColors() {
       u.uMode.value = 2; u.uAxis.value = axis; u.uLo.value = s.lo; u.uInv.value = 1 / (s.hi - s.lo);
       legendBar(`${colour} (cm)`, fmt(s.lo), fmt(s.hi), st.cmap);
     } else {
-      const name = (colour === 'charge' || colour === 'pdg') ? 'charge' : (valAttr(colour) ? colour : 'charge');
+      const name = colour !== 'pdg' && valAttr(colour) ? colour : 'charge';   // pdg: charge (+ species legend)
       const a = valAttr(name);
       if (a) {
         g.setAttribute('aValue', a);
@@ -1015,7 +1030,7 @@ function applyColors() {
           const lo = s.lo > 0 ? s.lo : Math.max(s.hi * 1e-3, 1e-6);
           u.uFloor.value = lo; u.uLo.value = Math.log(lo); u.uInv.value = 1 / (Math.log(s.hi) - Math.log(lo));
         } else { u.uLo.value = s.lo; u.uInv.value = 1 / (s.hi - s.lo); }
-        const missing = (colour !== name && !(colour === 'pdg')) ? ` [no sp/${colour} in this event: showing charge]` : '';
+        const missing = colour !== name && colour !== 'pdg' ? ` [no sp/${colour} in this event: showing charge]` : '';
         legendBar(`${name}${log ? ' (log)' : ''}${missing}`, fmt(s.lo), fmt(s.hi), st.cmap);
       } else { u.uMode.value = 3; }
     }
@@ -1055,13 +1070,10 @@ function applyAll() { applyTheme(); applyColors(); applyOverlays(); }
 
 function onState(state, changed) {
   if (!V.ready) return;
-  if (changed.has('theme')) { applyTheme(); }
-  if (['theme', 'color', 'scale', 'cmap'].some((k) => changed.has(k))) { if (V.bundle) applyColors(); }
-  if (changed.has('ov') || changed.has('theme')) applyOverlays();
-  if (changed.has('view') || changed.has('fbars') || (changed.has('ov') && V.bundle)) {
-    applyOverlays();
-    if (V.bundle) applyColors();   // legend depends on truth visibility and on the flash bars
-  }
+  if (changed.has('theme')) applyTheme();
+  if (['ov', 'theme', 'view', 'fbars'].some((k) => changed.has(k))) applyOverlays();
+  // the legend also depends on truth visibility and on the flash bars
+  if (V.bundle && ['theme', 'color', 'scale', 'cmap', 'view', 'fbars', 'ov'].some((k) => changed.has(k))) applyColors();
   if (changed.has('dim')) { V.uni.uDim.value = V.app.selDim ? V.app.selDim() : 0.15; requestRender(); }
   if (changed.has('view')) applySelection();
   requestRender();
@@ -1168,12 +1180,9 @@ function pickState() {
 }
 
 function projectAll(P) {
-  const c = V.camera, p = c.position, q = c.quaternion, t = V.controls.target;
-  const w = V.container.clientWidth, h = V.container.clientHeight, k = P.key;
-  if (k[0] === p.x && k[1] === p.y && k[2] === p.z && k[3] === q.x && k[4] === q.y && k[5] === q.z && k[6] === q.w && k[7] === w && k[8] === h && k[9] === c.fov) return;
-  k[0] = p.x; k[1] = p.y; k[2] = p.z; k[3] = q.x; k[4] = q.y; k[5] = q.z; k[6] = q.w; k[7] = w; k[8] = h; k[9] = c.fov;
-  c.updateMatrixWorld(); V.root.updateMatrixWorld(true);
-  const e = P.mat.multiplyMatrices(c.projectionMatrix, c.matrixWorldInverse).multiply(V.root.matrixWorld).elements;
+  if (!cameraChanged(P.key)) return;
+  const w = V.container.clientWidth, h = V.container.clientHeight;
+  const e = clipMatrix(P.mat);
   const hw = 0.5 * w, hh = 0.5 * h;
   const proj = (x, y, z, ox, oy, oz, i) => {
     const cw = e[3] * x + e[7] * y + e[11] * z + e[15];
@@ -1197,6 +1206,11 @@ function projectAll(P) {
   P.grid = { start, items }; P.gw = gw; P.gh = gh;
   if (P.tp) for (let i = 0, n = P.tx.length; i < n; i++) proj(P.tp[3 * i], P.tp[3 * i + 1], P.tp[3 * i + 2], P.tx, P.ty, null, i);
   if (P.shp) for (let i = 0, n = P.hx.length; i < n; i++) proj(P.shp[3 * i], P.shp[3 * i + 1], P.shp[3 * i + 2], P.hx, P.hy, null, i);
+}
+
+/** both ends of segment a-b on the same side of the (2r)-wide box around (px, py) */
+function segOutside(px, py, r, ax, ay, bx, by) {
+  return (ax < px - r && bx < px - r) || (ax > px + r && bx > px + r) || (ay < py - r && by < py - r) || (ay > py + r && by > py + r);
 }
 
 function segDist2(px, py, ax, ay, bx, by) {
@@ -1240,7 +1254,7 @@ function pickAt(mx, my) {
       for (let j = off[t]; j < off[t + 1] - 1; j++) {
         const ax = tx[j], ay = ty[j], bx = tx[j + 1], by = ty[j + 1];
         if (ax !== ax || bx !== bx) continue;
-        if ((ax < mx - R_LINE && bx < mx - R_LINE) || (ax > mx + R_LINE && bx > mx + R_LINE) || (ay < my - R_LINE && by < my - R_LINE) || (ay > my + R_LINE && by > my + R_LINE)) continue;
+        if (segOutside(mx, my, R_LINE, ax, ay, bx, by)) continue;
         const d2 = segDist2(mx, my, ax, ay, bx, by);
         if (d2 < tb) { tb = d2; ti = t; }
       }
@@ -1288,18 +1302,15 @@ function mcPickState() {
     TM, bundle: b, stamp: TM.stamp, rows: Int32Array.from(rows), ptIdx, co,
     sx: new Float32Array(tot), sy: new Float32Array(tot),
     bx0: new Float32Array(nr), bx1: new Float32Array(nr), by0: new Float32Array(nr), by1: new Float32Array(nr),
-    key: new Float64Array(10).fill(NaN),
+    key: new Float64Array(10).fill(NaN), mat: new THREE.Matrix4(),
   };
   return P;
 }
 
 function projectMc(P) {
-  const c = V.camera, p = c.position, q = c.quaternion;
-  const w = V.container.clientWidth, h = V.container.clientHeight, k = P.key;
-  if (k[0] === p.x && k[1] === p.y && k[2] === p.z && k[3] === q.x && k[4] === q.y && k[5] === q.z && k[6] === q.w && k[7] === w && k[8] === h && k[9] === c.fov) return;
-  k[0] = p.x; k[1] = p.y; k[2] = p.z; k[3] = q.x; k[4] = q.y; k[5] = q.z; k[6] = q.w; k[7] = w; k[8] = h; k[9] = c.fov;
-  c.updateMatrixWorld(); V.root.updateMatrixWorld(true);
-  const e = new THREE.Matrix4().multiplyMatrices(c.projectionMatrix, c.matrixWorldInverse).multiply(V.root.matrixWorld).elements;
+  if (!cameraChanged(P.key)) return;
+  const w = V.container.clientWidth, h = V.container.clientHeight;
+  const e = clipMatrix(P.mat);
   const hw = 0.5 * w, hh = 0.5 * h, pts = V.bundle.get('mc/points');
   const { ptIdx, co, sx, sy, bx0, bx1, by0, by1 } = P;
   for (let t = 0; t < P.rows.length; t++) {
@@ -1328,7 +1339,7 @@ function pickMc(mx, my) {
     for (let m = co[t]; m < co[t + 1] - 1; m++) {
       const ax = sx[m], ay = sy[m], bx = sx[m + 1], by = sy[m + 1];
       if (ax !== ax || bx !== bx) continue;
-      if ((ax < mx - R_LINE && bx < mx - R_LINE) || (ax > mx + R_LINE && bx > mx + R_LINE) || (ay < my - R_LINE && by < my - R_LINE) || (ay > my + R_LINE && by > my + R_LINE)) continue;
+      if (segOutside(mx, my, R_LINE, ax, ay, bx, by)) continue;
       const d2 = segDist2(mx, my, ax, ay, bx, by);
       if (d2 < bd) { bd = d2; bt = t; }
     }
@@ -1412,10 +1423,8 @@ function setAnimating(on) {
 }
 
 function updateLabels() {
-  const c = V.camera, k = V.camKey, p = c.position, q = c.quaternion;
-  const w = V.container.clientWidth, h = V.container.clientHeight;
-  if (k[0] === p.x && k[1] === p.y && k[2] === p.z && k[3] === q.x && k[4] === q.y && k[5] === q.z && k[6] === q.w && k[7] === w && k[8] === h) return;
-  k[0] = p.x; k[1] = p.y; k[2] = p.z; k[3] = q.x; k[4] = q.y; k[5] = q.z; k[6] = q.w; k[7] = w; k[8] = h;
+  if (!cameraChanged(V.camKey)) return;
+  const c = V.camera, w = V.container.clientWidth, h = V.container.clientHeight;
   c.updateMatrixWorld();
   const place = (l) => {
     const v = sceneOf(l.x, l.y, l.z, V.scratch).project(c);
