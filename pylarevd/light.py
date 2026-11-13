@@ -1668,6 +1668,8 @@ def _encode_gif(frames: list[np.ndarray], fps: float, hold: float) -> bytes:
 def _encode_mp4(frames: list[np.ndarray], fps: float, hold: float) -> bytes:
     """H.264 via an ffmpeg pipe; the held last frame is repeated."""
     import tempfile
+    if not frames:
+        raise ValueError("no frames to encode")
     h, w = frames[0].shape[:2]
     extra = [frames[-1]] * max(0, int(round(hold * fps)) - 1)
     with tempfile.TemporaryDirectory() as tmp:
