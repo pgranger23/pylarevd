@@ -19,6 +19,7 @@ import time
 
 import numpy as np
 
+from ._tags import tag_of as _tag_of
 from .bundle import bundle_bytes
 
 #: spacepoint/hit group kinds exported as ``hits/group/<kind>``
@@ -188,11 +189,6 @@ def _add_projected(arrays, prefix, key_name, d, polys, panels):
     arrays[f"{prefix}/offsets"] = off.astype(np.uint32)
     arrays[f"{prefix}/panel"] = _stack(pan, (), np.uint8)
     arrays[f"{prefix}/{key_name}"] = _stack(own, (), np.int32)
-
-
-def _tag_of(product: str) -> str:
-    parts = str(product).split("_")
-    return parts[1] if len(parts) > 1 else str(product)
 
 
 def _fmt_exc(exc) -> str:

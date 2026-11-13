@@ -20,7 +20,9 @@ import time
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
+
+from ._tags import tag_of
 
 STATIC_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 GZIP_LEVEL = 3
@@ -186,8 +188,7 @@ class FileInfo:
     def _tag_list(products):
         out = []
         for p in products:
-            parts = str(p).split("_")
-            tag = parts[1] if len(parts) > 1 else str(p)
+            tag = tag_of(p)
             if tag not in out:
                 out.append(tag)
         return out
