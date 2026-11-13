@@ -9,6 +9,8 @@
 // and the toolbar, injects the buttons next to #btn-shot, and reads everything from
 // app.state (plus app.views.view3d.cameraInfo?.() for the camera).
 
+import { downloadBlob } from './util.js';
+
 const GIF_VIEWS = ['3d', 'light', 'charge+light'];
 const LIGHT_KEYS = ['lclock', 'lfill', 'lframes', 'lfps', 'lpers', 'lwlo', 'lwhi', 'lt0', 'lt'];
 
@@ -38,7 +40,7 @@ function buildQuery(kind) {
   try {
     const v3 = app.views && app.views.view3d;
     cam = v3 && v3.cameraInfo ? v3.cameraInfo() : null;
-  } catch (e) { cam = null; }
+  } catch (e) { /* no camera: export with the default view */ }
   if (cam && cam.position && cam.target) {
     q.set('campos', cam.position.map((x) => +x.toFixed(2)).join(','));
     q.set('camtgt', cam.target.map((x) => +x.toFixed(2)).join(','));
@@ -54,8 +56,7 @@ function filenameOf(resp, fallback) {
 }
 
 function expectedSeconds(kind) {
-  const s = app.state;
-  if (kind === 'gif') return s.view === '3d' ? 15 : 20;
+  if (kind === 'gif') return app.state.view === '3d' ? 15 : 20;
   return 5;
 }
 
@@ -80,11 +81,7 @@ async function run(kind) {
     const blob = await resp.blob();
     const name = filenameOf(resp, `pylarevd_export.${kind}`);
     const note = resp.headers.get('X-Export-Note');
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = name;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    downloadBlob(blob, name, 10000);
     app.status(`${label} saved: ${name} (${(blob.size / 1e6).toFixed(2)} MB, `
       + `${((performance.now() - t0) / 1000).toFixed(1)} s)` + (note ? ` - ${note}` : ''));
   } catch (e) {
@@ -106,9 +103,9 @@ function refresh() {
   pdfBtn.title = noServer || trig || (view === '2d+3d'
     ? 'vector PDF (300 dpi) of the 2-D panels (2D+3D exports the 2-D side)'
     : 'vector PDF (300 dpi) of the current view, rendered on the server');
-  const gifOk = GIF_VIEWS.includes(view) && !sample;
-  gifBtn.disabled = busy || !gifOk;
-  gifBtn.title = noServer || (!GIF_VIEWS.includes(view)
+  const gifView = GIF_VIEWS.includes(view);
+  gifBtn.disabled = busy || !gifView || sample;
+  gifBtn.title = noServer || (!gifView
     ? 'GIF is available for the 3D (rotation), Light and Charge+Light views'
     : view === '3d' ? 'rotating GIF from the current camera (about 15 s)'
       : 'light animation GIF with the current light settings (10-30 s)');

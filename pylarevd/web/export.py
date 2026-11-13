@@ -19,6 +19,7 @@ import time
 
 import numpy as np
 
+from ._tags import tag_of as _tag_of
 from .bundle import bundle_bytes
 
 #: spacepoint/hit group kinds exported as ``hits/group/<kind>``
@@ -45,6 +46,28 @@ def _stack(chunks, shape_tail, dtype=np.float32):
     if not chunks:
         return np.zeros((0,) + shape_tail, dtype)
     return np.concatenate(chunks).astype(dtype, copy=False)
+
+
+def _offsets(lens) -> np.ndarray:
+    """Run lengths -> uint32 offsets (n + 1, starting at 0)."""
+    off = np.zeros(len(lens) + 1, np.uint32)
+    off[1:] = np.cumsum(lens)
+    return off
+
+
+def _panel_index(n, panels) -> np.ndarray:
+    """uint8 panel of each of ``n`` hits (NO_PANEL when in none)."""
+    pidx = np.full(n, NO_PANEL, np.uint8)
+    for k, p in enumerate(panels):
+        pidx[p.mask] = k
+    return pidx
+
+
+def _group_sizes(group, n) -> np.ndarray:
+    """int32 members per group id 0..n-1 (zeros when ``group`` is None)."""
+    if group is None:
+        return np.zeros(n, np.int32)
+    return np.bincount(group[(group >= 0) & (group < n)], minlength=n)[:n].astype(np.int32)
 
 
 def _rows_of(keys, query):
@@ -84,10 +107,8 @@ def _concat_points(polys) -> np.ndarray:
 def _ragged(polys):
     """List of (n_i, 3) arrays -> (points f32, offsets u32)."""
     lens = np.fromiter((len(p) for p in polys), np.int64, len(polys))
-    offsets = np.zeros(len(polys) + 1, np.uint32)
-    offsets[1:] = np.cumsum(lens)
     pts = _concat_points(polys) if lens.sum() else np.zeros((0, 3))
-    return pts.astype(np.float32), offsets
+    return pts.astype(np.float32), _offsets(lens)
 
 
 def _stack_polylines(polys):
@@ -144,10 +165,8 @@ def project_polylines(d, panel, polys, stacked=None):
         return None
     first = np.flatnonzero(new)
     kept = np.flatnonzero(keep_run)
-    offsets = np.zeros(len(kept) + 1, np.uint32)
-    offsets[1:] = np.cumsum(counts[kept])
     pts = np.column_stack([w[sel], x[sel]]).astype(np.float32)
-    return pts, offsets, owner_row[first[kept]].astype(np.int32)
+    return pts, _offsets(counts[kept]), owner_row[first[kept]].astype(np.int32)
 
 
 def _add_projected(arrays, prefix, key_name, d, polys, panels):
@@ -172,13 +191,9 @@ def _add_projected(arrays, prefix, key_name, d, polys, panels):
     arrays[f"{prefix}/{key_name}"] = _stack(own, (), np.int32)
 
 
-def _tag_of(product: str) -> str:
-    parts = str(product).split("_")
-    return parts[1] if len(parts) > 1 else str(product)
-
-
 def _fmt_exc(exc) -> str:
-    msg = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+    text = str(exc).strip()
+    msg = text.splitlines()[0] if text else ""
     return f"{type(exc).__name__}: {msg[:140]}"
 
 
@@ -213,9 +228,7 @@ def geometry_bundle(geometry) -> bytes:
         arrays["pd/half"] = _f32(np.column_stack([pw.half_y, pw.half_z]))
         arrays["pd/wall"] = np.asarray(pw.wall, np.uint8)
         lens = np.array([len(c) for c in pw.channels], np.int64)
-        off = np.zeros(len(lens) + 1, np.uint32)
-        off[1:] = np.cumsum(lens)
-        arrays["pd/chan_offsets"] = off
+        arrays["pd/chan_offsets"] = _offsets(lens)
         arrays["pd/channels"] = (np.concatenate([np.asarray(c) for c in pw.channels])
                                  if lens.sum() else np.zeros(0)).astype(np.uint32)
         arrays["pd/chan_tile"] = np.asarray(pw.chan_tile, np.int32)
@@ -231,7 +244,7 @@ def geometry_bundle(geometry) -> bytes:
 # event
 
 
-def _panel_meta(d, k, panel):
+def _panel_meta(d, panel):
     from ..display import _anode_positions, _drift_bounds
     hx, hy, xlabel, ylabel = d._axes
     a, b = hx[panel.mask], hy[panel.mask]
@@ -312,16 +325,10 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
     spacepoints = section("spacepoints", ev.spacepoints)
     mc = section("mc", lambda: ev.mc_particles(min_points=2))
     deposits = section("deposits", ev.truth_deposits)
-    if tracks is not None and not len(tracks):
-        tracks = None
-    if showers is not None and not len(showers):
-        showers = None
-    if vertices is not None and not len(vertices):
-        vertices = None
-    if mc is not None and not len(mc):
-        mc = None
-    if deposits is not None and not len(deposits):
-        deposits = None
+    # an empty collection is treated as a missing one
+    tracks, showers, vertices, mc, deposits = (
+        None if c is None or not len(c) else c
+        for c in (tracks, showers, vertices, mc, deposits))
 
     # ---- truth bookkeeping -------------------------------------------
     ids = section("neutrino_track_ids", ev.neutrino_track_ids) if mc is not None or deposits is not None else None
@@ -347,10 +354,7 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         avail["hits"] = True
         meta["hit_tag"] = _tag_of(hits.product)
         panels = d.panels
-        pidx = np.full(len(hits), NO_PANEL, np.uint8)
-        for k, p in enumerate(panels):
-            pidx[p.mask] = k
-        arrays["hits/panel"] = pidx
+        arrays["hits/panel"] = _panel_index(len(hits), panels)
         arrays["hits/h"] = _f32(hits.w)
         arrays["hits/v"] = _f32(hits.x)
         arrays["hits/charge"] = _f32(hits.integral)
@@ -361,18 +365,15 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         arrays["hits/view"] = np.asarray(hits.view, np.int8)
         arrays["hits/chan_view"] = np.asarray(hits.chan_view, np.int8)
         arrays["hits/drift_sign"] = np.asarray(hits.drift_sign, np.int8)
-        meta["panels"] = [_panel_meta(d, k, p) for k, p in enumerate(panels)]
+        meta["panels"] = [_panel_meta(d, p) for p in panels]
         # the other two panel groupings (merge="view" / "none"), shipped as extra
         # panel sets so the browser switches between them without a refetch
         for sf, mg in GROUPINGS:
             def _extra(sf=sf, mg=mg):
                 dx = EventDisplay(ev, hits=hits, truth=deposits, tracks=tracks,
                                   vertices=vertices, showers=showers, mc=mc, merge=mg)
-                px = np.full(len(hits), NO_PANEL, np.uint8)
-                for k, p in enumerate(dx.panels):
-                    px[p.mask] = k
-                arrays[f"hits/panel{sf}"] = px
-                meta[f"panels{sf}"] = [_panel_meta(dx, k, p) for k, p in enumerate(dx.panels)]
+                arrays[f"hits/panel{sf}"] = _panel_index(len(hits), dx.panels)
+                meta[f"panels{sf}"] = [_panel_meta(dx, p) for p in dx.panels]
                 extra[sf] = dx
             section(f"panels{sf}", _extra)
         # the classic readout view (channel vs tick), one panel per plane
@@ -416,12 +417,13 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         if d.panels:
             meta["summary"] = d.summary().splitlines()
     else:
-        panels = []
         if hits is None or not len(hits):
             notes.append("no hits available" if hits is None else "hit collection is empty")
         if inter is not None:
             meta["summary"] = inter.describe().splitlines()
             meta["truth"]["headline"] = inter.headline()
+    # every wire-space panel grouping: (suffix, EventDisplay), default first
+    displays = ([("", d)] + list(extra.items())) if d is not None else []
 
     # ---- space points -------------------------------------------------
     if spacepoints is not None and len(spacepoints):
@@ -441,7 +443,7 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         arrays["tracks/id"] = np.asarray(tracks.id, np.int32)
         arrays["tracks/chi2"] = _f32(tracks.chi2)
         if d is not None:
-            for sf, dd in [("", d)] + list(extra.items()):
+            for sf, dd in displays:
                 section(f"tracks2d{sf}", lambda sf=sf, dd=dd: _add_projected(
                     arrays, f"tracks2d{sf}", "track", dd, list(tracks.points), dd.panels))
     if showers is not None:
@@ -460,14 +462,12 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
                         owner.append(j)
                         pan.append(k)
                 lens = np.array([len(p) for p in polys], np.int64)
-                off = np.zeros(len(polys) + 1, np.uint32)
-                off[1:] = np.cumsum(lens)
                 arrays[f"showers2d{sf}/points"] = (_f32(np.concatenate(polys)) if polys
                                                    else np.zeros((0, 2), np.float32))
-                arrays[f"showers2d{sf}/offsets"] = off
+                arrays[f"showers2d{sf}/offsets"] = _offsets(lens)
                 arrays[f"showers2d{sf}/panel"] = np.asarray(pan, np.uint8)
                 arrays[f"showers2d{sf}/shower"] = np.asarray(owner, np.int32)
-            for sf, dd in [("", d)] + list(extra.items()):
+            for sf, dd in displays:
                 section(f"showers2d{sf}", lambda sf=sf, dd=dd: cones(sf, dd))
     if vertices is not None:
         avail["vertices"] = True
@@ -483,7 +483,7 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         arrays["vtx/role"] = role
         arrays["vtx/id"] = np.asarray(vertices.id, np.int32)
         if d is not None:
-            for sf, dd in [("", d)] + list(extra.items()):
+            for sf, dd in displays:
                 hv, pan, idx = [], [], []
                 for k, panel in enumerate(dd.panels):
                     pr = dd.project_points(panel, vertices.xyz[:, 0], vertices.xyz[:, 1],
@@ -546,7 +546,7 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
                 _add_projected(arrays, f"mc2d{sf}", "index", dd, polys, dd.panels)
                 # owner is the position in `polys`; make it an index into mc/*
                 arrays[f"mc2d{sf}/index"] = sel[arrays[f"mc2d{sf}/index"]].astype(np.int32)
-            for sf, dd in [("", d)] + list(extra.items()):
+            for sf, dd in displays:
                 section(f"mc2d{sf}", lambda sf=sf, dd=dd: mc2d(sf, dd))
             timing["mc2d_s"] = round(time.time() - t, 3)
     if deposits is not None:
@@ -562,7 +562,7 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
         if mc is not None:
             arrays["dep/mc"] = _rows_of(mc.track_id, np.abs(deposits.track_id))
     if d is not None and tv is not None:
-        for sf, dd in [("", d)] + list(extra.items()):
+        for sf, dd in displays:
             v2 = []
             for panel in dd.panels:
                 try:
@@ -667,7 +667,6 @@ def event_bundle(event, *, hit_tag=None, flash_tag=None) -> bytes:
     # ---- online trigger (TPs, TAs, TCs) ----------------------------------
     def trigger():
         from .trigger import export_trigger
-        displays = ([("", d)] + list(extra.items())) if d is not None else []
         meta["summary"].extend(export_trigger(ev, hits, displays, arrays, meta))
         avail["trigger"] = True
     if src.art.find_product("dunedaq::trgdataformats::TriggerPrimitive"):
@@ -695,8 +694,10 @@ def _first_by_key(left, right, n_left):
 
 
 def _plane_counts(group, chan_view, n, n_planes=3):
-    """(n, n_planes) int32: hits per group id and wire plane."""
+    """(n, n_planes) int32: hits per group id and wire plane (zeros when ``group`` is None)."""
     out = np.zeros((n, n_planes), np.int32)
+    if group is None:
+        return out
     group = np.asarray(group, np.int64)
     ok = (group >= 0) & (group < n) & (chan_view >= 0) & (chan_view < n_planes)
     if ok.any():
@@ -704,6 +705,15 @@ def _plane_counts(group, chan_view, n, n_planes=3):
                            minlength=n * n_planes)
         out[:] = flat[: n * n_planes].reshape(n, n_planes)
     return out
+
+
+def _slice_of_pfp(group, pfp_slice) -> np.ndarray:
+    """int32 slice of each PFParticle group id; -1 for ids outside ``pfp_slice``."""
+    g = np.asarray(group, np.int64)
+    out = np.full(len(g), -1, np.int64)
+    ok = (g >= 0) & (g < len(pfp_slice))
+    out[ok] = pfp_slice[g[ok]]
+    return out.astype(np.int32)
 
 
 def _export_reco_objects(ev, hits, tracks, showers, spacepoints, vertices, mc,
@@ -770,9 +780,8 @@ def _export_reco_objects(ev, hits, tracks, showers, spacepoints, vertices, mc,
     except Exception as exc:
         if hg["slice"] is not None or art.find_product("recob::Slice"):
             notes.append(f"slice table: Slices not readable ({_fmt_exc(exc)})")
-    for g in (hg["slice"],):
-        if g is not None and (g >= 0).any():
-            n_slice = max(n_slice, int(g.max()) + 1)
+    if hg["slice"] is not None and (hg["slice"] >= 0).any():
+        n_slice = max(n_slice, int(hg["slice"].max()) + 1)
     if slice_id is None or len(slice_id) < n_slice:
         slice_id = np.arange(n_slice, dtype=np.int32)
 
@@ -788,9 +797,7 @@ def _export_reco_objects(ev, hits, tracks, showers, spacepoints, vertices, mc,
 
     # hits: fill a missing slice grouping from the PFParticle one
     if hg["slice"] is None and hg["pfparticle"] is not None and n_slice and pfp is not None:
-        g = hg["pfparticle"].astype(np.int64)
-        gs = np.where((g >= 0) & (g < n_pfp), pfp_slice[np.clip(g, 0, max(n_pfp - 1, 0))], -1)
-        arrays["hits/group/slice"] = gs.astype(np.int32)
+        arrays["hits/group/slice"] = _slice_of_pfp(hg["pfparticle"], pfp_slice)
         hg["slice"] = arrays["hits/group/slice"]
         meta["groups"]["slice"] = int(n_slice)
         notes.append("hits/group/slice derived from the PFParticle->Slice association")
@@ -821,8 +828,7 @@ def _export_reco_objects(ev, hits, tracks, showers, spacepoints, vertices, mc,
                 cur = sp_group.get("pfparticle")
                 sp_group["pfparticle"] = direct if cur is None else np.where(cur >= 0, cur, direct)
             if "pfparticle" in sp_group and "slice" not in sp_group and n_slice:
-                g = sp_group["pfparticle"].astype(np.int64)
-                sp_group["slice"] = np.where(g >= 0, pfp_slice[np.clip(g, 0, n_pfp - 1)], -1).astype(np.int32)
+                sp_group["slice"] = _slice_of_pfp(sp_group["pfparticle"], pfp_slice)
         for kind, g in sp_group.items():
             arrays[f"sp/group/{kind}"] = g
 
@@ -876,16 +882,9 @@ def _export_reco_objects(ev, hits, tracks, showers, spacepoints, vertices, mc,
             arrays[f"pfp/{what}"] = row
         # counts
         gp = hg["pfparticle"]
-        if gp is not None:
-            pl = _plane_counts(gp, chan_view, n_pfp)
-            arrays["pfp/n_hits_plane"] = pl
-            arrays["pfp/n_hits"] = np.bincount(gp[(gp >= 0) & (gp < n_pfp)], minlength=n_pfp).astype(np.int32)[:n_pfp]
-        else:
-            arrays["pfp/n_hits_plane"] = np.zeros((n_pfp, 3), np.int32)
-            arrays["pfp/n_hits"] = np.zeros(n_pfp, np.int32)
-        sg = sp_group.get("pfparticle")
-        arrays["pfp/n_sp"] = (np.bincount(sg[(sg >= 0) & (sg < n_pfp)], minlength=n_pfp)[:n_pfp].astype(np.int32)
-                              if sg is not None else np.zeros(n_pfp, np.int32))
+        arrays["pfp/n_hits_plane"] = _plane_counts(gp, chan_view, n_pfp)
+        arrays["pfp/n_hits"] = _group_sizes(gp, n_pfp)
+        arrays["pfp/n_sp"] = _group_sizes(sp_group.get("pfparticle"), n_pfp)
         # vertex of each PFParticle (row of vtx/xyz)
         pv = np.full(n_pfp, -1, np.int32)
         if vertices is not None and len(vertices):
@@ -926,13 +925,9 @@ def _export_reco_objects(ev, hits, tracks, showers, spacepoints, vertices, mc,
         avail["slice"] = True
         arrays["slice/id"] = slice_id[:n_slice].astype(np.int32)
         gs = hg["slice"]
-        arrays["slice/n_hits_plane"] = (_plane_counts(gs, chan_view, n_slice) if gs is not None
-                                        else np.zeros((n_slice, 3), np.int32))
-        arrays["slice/n_hits"] = (np.bincount(gs[(gs >= 0) & (gs < n_slice)], minlength=n_slice)[:n_slice].astype(np.int32)
-                                  if gs is not None else np.zeros(n_slice, np.int32))
-        ss = sp_group.get("slice")
-        arrays["slice/n_sp"] = (np.bincount(ss[(ss >= 0) & (ss < n_slice)], minlength=n_slice)[:n_slice].astype(np.int32)
-                                if ss is not None else np.zeros(n_slice, np.int32))
+        arrays["slice/n_hits_plane"] = _plane_counts(gs, chan_view, n_slice)
+        arrays["slice/n_hits"] = _group_sizes(gs, n_slice)
+        arrays["slice/n_sp"] = _group_sizes(sp_group.get("slice"), n_slice)
         s_top = np.full(n_slice, -1, np.int32)
         s_nu = np.zeros(n_slice, np.uint8)
         s_npfp = np.zeros(n_slice, np.int32)

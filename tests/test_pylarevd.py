@@ -30,12 +30,6 @@ GEOM = os.path.join(os.path.dirname(os.path.abspath(pylario.__file__)),
 
 needs_data = pytest.mark.skipif(not os.path.exists(ROCKMU), reason="sample file absent")
 needs_geom = pytest.mark.skipif(not os.path.exists(GEOM), reason="geometry absent")
-try:
-    import dash
-    _HAS_DASH = True
-except ImportError:
-    _HAS_DASH = False
-needs_dash = pytest.mark.skipif(not _HAS_DASH, reason="dash absent")
 
 
 # ---- layout: derived from streamer info, verified against real bytes -------
@@ -321,19 +315,6 @@ def test_log_colorbar_always_labelled():
     assert len(bar.ticktext) == len(bar.tickvals)
 
 
-@needs_data
-@needs_geom
-def test_app_survives_bad_input():
-    """A stale entry or an unreadable file must not take the browser down."""
-    from pylarevd.app import build_app, render
-    app = build_app(["/nonexistent/file.root", ROCKMU])   # bad one skipped
-    files = app._pylarevd_files
-    assert len(files) == 1
-    _, summary = render(files, ROCKMU, 999, "hitfd", "integral", "auto", "2d",
-                        [], "orientation")
-    assert summary.startswith("ERROR")
-
-
 def test_cli_event_spec_rejects_nonsense():
     from pylarevd.cli import _parse_events
     assert _parse_events("2-5", 10) == [2, 3, 4, 5]
@@ -359,8 +340,11 @@ def test_display3d_options():
     d = f[0].display_3d(colour_by="charge")
     assert d.plotly_figure() is not None
     assert "space points" in d.summary()
+    # "integral" is the default and an alias of "charge" (the web viewer and
+    # the CLI share one colour vocabulary across the 2-D and 3-D views)
+    assert f[0].display_3d(colour_by="integral").colour_by == "integral"
     with pytest.raises(ValueError):
-        f[0].display_3d(colour_by="integral")   # not a space-point quantity
+        f[0].display_3d(colour_by="peak width")   # not a space-point quantity
 
 
 @needs_data
@@ -512,11 +496,19 @@ def test_mc_trajectory_follows_the_hits():
         assert np.median(dmin) < 3.0, f"{panel.title}: median {np.median(dmin):.2f} cm"
 
 
+def _entry_with_showers(f):
+    """First entry with reconstructed showers, or skip (sample-dependent)."""
+    for i in range(len(f)):
+        if len(f[i].showers()):
+            return f[i]
+    pytest.skip("no entry of the sample has reconstructed showers")
+
+
 @needs_data
 @needs_geom
 def test_showers_decode():
     f = EventFile(ATMNU, geometry=GEOM)
-    sh = f[0].showers()
+    sh = _entry_with_showers(f).showers()
     assert len(sh) > 0
     assert sh.start.shape[1] == 3 and sh.direction.shape[1] == 3
     assert np.isfinite(sh.length).all()
@@ -534,13 +526,28 @@ def test_optical_flash_agrees_with_tpc_vertex():
     optical products decoded correctly.
     """
     f = EventFile(ATMNU, geometry=GEOM)
-    ev = f[0]
-    o = ev.optical()
-    flash = o.is_flash
-    brightest = int(np.argmax(np.where(flash, o.pe, -1)))
-    assert abs(o.time[brightest]) < 5.0                    # at trigger time
-    assert o.pe[brightest] > 100 * np.median(o.pe[flash])  # well above background
-    assert abs(o.z[brightest] - ev.vertices().xyz[0][2]) < 150.0
+    checked = 0
+    for i in range(len(f)):
+        ev = f[i]
+        o = ev.optical()
+        flash = o.is_flash
+        vtx = ev.vertices().xyz
+        if not flash.any() or not len(vtx):
+            continue
+        brightest = int(np.argmax(np.where(flash, o.pe, -1)))
+        # Only events whose interaction flash was reconstructed and stands
+        # well above the radiological background. LArSoft's OpFlashFinder
+        # late-light removal deletes the interaction's flash on a few percent
+        # of events (entry 0 of the FD-HD atmospheric sample: 25 kPE of OpHits
+        # at t = 0 and no flash there), and low-energy events are too dim.
+        if abs(o.time[brightest]) >= 5.0:                      # not at trigger time
+            continue
+        if o.pe[brightest] <= 100 * np.median(o.pe[flash]):
+            continue
+        checked += 1
+        assert abs(o.z[brightest] - vtx[0][2]) < 150.0, f"entry {i}"
+    if not checked:
+        pytest.skip("no event with a bright in-time flash and a reco vertex")
 
 
 @needs_data
@@ -690,7 +697,7 @@ def test_shower_cones_have_width_in_every_view():
     (0.0008 rad over 11 cm here) legitimately projects to almost nothing.
     """
     f = EventFile(ATMNU, geometry=GEOM)
-    d = f[0].display(reco=True)
+    d = _entry_with_showers(f).display(reco=True)
     for panel in d.panels:
         widths = [w.max() - w.min() for w, x in d._shower_wx(panel)]
         assert widths, f"{panel.title}: no cones drawn"
@@ -728,7 +735,7 @@ def test_hit_group_refuses_a_mismatched_tag():
 @needs_data
 def test_streamer_caches_are_per_file():
     """A partial-parse decision for one file must not bind another."""
-    from pylarevd import streamers as st
+    from pylario import streamers as st      # the reader moved to pylario
     st.reset_caches()
     a, b = ArtFile(ROCKMU), ArtFile(ROCKMU)
     a.read("recob::Wires_tpcrawdecoder_gauss_DetSim.", "recob::Wire", 0)
@@ -932,149 +939,6 @@ def test_3d_puts_gravity_up():
     assert "y" in fig.layout.scene.zaxis.title.text
     assert "up" in fig.layout.scene.zaxis.title.text
     assert "drift" in fig.layout.scene.yaxis.title.text
-
-
-# ---------------------------------------------------------------------------
-# URL state
-# ---------------------------------------------------------------------------
-
-_URL_VALS = ["/data/a.root", 7, "hitfd", "track", "auto", "2d", "view",
-             "light", "magma", ["on"], [], ["on"],
-             "opslicer", "linear", "cumulative"]
-_BY_NAME = {"a.root": "/data/a.root", "b.root": "/data/b.root"}
-
-
-def test_url_round_trip_is_lossless():
-    from pylarevd.app import url_params, url_values, _URL_CONTROLS
-    assert len(_URL_VALS) == len(_URL_CONTROLS)
-    back = url_values(url_params(_URL_VALS), _BY_NAME)
-    assert back == _URL_VALS
-
-
-def test_url_omits_unset_controls():
-    """A control the URL does not mention comes back as None, not a default.
-
-    Restoring a default over a value the user picked would silently undo it.
-    """
-    from pylarevd.app import url_values
-    got = url_values("?entry=5", _BY_NAME)
-    assert got[1] == 5
-    assert got[0] is None and got[2] is None
-
-
-def test_url_ignores_unknown_file_and_junk_entry():
-    from pylarevd.app import url_values
-    assert url_values("?file=nope.root", _BY_NAME)[0] is None   # bare name, unknown
-    assert url_values("?entry=abc", _BY_NAME)[1] is None
-
-
-def test_url_carries_full_paths():
-    """A link must resolve against a server started with other arguments."""
-    from pylarevd.app import url_params, url_values
-    q = url_params(_URL_VALS)
-    assert "file=%2Fdata%2Fa.root" in q            # full path, not the basename
-    # a path this server has never seen still comes back, for the caller to open
-    ad_hoc = "/scratch/someone/prodgenie_atmnu_dune10kt_reco1_687.root"
-    assert url_values(f"?file={ad_hoc}", _BY_NAME)[0] == ad_hoc
-
-
-def test_file_from_url_accepts_names_paths_and_tilde():
-    from pylarevd.app import file_from_url
-    assert file_from_url("a.root", _BY_NAME) == "/data/a.root"      # known basename
-    assert file_from_url("/data/b.root", _BY_NAME) == "/data/b.root"  # known path
-    assert file_from_url("/scratch/x/y.root", _BY_NAME) == "/scratch/x/y.root"
-    assert file_from_url("~/y.root", _BY_NAME) == os.path.expanduser("~/y.root")
-    assert file_from_url("stray.root", _BY_NAME) is None            # not a path
-
-
-def test_bare_eos_paths_become_xrootd_urls():
-    """/eos is not mounted here, so a pasted EOS path must be redirected.
-
-    Otherwise the only symptom is "no such file" for a file that exists.
-    """
-    from pylarevd.app import normalise_path, is_remote, file_from_url
-    user = "/eos/user/r/someone/reco.root"
-    assert normalise_path(user) == f"root://eosuser.cern.ch/{user}"
-    assert normalise_path("/eos/experiment/dune/x.root") == \
-        "root://eospublic.cern.ch//eos/experiment/dune/x.root"
-    assert normalise_path("/eos/project-nu/x.root") == \
-        "root://eosproject.cern.ch//eos/project-nu/x.root"
-    # already a URL, or not EOS at all: untouched
-    assert normalise_path("root://a.cern.ch//x.root") == "root://a.cern.ch//x.root"
-    assert normalise_path("/scratch/x.root") == "/scratch/x.root"
-    assert is_remote(normalise_path(user)) and not is_remote("/scratch/x.root")
-    # and a link carrying a bare EOS path resolves the same way
-    assert file_from_url(user, {}) == f"root://eosuser.cern.ch/{user}"
-
-
-def test_open_file_reports_actionable_errors(tmp_path):
-    from pylarevd.app import open_file
-    files = {}
-    with pytest.raises(ValueError, match="no such file"):
-        open_file(files, str(tmp_path / "absent.root"))
-    with pytest.raises(ValueError, match="directory, not a file"):
-        open_file(files, str(tmp_path))
-    with pytest.raises(ValueError, match="no path given"):
-        open_file(files, "   ")
-    assert files == {}          # nothing half-registered on failure
-
-
-def test_file_options_disambiguate_shared_basenames():
-    """Two reco.root from different passes must not look identical in the list."""
-    from pylarevd.app import file_options
-    labels = [o["label"] for o in file_options(
-        {"/pass1/reco.root": None, "/pass2/reco.root": None, "/x/solo.root": None})]
-    assert labels == ["pass1/reco.root", "pass2/reco.root", "solo.root"]
-    assert all(o["title"].startswith("/") for o in file_options({"/a/b.root": None}))
-
-
-@needs_data
-def test_open_file_is_idempotent_and_shares_geometry():
-    from pylarevd.app import open_file
-    files = {}
-    first = open_file(files, ROCKMU)
-    assert open_file(files, ROCKMU) is first          # opened once, not twice
-    assert len(files) == 1
-
-
-def test_url_checklists_survive_both_states():
-    from pylarevd.app import url_params, url_values, _URL_CONTROLS
-    checklists = [i for i, (_cid, is_list) in enumerate(_URL_CONTROLS) if is_list]
-    on = list(_URL_VALS); off = list(_URL_VALS)
-    for i in checklists:
-        on[i], off[i] = ["on"], []
-    assert [url_values(url_params(on), _BY_NAME)[i] for i in checklists] == \
-        [["on"]] * len(checklists)
-    assert [url_values(url_params(off), _BY_NAME)[i] for i in checklists] == \
-        [[]] * len(checklists)
-
-
-def test_url_event_identity_outranks_stale_entry():
-    """rse= must win: entry numbers shift between files, event ids do not."""
-    from pylarevd.app import url_params, url_values
-
-    class FakeFile:
-        def index_of(self, run, subrun, event):
-            return 3 if (run, subrun, event) == (10, 1, 42) else None
-
-    q = url_params(_URL_VALS, event_id=(10, 1, 42))
-    assert "rse=10%3A1%3A42" in q
-    resolve = {"/data/a.root": FakeFile()}.get
-    assert url_values(q, _BY_NAME, resolve)[1] == 3          # not the 7 in entry=
-    assert url_values(q, _BY_NAME)[1] == 7                   # no resolver: entry wins
-
-
-def test_url_survives_an_event_the_file_does_not_have():
-    from pylarevd.app import url_params, url_values
-
-    class Empty:
-        def index_of(self, *a):
-            return None
-
-    q = url_params(_URL_VALS, event_id=(10, 1, 42))
-    resolve = {"/data/a.root": Empty()}.get
-    assert url_values(q, _BY_NAME, resolve)[1] == 7           # falls back
-    assert url_values(q.replace("10%3A1%3A42", "junk"), _BY_NAME, resolve)[1] == 7
 
 
 @needs_data
@@ -1318,9 +1182,28 @@ def test_deposited_energy_matches_the_deposits():
     assert ev.deposited_energy() == pytest.approx(float(ev.truth_deposits().edep.sum()))
 
 
+def _without_true_interaction(monkeypatch, ev):
+    """Make *ev* look like an event with no MCTruth interaction at all.
+
+    The rock-muon sample has no neutrino, but its primary muon is a true
+    interaction in its own right (pylario's PrimaryInteraction), so the
+    no-truth case has to be produced rather than found.
+    """
+    for name in ("neutrino", "true_interaction", "true_vertex"):
+        monkeypatch.setattr(ev, name, lambda *a, **k: None)
+    return ev
+
+
 @needs_data
-def test_no_neutrino_means_no_containment_or_flag():
-    d = EventFile(ROCKMU)[0].display()
+def test_no_neutrino_means_no_containment_or_flag(monkeypatch):
+    ev = EventFile(ROCKMU)[0]
+    d = ev.display()
+    assert d.neutrino is None
+    # no neutrino, but the primary muon is still a true interaction
+    assert d.true_interaction is not None and d.containment is not None
+    assert d._truth_headline() == d.true_interaction.headline() + (
+        "" if d.containment.inside else "   [vertex OUTSIDE active volume]")
+    d = _without_true_interaction(monkeypatch, ev).display()
     assert d.neutrino is None
     assert d.containment is None
     assert d._truth_headline() == "" and d._truth_block() == ""
@@ -1351,11 +1234,23 @@ def test_best_match_keeps_each_pfparticle_exactly_once():
     ev = EventFile(ATMNU, geometry=GEOM)[0]
     sel = ev.pandora_best_match()
     assert sel, "no Pandora metadata to decide with"
-    # a given object is never kept as both a track and a shower
-    assert not (sel["tracks"] & sel["showers"]).any()
-    kept = int(sel["tracks"].sum() + sel["showers"].sum())
+    # The masks are indexed by track / shower, not by PFParticle (a PFParticle
+    # need not have both fits), so compare through the owning PFParticle.
     scores = ev.pfp_track_scores()
-    assert kept == int(np.isfinite(scores).sum())
+    kept = {}
+    for key, cls, prefer in (("tracks", "recob::Track", ("pandoraTrack",)),
+                             ("showers", "recob::Shower", ("pandoraShower",))):
+        owner = ev._pfp_of(cls, prefer)
+        kept[key] = set(owner[sel[key][:len(owner)]].tolist()) - {-1}
+    scored = set(np.flatnonzero(np.isfinite(scores)).tolist())
+    # a given PFParticle is never kept as both a track and a shower
+    assert not (kept["tracks"] & kept["showers"] & scored)
+    # and every scored PFParticle with an object is kept as one of them
+    have_object = set()
+    for cls, prefer in (("recob::Track", ("pandoraTrack",)),
+                        ("recob::Shower", ("pandoraShower",))):
+        have_object |= set(ev._pfp_of(cls, prefer).tolist())
+    assert scored & have_object <= kept["tracks"] | kept["showers"]
 
 
 @needs_data
@@ -1603,35 +1498,6 @@ def test_title_wrapping_respects_the_canvas():
     assert "\n" not in _wrap_for(long, 20.0, 8.0)   # a poster does not
 
 
-@needs_dash
-def test_checklists_are_disabled_per_option_not_per_component():
-    """dcc.Checklist has no component-level `disabled` prop.
-
-    Writing one put the attribute on the DOM node, where the browser's default
-    disabled styling (dark grey) made the labels unreadable on the dark panel.
-    Disabling belongs on each option, and the reason belongs in its label.
-    """
-    from dash import dcc
-    assert "disabled" not in getattr(dcc.Checklist, "_prop_names", ())
-
-
-@needs_data
-def test_overlay_labels_say_why_they_are_unavailable():
-    from pylarevd.app import build_app
-    import json
-    app = build_app([ROCKMU])
-    client = app.server.test_client()
-    deps = json.loads(client.get("/_dash-dependencies").data)
-    # no callback may target the nonexistent property
-    assert not any("truth.disabled" in d["output"] or "reco.disabled" in d["output"]
-                   for d in deps)
-    dep = next(d for d in deps if "truth.options" in d["output"])
-    assert [i["id"] for i in dep["inputs"]] == ["file", "entry", "mode", "truth"]
-    # and the page states both label colours rather than inheriting them
-    html = client.get("/").data.decode()
-    assert ".evd-check" in html and "input:disabled" in html
-
-
 @needs_data
 @needs_geom
 def test_radiologicals_can_be_separated_from_the_interaction():
@@ -1659,9 +1525,9 @@ def test_radiologicals_can_be_separated_from_the_interaction():
 
 
 @needs_data
-def test_no_neutrino_means_nothing_to_separate():
+def test_no_neutrino_means_nothing_to_separate(monkeypatch):
     """Without a vertex to trace back to, the filter must keep everything."""
-    ev = EventFile(ROCKMU)[0]
+    ev = _without_true_interaction(monkeypatch, EventFile(ROCKMU)[0])
     assert ev.neutrino_track_ids() is None
     kept = ev.display_3d(truth=True, radiologicals=False)
     both = ev.display_3d(truth=True, radiologicals=True)
@@ -1725,72 +1591,6 @@ def test_requirements_txt_covers_the_dependencies():
             assert dep.pip in text, f"{dep.pip} missing from requirements.txt"
 
 
-# ---------------------------------------------------------------------------
-# Starting with no files, and opening one by path
-# ---------------------------------------------------------------------------
-
-@needs_dash
-def test_app_starts_with_no_files():
-    """Files must be optional: the browser can start empty and open by path."""
-    from pylarevd.app import build_app, _files_store, render
-    files = _files_store([], None)
-    assert files == {}
-    app = build_app([])
-    assert app.server.test_client().get("/").status_code == 200
-    # and it says what to do rather than showing a blank panel
-    _fig, summary = render(files, None, None, "hitfd", "integral", "auto",
-                           "2d", False)
-    assert "paste a path" in summary
-
-
-def test_unreadable_files_given_explicitly_still_fail():
-    """An empty start is deliberate; files that were given and failed are not."""
-    from pylarevd.app import _files_store
-    with pytest.raises(SystemExit):
-        _files_store(["/nope/definitely-not-here.root"], None)
-
-
-@needs_data
-def test_open_by_path_files_under_the_normalised_key():
-    """The box must look a file up the way open_file stored it.
-
-    A bare /eos/... path is stored as its root:// URL, so looking it up by the
-    typed string crashed with a KeyError -- on exactly the paths the rewriting
-    exists to make convenient.
-    """
-    from pylarevd.app import open_file, normalise_path
-    files = {}
-    opened = open_file(files, ROCKMU)
-    assert normalise_path(ROCKMU) in files
-    assert files[normalise_path(ROCKMU)] is opened
-
-    # the EOS form resolves to the same key the opener would use
-    eos = "/eos/user/x/xyz/sample.root"
-    assert normalise_path(eos).startswith("root://")
-    assert normalise_path(normalise_path(eos)) == normalise_path(eos)
-
-
-# ---------------------------------------------------------------------------
-# Round-2 review fixes
-# ---------------------------------------------------------------------------
-
-@needs_data
-def test_opening_a_file_does_not_inherit_another_files_geometry():
-    """Each file names its own detector; forcing one on another is silent.
-
-    Reusing the first file's resolved geometry put 99% of a full-10kt file's
-    hits outside the channel map with no error at all.
-    """
-    from pylarevd.app import _files_store, open_file
-    files = _files_store([ATMNU], None)
-    first = next(iter(files.values())).geometry
-    opened = open_file(files, ROCKMU, None)
-    assert opened.geometry.detector == opened.art.geometry_config()["Name"]
-    # and nothing was forced: the object is chosen per file, not inherited
-    assert opened.geometry.detector == first.detector or \
-        opened.geometry is not first
-
-
 @needs_data
 def test_visible_energy_never_exceeds_the_neutrino_energy():
     """Radiological deposits are not the interaction's visible energy."""
@@ -1803,8 +1603,13 @@ def test_visible_energy_never_exceeds_the_neutrino_energy():
         vis = f[i].neutrino_visible_energy()
         assert vis is not None
         seen += 1
-        assert vis <= nu.energy * 1000 * 1.05, \
-            f"entry {i}: {100 * vis / (nu.energy * 1000):.0f}% of the beam energy"
+        # Fermi motion and nuclear de-excitation / neutron capture can add a
+        # few tens of MeV that the beam did not supply, which on a 0.2 GeV QE
+        # event is >5% (entry 3 of the FD-HD atmospheric sample: 198 MeV on
+        # 179 MeV). Radiologicals over a readout window add GeV, not MeV.
+        e_mev = nu.energy * 1000
+        assert vis <= max(e_mev * 1.05, e_mev + 50.0), \
+            f"entry {i}: {100 * vis / e_mev:.0f}% of the beam energy"
     assert seen, "no neutrino events to check"
 
 
@@ -1859,9 +1664,13 @@ def test_shower_axes_actually_draw_in_the_interactive_view():
 @needs_geom
 def test_categorical_identity_uses_markers_in_both_backends():
     from pylarevd.theme import PLOTLY_MARKER_CYCLE
-    ev = EventFile(ATMNU, geometry=GEOM)[0]
-    d = ev.display("hitfd", colour_by="track")
-    if len(d.group_marker_batches()) < 3:
+    f = EventFile(ATMNU, geometry=GEOM)
+    for i in range(len(f)):
+        d = f[i].display("hitfd", colour_by="track")
+        # the unassociated batch is not an object of the cycle
+        if sum(obj is not None for *_, obj in d.group_marker_batches()) >= 3:
+            break
+    else:
         pytest.skip("too few objects to exercise the cycle")
     symbols = {getattr(t.marker, "symbol", None) for t in d.plotly_figure().data
                if getattr(t, "marker", None) is not None}
@@ -1914,7 +1723,10 @@ def test_final_state_energies_are_kinetic_not_total():
             continue
         checked += 1
         total = sum(e for _name, _n, e in nu.final_state_counts())
-        assert total <= nu.energy * 1.25, \
+        # Plus 50 MeV absolute: knocked-out nucleons each bring their Fermi
+        # kinetic energy, which dominates at ~0.1 GeV (entry 9 of the FD-HD
+        # atmospheric sample: 0.175 GeV of nucleons and electron on 0.136 GeV).
+        assert total <= max(nu.energy * 1.25, nu.energy + 0.05), \
             f"entry {i}: final state {total:.2f} GeV vs beam {nu.energy:.2f} GeV"
     assert checked
 

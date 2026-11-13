@@ -19,19 +19,32 @@ compiled extension — just `uproot` + `numpy` + `plotly`/`matplotlib`.
 > Already have it? `python -m pylarevd --check` reports what is installed, what
 > is missing and how to install it.
 
-## The web viewer (new)
+## The web viewer
 
-A faster browser viewer: each event is decoded once in Python into a compact
+The interactive viewer: each event is decoded once in Python into a compact
 binary bundle, and everything after that (colour, scale, overlays, theme, light
 animation, camera) runs in the browser with WebGL, so controls respond
 immediately and the 3-D camera is never reset. Plain ES modules, no build step.
 
+You run it **on the machine that has the files** and view it **in the browser
+on your laptop** through an SSH tunnel; nothing is rendered on your laptop and
+no data is copied to it.
+
 ```bash
+# on the machine with the files (on a CERN/DUNE machine everything is already available):
+source /cvmfs/sft.cern.ch/lcg/views/LCG_110/x86_64-el9-gcc13-opt/setup.sh
 python -m pylarevd.web reco.root [more.root ...] --port 8050 [--precompute] [--workers N]
-ssh -N -L 8050:localhost:8050 <your-host>      # on your laptop, then open http://localhost:8050
+
+# on your laptop, in a second terminal; it prints nothing and does not return:
+ssh -N -L 8050:localhost:8050 <your-host>
 ```
 
-The server binds to loopback only, like the Dash app. `--workers N` sets the
+then open <http://localhost:8050> (`localhost`, not the remote hostname: the
+tunnel makes the remote port appear as a local one). If port 8050 is taken, use
+`--port 8051` and change both numbers in the tunnel to match.
+
+The server binds to loopback only, so it is not reachable from the network and
+the tunnel is required rather than optional. `--workers N` sets the
 decoder processes (default min(8, cores)); the next two events are decoded in
 the background while you look at one; `--precompute` also fills the cache for
 the whole file in the background.
@@ -75,59 +88,7 @@ decode a whole file up front, in parallel:
 python -m pylarevd.web.export reco.root -j 32          # also: -e 0-9, --hits TAG, --flash TAG
 ```
 
-Design and format notes are in [docs/WEB_VIEWER.md](docs/WEB_VIEWER.md). The
-original Dash app (`python -m pylarevd.app`, next section) still exists and is
-unchanged.
-
-## The Dash browser app
-
-This is how most people use pylarevd. It is a small web app: you run it **on the
-machine that has the files**, and view it **in the browser on your laptop**
-through an SSH tunnel. Nothing is rendered on your laptop and no data is copied
-to it.
-
-**Step 1 — on the machine with the files:**
-
-```bash
-# on a CERN/DUNE machine everything is already available:
-source /cvmfs/sft.cern.ch/lcg/views/LCG_110/x86_64-el9-gcc13-opt/setup.sh
-export PYTHONPATH=/path/to/pylarevd:$PYTHONPATH
-# elsewhere:  pip install -e ".[all]"
-
-python -m pylarevd.app reco.root [more.root ...] --port 8050
-
-# or start with nothing and open files from the browser:
-python -m pylarevd.app --port 8050
-```
-
-Leave it running. It prints the tunnel command for you.
-
-**Step 2 — on your laptop, in a second terminal:**
-
-```bash
-ssh -N -L 8050:localhost:8050 <your-host>
-```
-
-This command produces no output and does not return — that is correct, it is
-holding the tunnel open. Leave it running too.
-
-**Step 3 — open <http://localhost:8050> in your browser.**
-
-Note `localhost`, not the remote hostname: the tunnel makes the remote port
-appear as a local one. The server **binds to loopback only**, so it is not
-reachable from the network and there is nothing to expose — which is also why
-the tunnel is required rather than optional.
-
-If port 8050 is taken (a colleague on a shared machine, or your own earlier
-session), use `--port 8051` and change both numbers in the tunnel to match.
-
-Once it is up: step through events with the ◀ ▶ buttons or the **left/right
-arrow keys**, switch between 2-D physical, 2-D readout, 3-D, optical, 3-D
-flash and animated light views, colour hits by charge or by the object that owns them, toggle truth
-and reco overlays, and switch theme and colormap. Every control is mirrored into
-the URL, so you can paste a link to exactly what you are looking at — see
-[Browser reference](#browser-reference) for the details, including opening files
-that were not on the command line.
+Design and format notes are in [docs/WEB_VIEWER.md](docs/WEB_VIEWER.md).
 
 ## Command line and python API
 
@@ -359,7 +320,7 @@ log₁₀ and relabels the ticks — the hover box still reports the real value.
 | `pylarevd` | `pylarevd/light.py` | photon-detector hits and flashes animated in time |
 | `pylarevd` | `pylarevd/theme.py` | themes, colormaps, and marker cycles |
 | `pylarevd` | `pylarevd/cli.py` | `python -m pylarevd` batch rendering |
-| `pylarevd` | `pylarevd/app.py` | `python -m pylarevd.app` interactive browser (Dash) |
+| `pylarevd` | `pylarevd/web/` | `python -m pylarevd.web` browser viewer: server, bundle exporter, WebGL frontend |
 | `pylarevd` | `pylarevd/_deps.py` | environment and dependency checker |
 
 ## Reconstructed and true objects
@@ -439,59 +400,6 @@ emits `Hit<->Track` links for its own track collection — so the producer is
 pinned per route rather than guessed. Assns carrying data (`recob::TrackHitMeta`)
 have a third vector this reader does not model, so the plain `void` variants are
 preferred.
-
-### Browser reference
-
-[Running it](#the-interactive-browser-start-here) is at the top of this file.
-It steps through events without regenerating anything: file/event selection with
-prev/next, hit product, colour-by (including by owning object) and scale,
-2D physical / 2D readout / 3D / optical / flashes 3D / light vs time /
-charge + light, panel
-grouping, the flash producer and light-animation settings, and truth and
-reco overlays. Controls a view ignores are greyed out — including the truth and
-reco checkboxes, which only apply to the physical views. Binds to localhost only
-unless you pass `--host`.
-
-Files listed on the command line appear in the dropdown; anything else can be
-opened from the **open by path** box by pasting a full path and pressing Enter:
-
-```
-/eos/user/<u>/<user>/prodgenie_atmnu_..._reco1.root
-```
-
-It joins the dropdown alongside the others, so you can flip between an ad-hoc
-file and the ones you started with. `~` is expanded. Bad paths report why
-(missing, a directory, unreadable, not an art file) next to the box instead of
-producing an empty plot. Files that share a basename are labelled with their
-parent directory so two `reco.root` from different passes stay distinguishable.
-
-Because this reads any file the account can reach, it is enabled only when the
-server is bound to loopback — the default. With `--host` set to anything else,
-the box is disabled unless you also pass `--allow-remote-open`.
-
-Every control is mirrored into the URL, so the address bar always describes what
-you are looking at and can be pasted to someone else:
-
-```
-http://localhost:8050/?file=/eos/user/r/.../reco.root&entry=3&tag=hitfd&colour=track
-    &scale=auto&mode=2d&merge=view&theme=light&colormap=magma
-    &truth=1&reco=0&rse=20000063:0:4
-```
-
-The file is recorded as a full path, so a link opens correctly even against a
-server that was started with different arguments — it opens the file on arrival
-(subject to the same loopback rule above). If the file is missing, the rest of
-the link is still applied, so you keep the view and lose only the file.
-
-`rse` is the run:subrun:event of the displayed event, and it outranks `entry`
-when the link is opened. Entry numbers are an artefact of how a file was
-written — the same physics event sits at a different entry in a different file —
-so a link carrying the event identity still lands correctly when pointed at
-another reconstruction pass of the same data. If the file does not contain that
-event, the link falls back to `entry` rather than failing.
-
-The CLI covers the same ground: `--mode {2d,readout,3d,optical,flash3d,light,chargelight}`,
-`--reco`, `--flash-tag`, and the full `--colour-by` set.
 
 ## True neutrino interaction
 
@@ -638,8 +546,8 @@ up as their OpHits arrive, and reconstructed flashes appear as their +-1 sigma
 (y, z) ellipse at their own time, bright when new and fading to a ghost. A strip
 underneath shows the PE arriving in each frame, split into hits that belong to a
 flash and hits that belong to none, with every flash as a stem at its time and a
-playhead. The true vertex is a star. In the browser pick **Light vs time
-(PDS)**; the **animated GIF** button then exports this animation.
+playhead. The true vertex is a star. In the web viewer this is the **Light**
+view.
 
 **The clock.** By default frames are log-spaced after `t0`, the onset of the
 brightest OpHit light burst: a short linear pre-roll, then one 16 ns hit
@@ -664,18 +572,17 @@ On the FD-HD sample `opflash` passes exactly; `opslicer`'s association links
 its brightest flash to 1853 hits spread over the whole 4.5 ms readout, fails,
 and is not used (the strip then shows total OpHit PE).
 
-**Charge and light together.** `--mode chargelight` (browser: **Charge + light
-(3D + PDS)**, python: `display_charge_light(ev)`) puts the same animation beside
+**Charge and light together.** `--mode chargelight` (web viewer: **Charge+Light**, python: `display_charge_light(ev)`) puts the same animation beside
 the 3-D charge: space points (grey, brightness ~ log charge -- the light owns
 the colour map), tracks, vertices and truth as in the 3-D view, with the
 photon-detector wall drawn where it is on the anode plane, lighting up frame by
 frame, and each flash a bar across the drift at its (y, z). The charge itself is
 static -- it is deposited within nanoseconds and read out over milliseconds of
-drift, so there is no shared clock to animate it on. In the browser the 3-D
+drift, so there is no shared clock to animate it on. In saved HTML the 3-D
 panel is a normal plotly scene: rotate and zoom it while it plays, or between
 steps of the slider, and the view is kept. (plotly on its own put the camera
 back on every frame unless the drag ended inside the 3-D canvas; a small script
-in the page and in saved HTML, `KEEP_VIEW_JS`, stops that.) The GIF uses a
+in the saved page, `KEEP_VIEW_JS`, stops that.) The GIF uses a
 fixed camera (`elev`, `azim`), and draws the charge on the viewer's side of the
 wall over the tiles and the rest under them.
 
@@ -735,7 +642,7 @@ ev.display(truth=True, radiologicals=False)
 ev.neutrino_track_ids()      # track ids descending from the interaction
 ```
 
-and in the browser via the **radiologicals** checkbox next to the overlays.
+and in the web viewer via the **radiologicals** overlay checkbox.
 
 The split is by ancestry, not by energy or position cuts: every particle is
 walked to its root ancestor, and the interaction's descendants are those whose

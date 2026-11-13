@@ -24,7 +24,8 @@
 //
 // Keys (view visible, no form field focused): n / p next / previous candidate (activity when
 // the event has no candidate), z zoom to the selection, Escape clears it.
-import { getLut, hexToRgb, cmapGradientCss } from './colormaps.js';
+import { hexToRgb, cmapGradientCss, createProgram, createLutTexture, uploadLutTexture } from './colormaps.js';
+import { esc, niceTicks } from './util.js';
 
 const LAYOUTS = [['timeline', 'timeline + planes'], ['grid', 'detector-unit grid'],
   ['explorer', 'hierarchy explorer'], ['reco', 'trigger vs reco']];
@@ -32,6 +33,7 @@ const COLOURS = [['adc', 'ADC sum'], ['tot', 'time over threshold'], ['peak', 'A
 const VIEWS = ['U', 'V', 'Z'];
 const PM = { l: 74, r: 10, t: 16, b: 6, xlab: 22 };   // panel margins (css px); xlab under the bottom panels
 const HEAD = 30;
+const TL_BAR = 11, TL_GAP = 3;   // timeline: height of a TC / TA bar and the gap between lanes (css px)
 
 const CSS = `
 .vtrg-head { position:absolute; left:0; right:0; top:0; height:${HEAD}px; z-index:6; display:flex; gap:10px; align-items:center;
@@ -85,6 +87,10 @@ const FS = `#version 300 es
 precision mediump float;
 in vec4 vCol; out vec4 o;
 void main() { o = vCol; }`;
+// per-instance attributes, and the buffers that feed them for the TPs and for the hits underlay
+const INST_ATTRS = ['aT0', 'aT1', 'aPk', 'aRow', 'aVal', 'aCat', 'aEmph'];
+const TP_BUFS = ['t0', 't1', 'pk', 'row', 'val', 'cat', 'emph'];
+const HIT_BUFS = ['ht', 'ht', 'ht', 'hr', 'hz', 'hcat', 'hz'];
 
 const T = {
   app: null, container: null, ready: false, visible: false,
@@ -98,15 +104,6 @@ const T = {
 };
 
 // ----------------------------------------------------------------------------- helpers
-const rgb = (h) => hexToRgb(h);
-const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-function niceTicks(lo, hi, target) {
-  const span = hi - lo; if (!(span > 0)) return { ticks: [lo], step: 1 };
-  const raw = span / Math.max(1, target), mag = 10 ** Math.floor(Math.log10(raw)), n = raw / mag;
-  const step = (n < 1.5 ? 1 : n < 3 ? 2 : n < 7 ? 5 : 10) * mag;
-  const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-6; v += step) out.push(Math.abs(v) < step * 1e-9 ? 0 : v);
-  return { ticks: out, step };
-}
 const fmt = (v) => (Math.abs(v) >= 1e4 || (Math.abs(v) < 0.01 && v !== 0) ? v.toExponential(2) : (+v.toPrecision(4)).toString());
 function trigColours(th) {
   const dark = th.name !== 'light';
@@ -117,6 +114,13 @@ function effLayout() {
   if (st.view === 'trigger+2d') return 'reco';
   return LAYOUTS.some(([k]) => k === st.tlay) && st.tlay !== 'reco' ? st.tlay : 'timeline';
 }
+/** the activities a selection covers: the TA itself, or the TC's TAs */
+const selActivities = (s) => (s ? (s.kind === 'ta' ? [s.i] : T.E.tcTas[s.i]) : []);
+/** the instance range [s, e) drawn in panel p (a whole plane, or one unit of it) */
+const instRange = (p) => (p.unit < 0 ? T.E.vr[p.view] : (T.E.ur[p.view].get(p.unit) || [0, 0]));
+/** does the TA box bx (view, unit) belong in panel p? */
+const inPanel = (p, bx) => bx.view === p.view && (p.unit < 0 || bx.unit === p.unit);
+const unitName = (u) => (T.R && T.R.units[u] ? T.R.units[u] : 'unit ' + (u + 1));
 function parseSel() {
   const m = /^(tc|ta):(\d+)$/.exec(T.app.state.tsel || '');
   if (!m || !T.E) return null;
@@ -189,22 +193,12 @@ function showMsg(t) { T.msg.textContent = t || ''; T.msg.style.display = t ? 'fl
 
 function buildGL() {
   const gl = T.gl;
-  const mk = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error('viewtrigger shader: ' + gl.getShaderInfoLog(s)); return s; };
-  const p = gl.createProgram();
-  gl.attachShader(p, mk(gl.VERTEX_SHADER, VS)); gl.attachShader(p, mk(gl.FRAGMENT_SHADER, FS));
-  gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('viewtrigger link: ' + gl.getProgramInfoLog(p));
+  const p = createProgram(gl, VS, FS, { name: 'viewtrigger' });
   T.prog = p; T.loc = {};
-  for (const n of ['aT0', 'aT1', 'aPk', 'aRow', 'aVal', 'aCat', 'aEmph']) T.loc[n] = gl.getAttribLocation(p, n);
+  for (const n of INST_ATTRS) T.loc[n] = gl.getAttribLocation(p, n);
   for (const n of ['uX', 'uY', 'uPass', 'uMode', 'uLog', 'uLo', 'uHi', 'uCmapLo', 'uCmapHi', 'uSize', 'uDim', 'uAlpha', 'uLut', 'uPal[0]', 'uGrey', 'uUni', 'uHi3'])
     T.loc[n] = gl.getUniformLocation(p, n);
-  T.lutTex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, T.lutTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  T.lutTex = createLutTexture(gl);
   T.buf = {};
   gl.enable(gl.BLEND);
   gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -213,11 +207,8 @@ function buildGL() {
 function uploadLut() {
   const name = T.app.state.cmap;
   if (T.lutName === name || !T.gl) return;
-  const lut = getLut(name), d = new Uint8Array(256 * 4);
-  for (let i = 0; i < 256; i++) { d[4 * i] = lut[3 * i]; d[4 * i + 1] = lut[3 * i + 1]; d[4 * i + 2] = lut[3 * i + 2]; d[4 * i + 3] = 255; }
   const gl = T.gl;
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T.lutTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, d);
+  gl.activeTexture(gl.TEXTURE0); uploadLutTexture(gl, T.lutTex, name);
   T.lutName = name;
 }
 
@@ -274,7 +265,6 @@ function setEvent(bundle, geometry) {
     if (vr[v][1] === 0) vr[v] = [j, j + 1]; else vr[v][1] = j + 1;
     const r = ur[v].get(u); if (r) r[1] = j + 1; else ur[v].set(u, [j, j + 1]);
   }
-  for (let v = 0; v < 3; v++) if (vr[v][1] === 0) vr[v] = [0, 0];
   const E = { b, n, ch, t0, tot, pk, adc, apk, ta, view, unit, row, order, vr, ur };
   // activities and candidates
   const meta = b.meta.trigger || {};
@@ -359,9 +349,12 @@ function uploadEvent() {
   glBuf('t0', f(E.t0));
   glBuf('t1', Float32Array.from(o, (i) => E.t0[i] + Math.max(E.tot[i], 0.5)));
   glBuf('pk', f(E.pk));
-  glBuf('row', Float32Array.from(o, (i) => E.row[i]));
-  glBuf('cat', Float32Array.from(o, (i) => E.ta[i]));
+  glBuf('row', f(E.row));
+  glBuf('cat', f(E.ta));
   glBuf('emph', new Float32Array(n));
+  // colour values: a placeholder sized for THIS event ('activity' colouring never reads it, but the
+  // instanced draw must not run past its end); renderGL uploads the real values for other modes
+  glBuf('val', new Float32Array(n));
   E.valMode = null;
   if (E.hits) {
     glBuf('ht', E.hits.t); glBuf('hr', E.hits.r);
@@ -380,7 +373,7 @@ function applySelection(emit = true, fit = true) {
   const E = T.E, s = parseSel();
   const key = s ? `${s.kind}:${s.i}` : '';
   if (E && T.gl) {
-    const tas = new Set(s ? (s.kind === 'ta' ? [s.i] : E.tcTas[s.i]) : []);
+    const tas = new Set(selActivities(s));
     const em = new Float32Array(E.n);
     if (s) for (let j = 0; j < E.n; j++) { const a = E.ta[E.order[j]]; em[j] = tas.has(a) ? 1 : -1; }
     glBuf('emph', em);
@@ -410,9 +403,8 @@ function selWindow(s) {
 }
 function selBoxes(s) {
   const E = T.E;
-  const tas = s.kind === 'ta' ? [s.i] : E.tcTas[s.i];
   const m = new Map();
-  for (const a of tas) for (const bx of E.taBox[a]) {
+  for (const a of selActivities(s)) for (const bx of E.taBox[a]) {
     const k = bx.view * 4096 + bx.unit + 1, c = m.get(k);
     if (c) { c.r0 = Math.min(c.r0, bx.r0); c.r1 = Math.max(c.r1, bx.r1); c.n += bx.n; } else m.set(k, { ...bx });
   }
@@ -426,8 +418,9 @@ function fitSelection(quiet) {
   const [w0, w1] = selWindow(s), span = Math.max(w1 - w0, 20);
   T.x0 = w0 - 0.25 * span; T.x1 = w1 + 0.25 * span;
   layout();
+  const boxes = selBoxes(s);
   for (const p of T.L.panels) {
-    const bx = selBoxes(s).filter((x) => x.view === p.view && (p.unit < 0 || x.unit === p.unit));
+    const bx = boxes.filter((x) => inPanel(p, x));
     if (!bx.length) continue;
     const r0 = Math.min(...bx.map((x) => x.r0)), r1 = Math.max(...bx.map((x) => x.r1)), rs = Math.max(r1 - r0, 20);
     T.ys[p.key] = [Math.max(r0 - 0.2 * rs, p.rows[0] - 0.5), Math.min(r1 + 0.2 * rs, p.rows[1] - 0.5)];
@@ -447,7 +440,7 @@ function renderTree() {
   if (!E) { T.tree.innerHTML = ''; return; }
   const ta = (a) => {
     const bx = E.taBox[a][0];
-    const where = bx ? `${T.R && T.R.units[bx.unit] ? T.R.units[bx.unit] : 'unit ' + (bx.unit + 1)} ${VIEWS[bx.view] || '?'}` : '';
+    const where = bx ? `${unitName(bx.unit)} ${VIEWS[bx.view] || '?'}` : '';
     return `<div class="row ta" data-sel="ta:${a}" title="activity ${a}: ${E.taAlg[a] || ''}"><span class="k">TA ${a}</span> · ${where} · ${E.taN[a]} TPs · ADC ${fmt(E.taAdc[a])}</div>`;
   };
   let html = `<div class="row head">${E.ntc} candidate${E.ntc === 1 ? '' : 's'}, ${E.nta} activit${E.nta === 1 ? 'y' : 'ies'}</div>`;
@@ -472,7 +465,7 @@ function describe(s) {
       E.tcTas[i].map((a) => `TA ${a} (${E.taN[a]} TPs)`).join(', ');
   }
   const a = s.i, bx = E.taBox[a][0];
-  const where = bx ? `${T.R && T.R.units[bx.unit] ? T.R.units[bx.unit] : 'unit ' + (bx.unit + 1)} ${VIEWS[bx.view]}, channels ${bx.c0}–${bx.c1}` : '';
+  const where = bx ? `${unitName(bx.unit)} ${VIEWS[bx.view]}, channels ${bx.c0}–${bx.c1}` : '';
   return `TA ${a}  ${E.taAlg[a] || ''}  ${E.taN[a]} TPs, ADC sum ${fmt(E.taAdc[a])}  window ${E.taT0[a].toFixed(0)}–${E.taT1[a].toFixed(0)}` +
     `  peak ${E.taPk[a].toFixed(0)}  ${where}  ${E.taTc[a] >= 0 ? '→ TC ' + E.taTc[a] : 'no candidate'}`;
 }
@@ -511,8 +504,8 @@ function layout() {
   let top = 0;
   if (kind === 'timeline' || kind === 'grid' || kind === 'reco') {
     const lanes = packLanes(), hist = kind !== 'grid';
-    const th = 10 + 4 + 14 * (1 + Math.max(1, lanes.n)) + (hist ? 58 : 2);
-    T.L.timeline = { x: left, y: 0, w: W - left, h: th, lanes, hist: kind !== 'grid', plot: { x: left + PM.l, y: 6, w: W - left - PM.l - PM.r, h: th - 10 } };
+    const th = 10 + 4 + (TL_BAR + TL_GAP) * (1 + Math.max(1, lanes.n)) + (hist ? 58 : 2);
+    T.L.timeline = { x: left, y: 0, w: W - left, h: th, lanes, hist, plot: { x: left + PM.l, y: 6, w: W - left - PM.l - PM.r, h: th - 10 } };
     top = th + 4;
   }
   const avail = H - top - bottom;
@@ -580,18 +573,22 @@ function render() {
   T.lastMs = performance.now() - t0;
 }
 
-function bindInst(name, loc) {
+/** bind the per-instance buffers `names` to the attributes INST_ATTRS, starting at instance s */
+function bindInstances(names, s) {
   const gl = T.gl;
-  gl.bindBuffer(gl.ARRAY_BUFFER, T.buf[name]);
-  gl.enableVertexAttribArray(loc);
-  gl.vertexAttribPointer(loc, 1, gl.FLOAT, false, 0, 0);
-  gl.vertexAttribDivisor(loc, 1);
+  names.forEach((name, k) => {
+    const loc = T.loc[INST_ATTRS[k]];
+    gl.bindBuffer(gl.ARRAY_BUFFER, T.buf[name]);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 1, gl.FLOAT, false, 0, 4 * s);
+    gl.vertexAttribDivisor(loc, 1);
+  });
 }
 
 function renderGL() {
   const gl = T.gl; if (!gl) return;
   const th = T.app.theme, E = T.E, st = T.app.state;
-  const bg = rgb(th.fig_bg), ax = rgb(th.axes_bg);
+  const bg = hexToRgb(th.fig_bg), ax = hexToRgb(th.axes_bg);
   gl.disable(gl.SCISSOR_TEST); gl.viewport(0, 0, T.W, T.H);
   gl.clearColor(bg[0], bg[1], bg[2], 1); gl.clear(gl.COLOR_BUFFER_BIT);
   if (!E || !T.L) return;
@@ -600,13 +597,13 @@ function renderGL() {
   gl.useProgram(T.prog);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T.lutTex); gl.uniform1i(P.uLut, 0);
   gl.uniform1f(P.uCmapLo, th.cmap_floor); gl.uniform1f(P.uCmapHi, th.cmap_ceiling);
-  const pal = new Float32Array(24); th.categorical.forEach((h, i) => pal.set(rgb(h), 3 * i)); gl.uniform3fv(P['uPal[0]'], pal);
-  gl.uniform3fv(P.uGrey, rgb(th.unassociated)); gl.uniform3fv(P.uHi3, rgb(trigColours(th).ta));
+  const pal = new Float32Array(24); th.categorical.forEach((h, i) => pal.set(hexToRgb(h), 3 * i)); gl.uniform3fv(P['uPal[0]'], pal);
+  gl.uniform3fv(P.uGrey, hexToRgb(th.unassociated)); gl.uniform3fv(P.uHi3, hexToRgb(trigColours(th).ta));
   if (mode === 0) {
     const cv = colourValues(st.tcol);
     if (E.valMode !== st.tcol) { glBuf('val', cv.v); E.valMode = st.tcol; }
     gl.uniform1f(P.uLog, cv.log ? 1 : 0); gl.uniform1f(P.uLo, cv.lo); gl.uniform1f(P.uHi, cv.hi);
-  } else if (!T.buf.val) glBuf('val', new Float32Array(E.n));
+  }
   const selOn = !!T.selKey;
   gl.enable(gl.SCISSOR_TEST);
   const dpr = T.dpr;
@@ -621,17 +618,15 @@ function renderGL() {
     if (st.thits === '1' && E.hits) {
       const [s, e] = E.hits.vr[p.view];
       if (e > s) {
-        gl.uniform1f(P.uMode, 2); gl.uniform3fv(P.uUni, rgb(th.fg_muted)); gl.uniform1f(P.uAlpha, 0.35);
+        gl.uniform1f(P.uMode, 2); gl.uniform3fv(P.uUni, hexToRgb(th.fg_muted)); gl.uniform1f(P.uAlpha, 0.35);
         gl.uniform1f(P.uSize, Math.max(1.5, 2 * dpr)); gl.uniform1f(P.uDim, 1); gl.uniform1f(P.uPass, 1);
-        for (const [nm, lc] of [['ht', P.aT0], ['ht', P.aT1], ['ht', P.aPk], ['hr', P.aRow], ['hz', P.aVal], ['hcat', P.aCat], ['hz', P.aEmph]]) bindInst(nm, lc);
-        setOffsets(s);
+        bindInstances(HIT_BUFS, s);
         gl.drawArraysInstanced(gl.POINTS, 0, 1, e - s);
       }
     }
-    const [s, e] = p.unit < 0 ? E.vr[p.view] : (E.ur[p.view].get(p.unit) || [0, 0]);
+    const [s, e] = instRange(p);
     if (e <= s) continue;
-    for (const [nm, lc] of [['t0', P.aT0], ['t1', P.aT1], ['pk', P.aPk], ['row', P.aRow], ['val', P.aVal], ['cat', P.aCat], ['emph', P.aEmph]]) bindInst(nm, lc);
-    setOffsets(s);
+    bindInstances(TP_BUFS, s);
     gl.uniform1f(P.uMode, mode); gl.uniform1f(P.uDim, selOn ? 0.18 : 1); gl.uniform1f(P.uAlpha, 0.85);
     gl.uniform1f(P.uPass, 0); gl.uniform1f(P.uSize, 1);
     gl.drawArraysInstanced(gl.LINES, 0, 2, e - s);
@@ -640,17 +635,6 @@ function renderGL() {
     gl.drawArraysInstanced(gl.POINTS, 0, 1, e - s);
   }
   gl.disable(gl.SCISSOR_TEST);
-}
-
-/** point every bound per-instance attribute at instance `s` */
-function setOffsets(s) {
-  const gl = T.gl;
-  for (const nm of ['aT0', 'aT1', 'aPk', 'aRow', 'aVal', 'aCat', 'aEmph']) {
-    const loc = T.loc[nm];
-    const b = gl.getVertexAttrib(loc, gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING);
-    gl.bindBuffer(gl.ARRAY_BUFFER, b);
-    gl.vertexAttribPointer(loc, 1, gl.FLOAT, false, 0, 4 * s);
-  }
 }
 
 // ---- coordinates
@@ -666,7 +650,7 @@ function renderOverlay() {
   g.clearRect(0, 0, T.cw, T.ch);
   if (!E || !T.L) return;
   const s = parseSel();
-  const selTas = new Set(s ? (s.kind === 'ta' ? [s.i] : E.tcTas[s.i]) : []);
+  const selTas = new Set(selActivities(s));
   if (T.L.timeline) drawTimeline(g, th, C, s, selTas);
   for (const p of T.L.panels) drawPanel(g, th, C, p, s, selTas);
   for (const h of T.L.hists) drawHist(g, th, C, h, s, selTas);
@@ -695,7 +679,7 @@ function drawPanel(g, th, C, p, s, selTas) {
   // TA boxes: the activity's window x its TPs' rows, in this panel's plane (and unit)
   for (let a = 0; a < E.nta; a++) {
     for (const bx of E.taBox[a]) {
-      if (bx.view !== p.view || (p.unit >= 0 && bx.unit !== p.unit)) continue;
+      if (!inPanel(p, bx)) continue;
       const xa = px(p, E.taT0[a]), xb = px(p, E.taT1[a]), ya = pyRow(p, bx.r1 + 0.5), yb = pyRow(p, bx.r0 - 0.5);
       if (xb < r.x || xa > r.x + r.w) continue;
       const on = selTas.has(a);
@@ -718,7 +702,7 @@ function drawPanel(g, th, C, p, s, selTas) {
   // frame, title, axes
   g.strokeStyle = th.fg_muted; g.lineWidth = 1; g.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
   g.fillStyle = th.fg; g.font = '11px system-ui, sans-serif'; g.textAlign = 'left'; g.textBaseline = 'alphabetic';
-  const [s0, s1] = p.unit < 0 ? E.vr[p.view] : (E.ur[p.view].get(p.unit) || [0, 0]);
+  const [s0, s1] = instRange(p);
   g.fillText(`${p.title}   (${(s1 - s0).toLocaleString()} TPs)`, r.x, r.y - 4);
   g.font = '10px system-ui, sans-serif'; g.fillStyle = th.fg; g.strokeStyle = th.fg_muted;
   // y: channel numbers at nice row positions; unit names at block centres
@@ -760,7 +744,7 @@ function drawTimeAxis(g, th, r, y) {
 
 function drawTimeline(g, th, C, s, selTas) {
   const E = T.E, TL = T.L.timeline, r = TL.plot;
-  const bar = 11, gap = 3;
+  const bar = TL_BAR, gap = TL_GAP;
   g.save();
   g.fillStyle = th.axes_bg; g.fillRect(r.x, r.y, r.w, r.h);
   g.beginPath(); g.rect(r.x, r.y, r.w, r.h); g.clip();
@@ -785,7 +769,7 @@ function drawTimeline(g, th, C, s, selTas) {
     if (on) { g.strokeStyle = th.fg; g.lineWidth = 1.5; g.strokeRect(xa, ly, Math.max(2, xb - xa), bar); }
     const bx = E.taBox[a][0];
     g.fillStyle = th.fg; g.textAlign = 'left';
-    g.fillText(`TA ${a}${bx && T.R ? ' · ' + T.R.units[bx.unit] + ' ' + VIEWS[bx.view] : ''}`, Math.max(xa, r.x) + 3, ly + bar / 2);
+    g.fillText(`TA ${a}${bx && T.R ? ' · ' + unitName(bx.unit) + ' ' + VIEWS[bx.view] : ''}`, Math.max(xa, r.x) + 3, ly + bar / 2);
   }
   y += Math.max(1, TL.lanes.n) * (bar + gap);
   // TP rate: per pixel column bin, stacked by plane; activity TPs as a line
@@ -886,7 +870,7 @@ function drawHist(g, th, C, h, s, selTas) {
 }
 
 function drawLegend(g, th) {
-  const st = T.app.state, E = T.E;
+  const st = T.app.state;
   const x = T.cw - 200, y = 4;
   if (st.tcol === 'ta') return;
   const cv = colourValues(st.tcol);
@@ -899,7 +883,6 @@ function drawLegend(g, th) {
   g.fillStyle = th.fg_muted; g.font = '9px system-ui, sans-serif'; g.textBaseline = 'top'; g.textAlign = 'left';
   g.fillText(fmt(cv.rlo), x, top + 7); g.textAlign = 'right'; g.fillText(fmt(cv.rhi), x + 120, top + 7);
   g.textAlign = 'left'; g.fillText(COLOURS.find((c) => c[0] === st.tcol)[1] + (cv.log ? ' (log)' : ''), x + 124, top);
-  void E;
 }
 
 // ----------------------------------------------------------------------------- pointer
@@ -918,14 +901,14 @@ function pick(x, y) {
     const TL = T.L.timeline, t = tAt(TL, x);
     if (y >= TL.tcY[0] && y <= TL.tcY[1]) for (let k = 0; k < E.ntc; k++) if (t >= E.tcT0[k] && t <= E.tcT1[k]) return { kind: 'tc', i: k };
     for (let a = 0; a < E.nta; a++) {
-      const ly = TL.taY0 + TL.lanes.lane[a] * 14;
-      if (y >= ly && y <= ly + 11 && t >= E.taT0[a] && t <= E.taT1[a]) return { kind: 'ta', i: a };
+      const ly = TL.taY0 + TL.lanes.lane[a] * (TL_BAR + TL_GAP);
+      if (y >= ly && y <= ly + TL_BAR && t >= E.taT0[a] && t <= E.taT1[a]) return { kind: 'ta', i: a };
     }
     return null;
   }
   const p = panelAt(x, y); if (!p) return null;
   // nearest TP within 6 px
-  const [s, e] = p.unit < 0 ? E.vr[p.view] : (E.ur[p.view].get(p.unit) || [0, 0]);
+  const [s, e] = instRange(p);
   const kx = p.plot.w / (T.x1 - T.x0), [y0, y1] = yRange(p), ky = p.plot.h / (y1 - y0);
   const t = tAt(p, x), rw = rowAt(p, y);
   let best = -1, bd = 36;
@@ -939,7 +922,7 @@ function pick(x, y) {
   }
   if (best >= 0) return { kind: 'tp', i: best, p, mark: [px(p, E.pk[best]), pyRow(p, E.row[best])] };
   for (let a = 0; a < E.nta; a++) for (const bx of E.taBox[a]) {
-    if (bx.view !== p.view || (p.unit >= 0 && bx.unit !== p.unit)) continue;
+    if (!inPanel(p, bx)) continue;
     if (t >= E.taT0[a] && t <= E.taT1[a] && rw >= bx.r0 - 0.5 && rw <= bx.r1 + 0.5) return { kind: 'ta', i: a, p };
   }
   for (let k = 0; k < E.ntc; k++) if (t >= E.tcT0[k] && t <= E.tcT1[k]) return { kind: 'tc', i: k, p };
@@ -1026,7 +1009,7 @@ function onMove(e) {
 }
 function onUp(e) {
   const d = T.drag; T.drag = null;
-  try { T.ovc.releasePointerCapture(e.pointerId); } catch (err) { /* not captured */ }
+  try { T.ovc.releasePointerCapture(e.pointerId); } catch (_) { /* not captured */ }
   if (!d || d.moved) return;
   const [x, y] = localXY(e), h = pick(x, y);
   if (!h) return;

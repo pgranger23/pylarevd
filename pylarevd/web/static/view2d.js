@@ -13,7 +13,10 @@
 // Zoom/pan per panel persists across state changes and event steps; it is reset by a new
 // geometry (file/detector), a double click, or the "reset" button.
 
-import { getLut, cmapGradientCss, hexToRgb, PDG_CLASSES, pdgClass, pdgSymbol } from './colormaps.js';
+import {
+  cmapGradientCss, hexToRgb, PDG_CLASSES, pdgClass, pdgSymbol, createProgram, createLutTexture, uploadLutTexture,
+} from './colormaps.js';
+import { CAT_KINDS, fmt, niceTicks, rankMap } from './util.js';
 
 const CSS = `
 .v2d-bar { position:absolute; left:6px; top:3px; z-index:6; display:flex; gap:10px; align-items:center;
@@ -50,6 +53,14 @@ const V = {
 };
 
 // ---------------------------------------------------------------------------- shaders
+// selection (select.js): flag of a group id in a 1024-wide R8 texture; -1 (no object) is never selected
+const SEL_GLSL = `
+float selFlag(float id) {
+  if (id < -0.5) return 0.0;
+  int i = int(id + 0.5);
+  return texelFetch(uSelTex, ivec2(i & 1023, i >> 10), 0).r;
+}`;
+
 const POINT_VS = `#version 300 es
 precision highp float;
 in vec2 aPos; in float aVal; in float aCat; in float aFlag; in float aSel; in float aMc;
@@ -62,6 +73,7 @@ uniform vec3 uHiCol;
 uniform vec3 uPal[8];
 uniform vec3 uUnassoc, uUniform;
 out vec3 vColor; flat out float vShape; flat out float vSelF;
+${SEL_GLSL}
 void main() {
   vec2 n = (aPos - uCenter) / uHalf;
   float z = 0.0; vShape = 0.0;
@@ -78,8 +90,7 @@ void main() {
   gl_PointSize = uSize;
   vSelF = 0.0;
   if (uSelOn > 0.5) {                          // selection: GPU-side lookup of the group id in a flag texture
-    float inS = 0.0;
-    if (aSel > -0.5) { int id = int(aSel + 0.5); inS = texelFetch(uSelTex, ivec2(id & 1023, id >> 10), 0).r; }
+    float inS = selFlag(aSel);
     vSelF = inS > 0.5 ? 1.0 : -1.0;
     if (inS > 0.5) { z = -0.95; gl_PointSize = max(uSize * 1.8, 7.0); } else z = 0.95;
   }
@@ -122,6 +133,7 @@ uniform float uMode, uSelOn, uSelPass, uTruthOn, uTruthSel;
 uniform highp sampler2D uSelTex, uTruthTex;
 uniform vec3 uColor, uPal[8], uPdg[9], uUnassoc;
 out vec3 vColor; out float vCum; out float vSelF;
+${SEL_GLSL}
 void main() {
   gl_Position = vec4((aPos - uCenter) / uHalf + uOff, 0.0, 1.0);
   float cls = mod(aExtra.y, 16.0);
@@ -140,8 +152,7 @@ void main() {
     }
   }
   if (uSelOn > 0.5) {
-    float inS = 0.0;
-    if (aSel > -0.5) { int id = int(aSel + 0.5); inS = texelFetch(uSelTex, ivec2(id & 1023, id >> 10), 0).r; }
+    float inS = selFlag(aSel);
     vSelF = inS > 0.5 ? 1.0 : -1.0;
     if (uSelPass > 0.5 && inS < 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);   // emphasis pass: selected only
   }
@@ -159,14 +170,11 @@ const FILL_VS = `#version 300 es
 precision highp float;
 in vec2 aPos; in float aSel; uniform vec2 uCenter, uHalf, uOff; uniform float uSelOn;
 uniform highp sampler2D uSelTex; out float vSelF;
+${SEL_GLSL}
 void main() {
   gl_Position = vec4((aPos - uCenter) / uHalf + uOff, 0.0, 1.0);
   vSelF = 0.0;
-  if (uSelOn > 0.5) {
-    float inS = 0.0;
-    if (aSel > -0.5) { int id = int(aSel + 0.5); inS = texelFetch(uSelTex, ivec2(id & 1023, id >> 10), 0).r; }
-    vSelF = inS > 0.5 ? 1.0 : -1.0;
-  }
+  if (uSelOn > 0.5) vSelF = selFlag(aSel) > 0.5 ? 1.0 : -1.0;
 }`;
 const FILL_FS = `#version 300 es
 precision mediump float;
@@ -175,16 +183,7 @@ void main() { o = vec4(uColor, vSelF < -0.5 ? uAlpha * min(1.0, uDim * 1.33) : (
 
 class Prog {
   constructor(gl, vs, fs, attribs) {
-    const mk = (type, src) => {
-      const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
-      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error('view2d shader: ' + gl.getShaderInfoLog(s));
-      return s;
-    };
-    this.gl = gl; this.p = gl.createProgram();
-    gl.attachShader(this.p, mk(gl.VERTEX_SHADER, vs)); gl.attachShader(this.p, mk(gl.FRAGMENT_SHADER, fs));
-    attribs.forEach((a, i) => gl.bindAttribLocation(this.p, i, a));
-    gl.linkProgram(this.p);
-    if (!gl.getProgramParameter(this.p, gl.LINK_STATUS)) throw new Error('view2d link: ' + gl.getProgramInfoLog(this.p));
+    this.gl = gl; this.p = createProgram(gl, vs, fs, { name: 'view2d', attribs });
     this.u = {};
   }
   use() { this.gl.useProgram(this.p); return this; }
@@ -221,6 +220,14 @@ function attrOff(gl, loc, def) {
 }
 
 // ---------------------------------------------------------------------------- init
+/** filtering + edge clamping of the TEXTURE_2D bound to the active unit */
+function texParams(gl, filter) {
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+
 function initGL() {
   const gl = V.glc.getContext('webgl2', { antialias: false, alpha: false, depth: true, preserveDrawingBuffer: false });
   if (!gl) throw new Error('WebGL2 unavailable');
@@ -228,12 +235,7 @@ function initGL() {
   V.progs.point = new Prog(gl, POINT_VS, POINT_FS, ['aPos', 'aVal', 'aCat', 'aFlag', 'aSel', 'aMc']);
   V.progs.line = new Prog(gl, LINE_VS, LINE_FS, ['aPos', 'aExtra', 'aSel', 'aMc']);
   V.progs.fill = new Prog(gl, FILL_VS, FILL_FS, ['aPos', 'aSel']);
-  V.lutTex = gl.createTexture(); V.lutName = null;
-  gl.bindTexture(gl.TEXTURE_2D, V.lutTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  V.lutTex = createLutTexture(gl); V.lutName = null;
   gl.enable(gl.BLEND);
   gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   gl.depthFunc(gl.LEQUAL);
@@ -242,11 +244,8 @@ function initGL() {
 function uploadLut() {
   const st = V.app.state;
   if (V.lutName === st.cmap || !V.gl) return;
-  const lut = getLut(st.cmap), d = new Uint8Array(256 * 4);
-  for (let i = 0; i < 256; i++) { d[4 * i] = lut[3 * i]; d[4 * i + 1] = lut[3 * i + 1]; d[4 * i + 2] = lut[3 * i + 2]; d[4 * i + 3] = 255; }
   const gl = V.gl;
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, V.lutTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, d);
+  gl.activeTexture(gl.TEXTURE0); uploadLutTexture(gl, V.lutTex, st.cmap);
   V.lutName = st.cmap;
 }
 
@@ -291,7 +290,6 @@ function init(container, app) {
 
 // ---------------------------------------------------------------------------- data (per event)
 const HIT_NUM = ['charge', 'amplitude', 'tick', 'multiplicity'];
-const CAT_KINDS = ['track', 'shower', 'pfparticle', 'cluster', 'slice'];
 
 /** suffix of the panel grouping in use: '' (by wire orientation), '_view' or '_none'. Only the wire
  *  space is grouped, and only if the exporter shipped that set (older bundles: orientation). */
@@ -321,16 +319,14 @@ function buildLayout(space) {
   } else { pan = b.get('hits/panel' + sfxFor(space)); h = b.get('hits/h'); v = b.get('hits/v'); }
   const L = { space, np, n: 0, ranges: [], orig: null, pos: null, vsrc: v, bufs: new Map(), grids: [], specs };
   if (!pan || !h || !v) { L.ranges = specs.map(() => [0, 0]); L.pos = new Res(new Float32Array(0)); L.orig = new Uint32Array(0); return L; }
+  const drawn = (i) => pan[i] >= 0 && pan[i] < np && Number.isFinite(h[i]) && Number.isFinite(v[i]);
   const cnt = new Uint32Array(np + 1);
-  for (let i = 0; i < n; i++) { const p = pan[i]; if (p >= 0 && p < np && Number.isFinite(h[i]) && Number.isFinite(v[i])) cnt[p + 1]++; }
+  for (let i = 0; i < n; i++) if (drawn(i)) cnt[pan[i] + 1]++;
   for (let p = 0; p < np; p++) cnt[p + 1] += cnt[p];
   const m = cnt[np], cur = cnt.slice(0, np);
   const orig = new Uint32Array(m), pos = new Float32Array(2 * m);
   for (let i = 0; i < n; i++) {
-    const p = pan[i];
-    if (p >= 0 && p < np && Number.isFinite(h[i]) && Number.isFinite(v[i])) {
-      const k = cur[p]++; orig[k] = i; pos[2 * k] = h[i]; pos[2 * k + 1] = v[i];
-    }
+    if (drawn(i)) { const k = cur[pan[i]]++; orig[k] = i; pos[2 * k] = h[i]; pos[2 * k + 1] = v[i]; }
   }
   L.n = m; L.orig = orig; L.pos = new Res(pos);
   for (let p = 0; p < np; p++) L.ranges.push([cnt[p], cnt[p + 1]]);
@@ -364,23 +360,18 @@ function catRanks(kind) {
   const g = S.bundle.get(`hits/group/${kind}`);
   let info = null;
   if (g) {
-    const ids = new Set();
-    for (let i = 0; i < g.length; i++) if (g[i] >= 0) ids.add(g[i]);
-    const sorted = Array.from(ids).sort((a, b) => a - b);
-    const map = new Map(sorted.map((id, r) => [id, r]));
+    const map = rankMap(g);
     const rank = new Float32Array(g.length);
     let un = 0;
     for (let i = 0; i < g.length; i++) { const r = g[i] >= 0 ? map.get(g[i]) : -1; rank[i] = r; if (r < 0) un++; }
-    info = { rank, map, nObj: sorted.length, nUn: un };
+    info = { rank, map, nObj: map.size, nUn: un };
   }
   S.cats.set(kind, info);
   return info;
 }
 
 function valueSource(L, name) {
-  const b = V.S.bundle;
-  if (name === 'x') return L.vsrc;
-  return b.get(`hits/${name}`);
+  return name === 'x' ? L.vsrc : V.S.bundle.get(`hits/${name}`);
 }
 
 function valueStats(L, name) {
@@ -553,7 +544,7 @@ function tpSet() {
   } else if (ch) pan = b.get('tp/panel' + sfx());
   if (pan) {
     const h = b.get('tp/h'), v = b.get('tp/v'), dv = b.get('tp/dvdt'), n = ch.length;
-    const slot = (i) => 2 * pan[i] + (ta[i] >= 0 ? 1 : 0);
+    const slot = (i) => 2 * pan[i] + (ta && ta[i] >= 0 ? 1 : 0);   // no tp/ta: no TP is in an activity
     const cnt = new Uint32Array(2 * np + 1);
     for (let i = 0; i < n; i++) if (pan[i] < np) cnt[slot(i) + 1]++;
     for (let k = 0; k < 2 * np; k++) cnt[k + 1] += cnt[k];
@@ -581,8 +572,8 @@ function tpSet() {
 function tpAtPx(px, py) {
   if (!V.S || !V.app.state.ov.tp) return null;
   const set = tpSet(); if (!set) return null;
-  const p = panelAt(px, py);
-  if (p < 0 || region(p, px, py) !== 'plot') return null;
+  const p = plotPanelAt(px, py);
+  if (p < 0) return null;
   const r = V.rects[p], v = V.views[vk()][p];
   const [hx, hy] = toData(p, px, py);
   const kx = r.pw / (2 * v.hx), ky = r.ph / (2 * v.hy), R = 6;
@@ -660,15 +651,9 @@ function depositSet() {
 // ---- selection (select.js): group id per object + a small id -> flag texture ---------------------------
 /** group id (of the selection's kind) owning a drawn track / shower row, -1 if none */
 function rowOwner(kindName, r, groupKind) {
-  const b = V.S.bundle;
-  let pfp = -1;
-  if (kindName === 'tracks') {
-    const t = b.get(`tracks2d${sfx()}/track`), m = b.get('tracks/pfp');
-    pfp = t && m ? m[t[r]] : -1;
-  } else {
-    const t = b.get(`showers2d${sfx()}/shower`), m = b.get('showers/pfp');
-    pfp = t && m ? m[t[r]] : -1;
-  }
+  const b = V.S.bundle, tr = kindName === 'tracks';
+  const t = b.get(tr ? `tracks2d${sfx()}/track` : `showers2d${sfx()}/shower`), m = b.get(tr ? 'tracks/pfp' : 'showers/pfp');
+  const pfp = t && m ? m[t[r]] : -1;
   if (groupKind === 'pfparticle') return pfp;
   const sl = b.get('pfp/slice');
   return pfp >= 0 && sl ? sl[pfp] : -1;
@@ -699,17 +684,13 @@ function pidBuf(set, kindName, groupKind) {
 
 function ensureSelTex() {
   const gl = V.gl, sel = V.app.selection;
-  if (!gl) return null;
-  if (!sel) return null;
+  if (!gl || !sel) return null;
   if (V.selStamp === sel.stamp && V.selCtx === gl) return sel;
   const W = 1024, H = Math.max(1, Math.ceil(sel.n / W));
   if (!V.selTex || V.selCtx !== gl) {
     V.selTex = gl.createTexture(); V.selCtx = gl;
     gl.bindTexture(gl.TEXTURE_2D, V.selTex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    texParams(gl, gl.NEAREST);
   }
   if (!V.selBuf || V.selBuf.length < W * H) V.selBuf = new Uint8Array(W * H);
   V.selBuf.fill(0); for (let i = 0; i < sel.mask.length; i++) V.selBuf[i] = sel.mask[i] ? 255 : 0;   // R8 is normalised: 1 would read as 1/255
@@ -728,10 +709,7 @@ function ensureTruthTex() {
   if (!V.truthTex || V.truthCtx !== gl) {
     V.truthTex = gl.createTexture(); V.truthCtx = gl; V.truthVer = -1; V.truthOf = null;
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, V.truthTex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    texParams(gl, gl.NEAREST);
   }
   gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, V.truthTex);
   if (V.truthOf !== TM || V.truthVer !== TM.version) {
@@ -882,13 +860,21 @@ function renderAll() {
 
 function rgb(hex) { return hexToRgb(hex); }
 
+/** selection / truth highlight colour of the theme */
+function highlightHex(th) { return th.name === 'light' ? '#c2410c' : '#fde047'; }
+
+/** the theme's 8 categorical colours into uPal[] */
+function paletteUniform(P, th) {
+  const pal = new Float32Array(24);
+  th.categorical.forEach((h, i) => pal.set(rgb(h), 3 * i));
+  V.gl.uniform3fv(P.l('uPal[0]'), pal);
+}
+
 function pointsUniforms(P, mode, cs, size, t) {
   P.f('uMode', mode); P.f('uSize', size);
   P.f('uCmapLo', t.cmap_floor); P.f('uCmapHi', t.cmap_ceiling);
   P.v3('uUnassoc', rgb(t.unassociated));
-  const pal = new Float32Array(24);
-  t.categorical.forEach((h, i) => { const c = rgb(h); pal.set(c, 3 * i); });
-  V.gl.uniform3fv(P.l('uPal[0]'), pal);
+  paletteUniform(P, t);
   if (cs && cs.kind === 'val') { P.f('uLog', cs.log ? 1 : 0); P.f('uFloor', cs.log ? cs.lo : 0); P.f('uLo', cs.log ? Math.log(cs.lo) : cs.lo); P.f('uInv', 1 / ((cs.log ? Math.log(cs.hi) - Math.log(cs.lo) : cs.hi - cs.lo) || 1)); }
 }
 
@@ -906,7 +892,7 @@ function renderGL() {
   const dimv = V.app.selDim ? V.app.selDim() : 0.15;   // visibility of non-selected objects
   let selHits = null;
   if (selv) { const g = S.bundle.get(`hits/group/${gk}`); if (g) selHits = layoutBuf(L, `g:${gk}`, () => gather(g, L.orig)); }
-  const hi = rgb(th.name === 'light' ? '#c2410c' : '#fde047');
+  const hiHex = highlightHex(th), hi = rgb(hiHex);
   const TM = ensureTruthTex();
   if (selv) { gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, V.selTex); gl.activeTexture(gl.TEXTURE0); }
   gl.disable(gl.SCISSOR_TEST); gl.viewport(0, 0, V.W, V.H);
@@ -935,7 +921,7 @@ function renderGL() {
     if (dep && dep.n[p]) {
       gl.disable(gl.DEPTH_TEST);
       const P = V.progs.point.use();
-      P.v2('uCenter', v.cx, v.cy); P.v2('uHalf', v.hx, v.hy); P.f('uAlpha', 0.35);
+      P.v2('uCenter', v.cx, v.cy); P.v2('uHalf', v.hx, v.hy);
       pointsUniforms(P, 2, null, Math.max(1, 1.2 * dpr), th); P.v3('uUniform', rgb(th.truth));
       P.f('uSelOn', 0); P.f('uAlpha', 0.35); P.v3('uRing', hi); P.v3('uHiCol', hi); P.f('uDim', dimv);
       P.f('uTruthOn', TM ? 1 : 0); P.f('uTruthSel', TM && TM.selActive ? 1 : 0); gl.uniform1i(P.l('uTruthTex'), 2);
@@ -1006,7 +992,7 @@ function renderGL() {
       if (tru) attrF(gl, 3, set.mcRes, 1, set.ranges[p][0] * 8); else attrOff(gl, 3, -1);
       P.f('uDash', o.dash ? 1 : 0); P.f('uPxPerCm', 0.5 * (pxPerCmX + pxPerCmY)); P.f('uPeriod', 7 * dpr);
       P.v3('uColor', rgb(o.color)); P.v3('uUnassoc', rgb(th.unassociated));
-      const pal = new Float32Array(24); th.categorical.forEach((hx, i) => pal.set(rgb(hx), 3 * i)); gl.uniform3fv(P.l('uPal[0]'), pal);
+      paletteUniform(P, th);
       if (o.mode === 2) { const pd = new Float32Array(27); PDG_CLASSES.forEach((c, i) => pd.set(rgb(c[th.name]), 3 * i)); gl.uniform3fv(P.l('uPdg[0]'), pd); }
       attrF(gl, 0, set.seg, 2, set.ranges[p][0] * 16);
       attrF(gl, 1, set.ext, 2, set.ranges[p][0] * 16);
@@ -1020,10 +1006,10 @@ function renderGL() {
     line(sets.mc, { width: 1, alpha: 0.7, color: th.mctrack, mode: st.color === 'pdg' ? 2 : 0, dash: true, truth: true });
     line(sh, { width: 1, alpha: 0.8, color: th.shower, mode: 0, selName: 'showers' });
     line(sets.tracks, { width: 2, alpha: 0.9, color: th.track, mode: st.color === 'track' ? 1 : 0, selName: 'tracks' });
-    if (TM && TM.selActive) line(sets.mc, { width: 3, alpha: 1, color: th.name === 'light' ? '#c2410c' : '#fde047', mode: 0, dash: false, truth: true, pass: 1 });
+    if (TM && TM.selActive) line(sets.mc, { width: 3, alpha: 1, color: hiHex, mode: 0, dash: false, truth: true, pass: 1 });
     if (selv) {          // emphasis: the selected tracks / shower outlines again, thicker, in the highlight colour
-      line(sh, { width: 3, alpha: 1, color: th.name === 'light' ? '#c2410c' : '#fde047', mode: 0, selName: 'showers', pass: 1 });
-      line(sets.tracks, { width: 3, alpha: 1, color: th.name === 'light' ? '#c2410c' : '#fde047', mode: 0, selName: 'tracks', pass: 1 });
+      line(sh, { width: 3, alpha: 1, color: hiHex, mode: 0, selName: 'showers', pass: 1 });
+      line(sets.tracks, { width: 3, alpha: 1, color: hiHex, mode: 0, selName: 'tracks', pass: 1 });
     }
   }
   gl.disable(gl.SCISSOR_TEST);
@@ -1031,16 +1017,6 @@ function renderGL() {
 }
 
 // ---------------------------------------------------------------------------- overlay (axes etc.)
-function niceTicks(lo, hi, target) {
-  const span = hi - lo; if (!(span > 0)) return { ticks: [lo], dec: 0 };
-  const raw = span / target, mag = Math.pow(10, Math.floor(Math.log10(raw))), nrm = raw / mag;
-  const step = (nrm < 1.5 ? 1 : nrm < 3 ? 2 : nrm < 7 ? 5 : 10) * mag;
-  const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-6; v += step) out.push(Math.abs(v) < step * 1e-9 ? 0 : v);
-  return { ticks: out, dec: Math.min(6, Math.max(0, -Math.floor(Math.log10(step) + 1e-9))) };
-}
-
-function fmt(v) { return Math.abs(v) >= 1000 || (Math.abs(v) < 0.01 && v !== 0) ? v.toExponential(1) : v.toPrecision(3).replace(/\.?0+$/, ''); }
-
 function toPx(p, hx, hy) {
   const r = V.rects[p], v = V.views[vk()][p];
   return [r.px + (hx - v.cx) / (2 * v.hx) * r.pw + r.pw / 2, r.py + r.ph / 2 - (hy - v.cy) / (2 * v.hy) * r.ph];
@@ -1079,11 +1055,10 @@ function renderOv() {
         const by = { x: [], D: [], o: [] }, dim = { x: [], D: [], o: [] }, hasSel = !!V.app.selection;
         for (let k = 0; k < pa.length; k++) {
           if (pa[k] !== p) continue;
-          const rl = roles && ix ? roles[ix[k]] : 3;
-          if (rl === 1 ? !ov.pvtx : !ov.vtx) continue;
+          const role = roles && ix ? roles[ix[k]] : 3;
+          if (role === 1 ? !ov.pvtx : !ov.vtx) continue;
           const [x, y] = toPx(p, hv[2 * k], hv[2 * k + 1]);
           if (x < r.px - 10 || x > r.px + r.pw + 10 || y < r.py - 10 || y > r.py + r.ph + 10) continue;
-          const role = roles && ix ? roles[ix[k]] : 3;
           ((hasSel && ix && !V.app.vertexSelected(ix[k]) ? dim : by)[role === 1 ? 'x' : role === 2 ? 'D' : 'o']).push(x, y);
         }
         if (hasSel) { g.globalAlpha = Math.min(1, 1.33 * V.app.selDim()); for (const kind of ['o', 'D', 'x']) drawMarkers(g, kind, dim[kind], th.vertex, th.axes_bg); g.globalAlpha = 1; }
@@ -1124,7 +1099,7 @@ function renderOv() {
     g.textAlign = 'center'; g.fillText(sp.hlabel || '', r.px + r.pw / 2, r.y + r.h - 4);
     g.save(); g.translate(r.x + 11, r.py + r.ph / 2); g.rotate(-Math.PI / 2); g.fillText(sp.vlabel || '', 0, 0); g.restore();
     g.fillStyle = th.fg; g.font = '11px system-ui, sans-serif'; g.textAlign = 'left';
-    g.fillText(`${sp.title || ''}   (${(L_count(p)).toLocaleString()} hits)`, r.px, r.py - 6);
+    g.fillText(`${sp.title || ''}   (${panelHitCount(p).toLocaleString()} hits)`, r.px, r.py - 6);
     if (v.link >= 0 && V.linkD) { g.fillStyle = th.fg_muted; g.font = '9px system-ui, sans-serif'; g.textAlign = 'right'; g.fillText(wire ? 'drift linked' : 'ticks linked', r.px + r.pw, r.py - 6); }
   }
 }
@@ -1259,7 +1234,7 @@ function onTrigger(m) {
   }
 }
 
-function L_count(p) { const L = layout(); const [s, e] = L.ranges[p] || [0, 0]; return e - s; }
+function panelHitCount(p) { const [s, e] = layout().ranges[p] || [0, 0]; return e - s; }
 
 function markerPath(g, kind, xy) {
   g.beginPath();
@@ -1370,6 +1345,12 @@ function panelAt(px, py) {
   return -1;
 }
 
+/** panel whose plot area contains css px (px, py), or -1 */
+function plotPanelAt(px, py) {
+  const p = panelAt(px, py);
+  return p >= 0 && region(p, px, py) === 'plot' ? p : -1;
+}
+
 function region(p, px, py) {
   const r = V.rects[p];
   const inX = px >= r.px && px <= r.px + r.pw, inY = py >= r.py && py <= r.py + r.ph;
@@ -1402,7 +1383,7 @@ function bindPointer() {
     if (e.shiftKey || reg === 'xaxis') fy = 1;
     if (e.altKey || reg === 'yaxis') fx = 1;
     interacting(); zoomAt(p, px, py, fx, fy);
-    V.hover = null; hideTip(); schedule(true, true);
+    V.hover = null; hideTip(); V.app.hoverObject(null); schedule(true, true);
   }, { passive: false });
   c.addEventListener('pointerdown', (e) => {
     if (!V.S || e.button !== 0) return;
@@ -1442,8 +1423,7 @@ function gridFor(L, p) {
   let G = L.grids[p]; if (G) return G;
   const [s, e] = L.ranges[p], n = e - s, pos = L.pos.data;
   if (n <= 0) return (L.grids[p] = { n: 0 });
-  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-  for (let i = s; i < e; i++) { const x = pos[2 * i], y = pos[2 * i + 1]; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  const [x0, x1, y0, y1] = dataExtent(L, p);
   const gd = Math.max(1, Math.min(256, Math.round(Math.sqrt(n / 3))));
   const cw = ((x1 - x0) || 1) / gd * 1.000001, ch = ((y1 - y0) || 1) / gd * 1.000001;
   const start = new Uint32Array(gd * gd + 1), cell = new Uint32Array(n);
@@ -1477,8 +1457,8 @@ function nearestHit(L, p, hx, hy, rx, ry) {
 
 /** {p, i, o} for the hit under the cursor (layout slot, original hit index) or null */
 function hitAtPx(px, py) {
-  const p = panelAt(px, py);
-  if (p < 0 || region(p, px, py) !== 'plot') return null;
+  const p = plotPanelAt(px, py);
+  if (p < 0) return null;
   const L = layout(), v = V.views[vk()][p], r = V.rects[p];
   const [hx, hy] = toData(p, px, py);
   const rad = 7;   // px
@@ -1493,8 +1473,8 @@ function mcLineAt(px, py) {
   if (!S || !TM || V.space !== 'wire' || !V.app.state.ov.truth) return null;
   const set = S.sets['mc' + sfx()];
   if (!set || !set.mcRes) return null;
-  const p = panelAt(px, py);
-  if (p < 0 || region(p, px, py) !== 'plot') return null;
+  const p = plotPanelAt(px, py);
+  if (p < 0) return null;
   const r = V.rects[p], v = V.views[vk()][p];
   const [hx, hy] = toData(p, px, py);
   const kx = r.pw / (2 * v.hx), ky = r.ph / (2 * v.hy);
@@ -1550,7 +1530,7 @@ function tpTip(tp) {
     `ADC sum ${fmt(at('tp/adc'))}   peak ${fmt(at('tp/peak'))}`];
   if (V.space === 'wire') lines.push(`w ${hh.toFixed(1)} cm   x ${vv.toFixed(1)} cm   (${PLACE_TEXT[at('tp/place')] || ''})`);
   const ta = at('tp/ta');
-  if (ta >= 0) { const tc = b.get('ta/tc'); lines.push(`in TA ${ta}${tc && tc[ta] >= 0 ? `  ->  TC ${tc[ta]}` : ''}`); }
+  if (ta != null && ta >= 0) { const tc = b.get('ta/tc'); lines.push(`in TA ${ta}${tc && tc[ta] >= 0 ? `  ->  TC ${tc[ta]}` : ''}`); }
   else lines.push('in no activity');
   return lines;
 }
@@ -1570,9 +1550,7 @@ function updateHover(px, py, e) {
     if (ml) {                         // a true trajectory (no hit under the cursor)
       const M = V.app.truth.model;
       V.app.hoverObject({ pfp: -1, slice: -1, mc: ml.row }, e.shiftKey);
-      V.tip.textContent = `true ${pdgSymbol(M.pdg[ml.row])}  (track id ${M.tid[ml.row]})`;
-      V.tip.style.display = 'block';
-      V.tip.style.left = `${Math.max(2, px + 14)}px`; V.tip.style.top = `${Math.max(2, py + 14)}px`;
+      showTip([`true ${pdgSymbol(M.pdg[ml.row])}  (track id ${M.tid[ml.row]})`], px, py);
       return;
     }
     hideTip(); V.app.hoverObject(null); return;
@@ -1592,14 +1570,7 @@ function updateHover(px, py, e) {
   lines.push(wire ? `w ${hh.toFixed(1)} cm   x ${vv.toFixed(1)} cm` : `channel ${hh.toFixed(0)}  tick ${vv.toFixed(1)}`);
   const objs = CAT_KINDS.map((k) => { const a = at(`hits/group/${k}`); return a != null && a >= 0 ? `${k} ${a}` : null; }).filter(Boolean);
   lines.push(objs.length ? objs.join('  ') : 'no reco object');
-  V.tip.textContent = lines.join('\n');
-  V.tip.style.display = 'block';
-  const cr = V.container.getBoundingClientRect();
-  let tx = px + 14, ty = py + 14;
-  const tw = V.tip.offsetWidth, th = V.tip.offsetHeight;
-  if (tx + tw > cr.width - 4) tx = px - tw - 10;
-  if (ty + th > cr.height - 4) ty = py - th - 10;
-  V.tip.style.left = `${Math.max(2, tx)}px`; V.tip.style.top = `${Math.max(2, ty)}px`;
+  showTip(lines, px, py);
   schedule(false, true);
 }
 
@@ -1611,16 +1582,17 @@ function freeEvent() {
 
 function setGeometry() { V.views = {}; }
 
+/** the "panels" select option of a merge2d value (unknown values: by wire orientation) */
+function mergeOption(m) { return m === 'view' || m === 'none' ? m : 'orientation'; }
+
 function setEvent(bundle) {
   if (!V.ready) return;
   freeEvent();
   if (bundle) {
     V.S = { bundle, res: [], layouts: {}, stats: new Map(), cats: new Map(), sets: {}, labelPts: null };
     V.bar.sel.value = V.space;
-    V.bar.mg.value = ['view', 'none'].includes(V.app.state.merge2d) ? V.app.state.merge2d : 'orientation';
-    const t0 = performance.now();
+    V.bar.mg.value = mergeOption(V.app.state.merge2d);
     ensureViews();
-    V.lastBuildMs = performance.now() - t0;
   }
   computeRects();
   updateLegend();
@@ -1635,7 +1607,7 @@ function onState(state, changed) {
     V.bar.sel.value = V.space;
   }
   if (changed.has('merge2d')) {
-    V.bar.mg.value = ['view', 'none'].includes(state.merge2d) ? state.merge2d : 'orientation';
+    V.bar.mg.value = mergeOption(state.merge2d);
     V.hover = null; hideTip();
     if (V.S) { ensureViews(); computeRects(); }
   }
@@ -1656,7 +1628,6 @@ function getCanvas() {
   const g = V.shot.getContext('2d');
   g.drawImage(V.glc, 0, 0);
   g.drawImage(V.ovc, 0, 0);
-  // legend text is DOM: draw a compact copy
   return V.shot;
 }
 

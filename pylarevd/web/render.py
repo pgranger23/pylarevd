@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import io
 import math
+import os
+import time
 
 VIEWS = ("2d", "3d", "light", "charge+light", "2d+3d", "optical", "flash3d")
 KINDS = ("pdf", "png", "gif")
@@ -142,17 +144,26 @@ def parse_export(q: dict, default_flash=None) -> dict:
 
 # ---------------------------------------------------------------- worker side
 
-_FILES: dict = {}
-
-
 def _event(path, entry):
-    from pylario import EventFile
-    ef = _FILES.get(path)
-    if ef is None:
-        ef = _FILES[path] = EventFile(path)
+    """The decoded event, from the worker's EventFile that the bundle cache also uses."""
+    from .cache import _open
+    ef = _open(path)
     if not 0 <= entry < len(ef):
         raise ValueError(f"entry {entry} out of range")
     return ef[entry]
+
+
+def _release(path, entry):
+    """Drop the decoded event again (see cache.get_or_build_event): an export is a
+    one-off, and keeping every rendered event would grow the worker without bound."""
+    from .cache import _EVENT_FILES, canonical
+    ef = _EVENT_FILES.get(canonical(path))
+    release = getattr(ef, "release", None)
+    if release is not None:
+        try:
+            release(int(entry))
+        except Exception:
+            pass
 
 
 def _camera(ev, p):
@@ -176,27 +187,26 @@ def _flags(p):
                 pvtx=o["pvtx"], vtx=o["vtx"], rad=o["rad"], labels=o["labels"])
 
 
-def _display_3d(ev, p):
+def _display_kwargs(p):
+    """Overlay, colour-scale and theme keywords shared by the 2-D and 3-D displays."""
     f = _flags(p)
+    return dict(truth=f["truth"], tracks=f["tracks"], showers=f["showers"],
+                vertices=f["pvtx"] or f["vtx"], pandora_vertex=f["pvtx"],
+                daughter_vertices=f["vtx"], secondary_vertices=f["vtx"],
+                radiologicals=f["rad"], colour_scale=p["scale"],
+                particle_symbols=f["labels"], theme=p["theme"], colormap=p["cmap"])
+
+
+def _display_3d(ev, p):
     colour = p["color"] if p["color"] in COLOURS_3D else "integral"
-    return ev.display_3d(truth=f["truth"], tracks=f["tracks"], showers=f["showers"],
-                         vertices=f["pvtx"] or f["vtx"], pandora_vertex=f["pvtx"],
-                         daughter_vertices=f["vtx"], secondary_vertices=f["vtx"],
-                         radiologicals=f["rad"], colour_by=colour,
-                         colour_scale=p["scale"], particle_symbols=f["labels"],
-                         theme=p["theme"], colormap=p["cmap"])
+    return ev.display_3d(colour_by=colour, **_display_kwargs(p))
 
 
 def _display_2d(ev, p, hit_tag):
-    f = _flags(p)
     colour = p["color"] if p["color"] in COLOURS_2D else "integral"
-    return ev.display(hit_tag, truth=f["truth"], tracks=f["tracks"], showers=f["showers"],
-                      vertices=f["pvtx"] or f["vtx"], pandora_vertex=f["pvtx"],
-                      daughter_vertices=f["vtx"], secondary_vertices=f["vtx"],
-                      colour_by=colour, radiologicals=f["rad"], colour_scale=p["scale"],
-                      merge=p["merge2d"],
+    return ev.display(hit_tag, colour_by=colour, merge=p["merge2d"],
                       space="readout" if p["space2d"] == "readout" else "physical",
-                      particle_symbols=f["labels"], theme=p["theme"], colormap=p["cmap"])
+                      **_display_kwargs(p))
 
 
 def _light(ev, p, flash_tag, charge):
@@ -233,8 +243,6 @@ def _fig_bytes(fig, fmt, dpi, **kw):
 def render_export(path, entry, hit_tag, flash_tag, p) -> dict:
     """Run in a worker.  Returns {"ok": True, "data", "ctype", "filename", "note"}
     or {"ok": False, "status", "error"}."""
-    import os
-    import time
     t = time.time()
     try:
         import matplotlib
@@ -294,3 +302,5 @@ def render_export(path, entry, hit_tag, flash_tag, p) -> dict:
                 "error": f"{type(exc).__name__}: {exc}"}
     except Exception as exc:
         return {"ok": False, "status": 500, "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        _release(path, entry)

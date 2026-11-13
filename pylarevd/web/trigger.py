@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from ._tags import tag_of
+
 NO_PANEL = 255
 #: how a primitive got its wire (``tp/place``)
 PLACE_UNIQUE, PLACE_HIT, PLACE_AMBIGUOUS, PLACE_INACTIVE = 0, 1, 2, 3
@@ -51,9 +53,8 @@ def _disambiguated_hits(ev, hits):
     if hits is not None and (not g.wrapped_channels or hits.channels_split_across_wires):
         return hits
     for product in ev._src.hit_products():
-        tag = product.split("_")[1]
         try:
-            h = ev.hits(tag)
+            h = ev.hits(tag_of(product))
         except Exception:
             continue
         if h.channels_split_across_wires:
@@ -89,7 +90,8 @@ def place_primitives(ev, tr, hits):
         return row, place, None, {}
 
     # candidate segments per channel, active volumes only
-    seg = np.flatnonzero(np.isin(g.w_tpc, _active_tpcs(g)))
+    active = _active_tpcs(g)
+    seg = np.flatnonzero(np.isin(g.w_tpc, active))
     seg = seg[np.argsort(g.w_chan[seg], kind="stable")]
     seg_chan = g.w_chan[seg].astype(np.int64)
     ch = tr.tp_channel.astype(np.int64)
@@ -125,7 +127,7 @@ def place_primitives(ev, tr, hits):
         for i in np.flatnonzero(b > a):
             j = a[i] + int(np.argmin(np.abs(ht[a[i]:b[i]] - want[i])))
             r = hrow[j]
-            if g.w_chan[r] == ch[amb[i]] and np.isin(g.w_tpc[r], _active_tpcs(g)):
+            if g.w_chan[r] == ch[amb[i]] and np.isin(g.w_tpc[r], active):
                 row[amb[i]] = r
                 place[amb[i]] = PLACE_HIT
     return row, place, h, off
@@ -328,11 +330,11 @@ def readout_units(g):
 def summary_lines(tr, counts, mhits) -> list[str]:
     from pylario.event import TA_ALGORITHMS, TC_TYPES
     out = [f"trigger: {tr.n_tp:,} TPs, {tr.n_ta} TAs, {tr.n_tc} TCs "
-           f"({tr.label.split(' + ')[0].split('_')[1]})"]
+           f"({tag_of(tr.label.split(' + ')[0])})"]
     n_amb = counts[PLACE_NAMES[PLACE_AMBIGUOUS]]
     out.append(f"  TP wires: {counts[PLACE_NAMES[PLACE_UNIQUE]]:,} unique, "
                f"{counts[PLACE_NAMES[PLACE_HIT]]:,} from "
-               f"{mhits.product.split('_')[1] if mhits is not None else 'hits'}, "
+               f"{tag_of(mhits.product) if mhits is not None else 'hits'}, "
                f"{n_amb:,} ambiguous (readout view only)")
     for j in range(tr.n_tc):
         out.append(f"  TC {j}: {TC_TYPES.get(int(tr.tc_type[j]), tr.tc_type[j])} "

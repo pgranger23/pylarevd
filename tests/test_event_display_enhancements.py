@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from pylarevd import EventFile
-from pylarevd.app import build_app, render
 from pylarevd.display import Display3D
 
 SAMPLE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "samples")
@@ -132,44 +131,9 @@ def test_display3d_figure_and_pdf_save(tmp_path):
 
 
 @needs_ndk
-def test_app_callbacks_and_snapshot():
-    """Dash app should support fixing perspective, particle symbols, and PDF snapshots."""
-    app = build_app([NDK_PATH])
-    assert app is not None
-
-    # Test PDF snapshot callback
-    snap_fn = app.callback_map["download-snapshot.data"]["callback"].__wrapped__
-    relayout = {"scene.camera": {"up": {"x": 0, "y": 0, "z": 1}, "center": {"x": 0, "y": 0, "z": 0}, "eye": {"x": 1.5, "y": -1.2, "z": 0.8}}}
-    res = snap_fn(1, NDK_PATH, 0, None, "integral", "auto", "3d", ["on"], "orientation", ["on"], "dark", "cividis", ["on"], True, relayout, None, None)
-    assert res is not None
-    assert res.get("type") == "application/pdf"
-    assert res.get("filename").endswith(".pdf")
-    assert len(res.get("content")) > 1000
-
-    # Test particle symbols toggle
-    toggle_fn = app.callback_map["..show-symbols.data...particle-symbols.children...particle-symbols.style.."]["callback"].__wrapped__
-    active, label, style = toggle_fn(1, False)
-    assert active is True
-    assert "particle symbols" in label
-
-    # Check index_string CSS contains dropdown contrast styling
-    assert ".Select-control" in app.index_string
-    assert "#1e293b" in app.index_string
-    assert "[data-theme=\"light\"]" in app.index_string
-
-
-@needs_ndk
 def test_hiding_elements_and_pandora_vertex():
     """Verify granular element visibility and hiding pandora interaction vertex."""
-    from pylarevd.app import render, _parse_reco
     ev = EventFile(NDK_PATH)[9]
-    files = {NDK_PATH: EventFile(NDK_PATH)}
-
-    # Parse reco helper
-    assert _parse_reco(["tracks", "vertices"]) == (True, True, False)
-    assert _parse_reco(["tracks", "vertices", "pandora_vtx"]) == (True, True, True)
-    assert _parse_reco(["on"]) == (True, True, True)
-    assert _parse_reco([]) == (False, False, False)
 
     # 1. 3D with pandora_vertex=False
     d3_no_pan = ev.display_3d(tracks=True, pandora_vertex=False)
@@ -191,14 +155,7 @@ def test_hiding_elements_and_pandora_vertex():
     assert "pandora interaction vertex" not in leg_texts
     assert "primary daughter vertices" in leg_texts
 
-    # 4. App render with reco=["tracks", "vertices"]
-    fig_render_no_pan, _ = render(files, NDK_PATH, 9, None, "integral", "auto", "3d", truth=[], reco=["tracks", "vertices"])
-    render_names = [tr.name for tr in fig_render_no_pan.data]
-    assert "pandora interaction vertex" not in render_names
-    assert "primary daughter vertices" in render_names
-    assert "reco tracks" in render_names
-
-    # 5. 2D display with pandora_vertex=False
+    # 4. 2D display with pandora_vertex=False
     d2_no_pan = ev.display(tag=None, reco=True, pandora_vertex=False)
     fig2_no_pan = d2_no_pan.plotly_figure()
     names2_no_pan = [tr.name for tr in fig2_no_pan.data]
@@ -223,14 +180,6 @@ def test_event_display_2d_particle_symbols(tmp_path):
     fig_mpl = d2.figure(particle_symbols=True)
     texts_mpl = [t.get_text() for ax in fig_mpl.axes for t in ax.texts]
     assert any("K" in t for t in texts_mpl)
-
-    # 3. App render callback in 2D mode
-    files = {NDK_PATH: EventFile(NDK_PATH)}
-    fig_render, _ = render(
-        files, NDK_PATH, 9, None, "integral", "auto", "2d",
-        truth=[], reco=["tracks", "vertices"], particle_symbols=True
-    )
-    assert any(tr.name == "particle symbols" for tr in fig_render.data)
 
 
 

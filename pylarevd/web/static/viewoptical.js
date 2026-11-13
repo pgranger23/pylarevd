@@ -18,7 +18,8 @@
 // meta.tpcs, meta.truth.vertex.
 //
 // Params (registerParam): owin = half-width of the default window in us, or 'all'.
-import { getLut, hexToRgb } from './colormaps.js';
+import { getLut, hexToRgb, createProgram, createLutTexture, uploadLutTexture } from './colormaps.js';
+import { niceTicksCeil as niceTicks } from './util.js';
 
 const PE_RANGE = [1.0, 3e5];        // display.PE_SIZE_RANGE
 const WINDOWS = ['1', '5', '20', '50', '200', '1000', 'all'];
@@ -70,25 +71,16 @@ const O = {
   app: null, container: null, ready: false, visible: false,
   head: null, bar: null, note: null, stage: null, glc: null, ovc: null, ov: null, tip: null, msg: null, sel: null, span: null,
   gl: null, prog: null, loc: {}, lutTex: null, lutName: '', dpr: 1, W: 0, H: 0,
+  glRes: [],                       // the current event's buffers and VAOs (freed on the next upload)
   E: null,                         // per-event data (null = nothing to draw)
   x0: 0, x1: 1,                    // visible time range, relative to E.tref
   rects: [], hover: null, drag: null, raf: 0, lastMs: 0,
 };
 
 // ----------------------------------------------------------------------------- helpers
-function niceTicks(lo, hi, target = 7) {
-  const span = hi - lo;
-  if (!(span > 0)) return { ticks: [lo], step: 1 };
-  const raw = span / target, mag = 10 ** Math.floor(Math.log10(raw));
-  let step = 10 * mag;
-  for (const m of [1, 2, 5, 10]) if (m * mag >= raw) { step = m * mag; break; }
-  const out = [];
-  for (let v = Math.ceil(lo / step) * step; v <= hi + 0.5 * step; v += step) out.push(v);
-  return { ticks: out, step };
-}
 const fmtTick = (v, step) => (Math.abs(v) < 1e-9 * step ? 0 : v).toFixed(Math.max(0, Math.min(6, Math.ceil(-Math.log10(step) - 1e-9))));
-function fmtPe(pe) { return pe >= 1e4 ? `${(pe / 1e3).toFixed(0)}k` : pe >= 1e3 ? `${(pe / 1e3).toFixed(1)}k` : pe.toFixed(pe < 10 ? 1 : 0); }
-const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+/** index of the largest of a[0..n) (the first one on ties) */
+function argmax(a, n) { let b = 0; for (let i = 1; i < n; i++) if (a[i] > a[b]) b = i; return b; }
 
 // ----------------------------------------------------------------------------- init
 function init(container, app) {
@@ -138,56 +130,47 @@ function showMsg(t) { O.msg.textContent = t; O.msg.style.display = t ? 'flex' : 
 
 function buildGL() {
   const gl = O.gl;
-  const mk = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
-  const p = gl.createProgram();
-  gl.attachShader(p, mk(gl.VERTEX_SHADER, VS)); gl.attachShader(p, mk(gl.FRAGMENT_SHADER, FS));
-  gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
-  O.prog = p; O.loc = {};
+  const p = createProgram(gl, VS, FS);
+  O.prog = p; O.loc = {}; O.glRes = [];
   for (const n of ['aT', 'aY', 'aV', 'aS']) O.loc[n] = gl.getAttribLocation(p, n);
   for (const n of ['uX', 'uY', 'uCLog', 'uCLo', 'uCHi', 'uCmapLo', 'uCmapHi', 'uSizeMode', 'uSize', 'uPx', 'uLut', 'uAlpha']) O.loc[n] = gl.getUniformLocation(p, n);
-  O.lutTex = gl.createTexture(); O.lutName = '';
-  gl.bindTexture(gl.TEXTURE_2D, O.lutTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  O.lutTex = createLutTexture(gl); O.lutName = '';
 }
 
 function uploadLut() {
   const name = O.app.state.cmap;
   if (O.lutName === name) return;
-  const lut = getLut(name), d = new Uint8Array(256 * 4);
-  for (let i = 0; i < 256; i++) { d[4 * i] = lut[3 * i]; d[4 * i + 1] = lut[3 * i + 1]; d[4 * i + 2] = lut[3 * i + 2]; d[4 * i + 3] = 255; }
-  const gl = O.gl;
-  gl.bindTexture(gl.TEXTURE_2D, O.lutTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, d);
+  uploadLutTexture(O.gl, O.lutTex, name);
   O.lutName = name;
 }
 
 // ----------------------------------------------------------------------------- event data
-function setGeometry() { O.geomKey = null; }
+function setGeometry() { /* tile positions are read from the geometry passed to setEvent */ }
+
+/** blank the header (window span, notes, hover title) when there is no event to describe */
+function clearHead() {
+  O.span.textContent = ''; O.note.textContent = ''; O.head.title = '';
+  layoutStage();
+}
 
 function setEvent(bundle, geometry) {
   O.E = null; O.hover = null;
-  if (!bundle) { schedule(); return; }
+  if (!bundle) { clearHead(); schedule(); return; }
   const meta = bundle.meta, opm = meta.optical || {};
   const time = bundle.get('oph/time'), pe = bundle.get('oph/pe');
   const ftime = bundle.get('flash/time');
   const nh = time ? time.length : 0, nf = ftime ? ftime.length : 0;
   if (!nh && !nf) {
-    O.E = null;
     showMsg('No optical data in this event' + ((meta.notes || []).length ? ': ' + meta.notes.filter((n) => /optical|flash|ophit/i.test(n)).join('; ') : ''));
-    O.note.textContent = ''; schedule(); return;
+    clearHead(); schedule(); return;
   }
   showMsg('');
   const E = { nh, nf, bundle, meta, opm, geometry };
   // time reference: t0 from the exporter (onset of the brightest OpHit burst), else brightest flash
   let tref = Number.isFinite(opm.t0) ? opm.t0 : null;
   const fpe = bundle.get('flash/pe');
-  if (tref == null && nf) { let b = 0; for (let i = 1; i < nf; i++) if (fpe[i] > fpe[b]) b = i; tref = ftime[b]; }
-  if (tref == null && nh) { let b = 0; for (let i = 1; i < nh; i++) if (pe[i] > pe[b]) b = i; tref = time[b]; }
+  if (tref == null && nf) tref = ftime[argmax(fpe, nf)];
+  if (tref == null && nh) tref = time[argmax(pe, nh)];
   E.tref = tref || 0;
 
   // hit positions: z of the tile each hit sits on (NaN where unknown)
@@ -232,8 +215,10 @@ function setEvent(bundle, geometry) {
   let zlo = Infinity, zhi = -Infinity;
   const acc = (v) => { if (Number.isFinite(v)) { if (v < zlo) zlo = v; if (v > zhi) zhi = v; } };
   for (let i = 0; i < nh; i++) acc(hz[i]);
-  if (positioned) for (let j = 0; j < nfs; j++) acc(E.fZ[j]);
-  if (positioned) for (const b of tpcs) { acc(b[2]); acc(b[5]); }
+  if (positioned) {
+    for (let j = 0; j < nfs; j++) acc(E.fZ[j]);
+    for (const b of tpcs) { acc(b[2]); acc(b[5]); }
+  }
   if (!(zhi > zlo)) { zlo = 0; zhi = 1; }
   const pad = 0.04 * (zhi - zlo);
   E.hRange = [zlo - pad, zhi + pad];
@@ -261,10 +246,12 @@ function setEvent(bundle, geometry) {
 function uploadEvent() {
   const E = O.E, gl = O.gl;
   if (!E || !gl) return;
-  const mkBuf = (arr) => { const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, arr, gl.STATIC_DRAW); return b; };
+  for (const r of O.glRes) { if (r.vao) gl.deleteVertexArray(r.vao); else gl.deleteBuffer(r.buf); }
+  O.glRes = [];
+  const mkBuf = (arr) => { const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, arr, gl.STATIC_DRAW); O.glRes.push({ buf: b }); return b; };
   const L = O.loc;
   const mkVao = (T, Y, V, S, n) => {
-    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao); O.glRes.push({ vao });
     for (const [name, buf] of [['aT', mkBuf(T)], ['aY', mkBuf(Y)], ['aV', mkBuf(V)], ['aS', mkBuf(S)]]) {
       gl.bindBuffer(gl.ARRAY_BUFFER, buf);
       gl.enableVertexAttribArray(L[name]); gl.vertexAttribPointer(L[name], 1, gl.FLOAT, false, 0, 0);
@@ -282,7 +269,7 @@ function setHead() {
   const lines = [];
   const bits = [`${E.nf} flashes, ${E.nh} optical hits`];
   if (E.nf) {
-    let k = 0; for (let i = 1; i < E.nf; i++) if (fpe[i] > fpe[k]) k = i;
+    const k = argmax(fpe, E.nf);
     const med = Array.from(fpe).sort((a, c) => a - c)[Math.floor(E.nf / 2)];
     bits.push(`brightest flash t = ${ft[k].toFixed(2)} µs, ${fpe[k].toFixed(0)} PE (${(fpe[k] / Math.max(med, 1e-9)).toFixed(0)}x the median flash), y = ${fy[k].toFixed(0)}, z = ${fz[k].toFixed(0)} cm`);
   }
@@ -484,7 +471,7 @@ function colourBar(c, th, r, label, lo, hi, log) {
   if (log) for (let e = Math.ceil(lo); e <= hi; e++) ticks.push(e);
   for (const v of ticks) {
     const yy = y + (1 - (v - lo) / (hi - lo)) * (h - 1);
-    c.fillText(log ? (e10(v)) : String(Math.round(v)), x + w + 4, yy);
+    c.fillText(log ? e10(v) : String(Math.round(v)), x + w + 4, yy);
   }
   c.fillStyle = th.fg_muted; c.textBaseline = 'bottom'; c.fillText(label, x - 2, y - 4);
 }
@@ -517,26 +504,27 @@ function onWheel(e) {
 }
 function onDown(e) {
   const [mx, my] = mouse(e);
-  if (panelAt(mx, my) < 0 && mx < O.rects[0].x) return;
-  O.drag = { mx, x0: O.x0, x1: O.x1, moved: false };
+  if (!O.rects.length || (panelAt(mx, my) < 0 && mx < O.rects[0].x)) return;   // before the first layout
+  O.drag = { mx, x0: O.x0, x1: O.x1 };
   O.ovc.setPointerCapture(e.pointerId);
 }
 function onMove(e) {
   const [mx, my] = mouse(e);
   if (O.drag) {
     const r = O.rects[0], dt = (mx - O.drag.mx) / r.w * (O.drag.x1 - O.drag.x0);
-    if (Math.abs(mx - O.drag.mx) > 2) O.drag.moved = true;
     setX(O.drag.x0 - dt, O.drag.x1 - dt);
-    O.tip.style.display = 'none';
+    clearHover();          // the ring would stay put while the points pan under it
     return;
   }
   pick(mx, my);
 }
 function onUp(e) { O.drag = null; try { O.ovc.releasePointerCapture(e.pointerId); } catch (_) { /* not captured */ } }
 
+function clearHover() { if (O.hover) { O.hover = null; schedule(); } O.tip.style.display = 'none'; }
+
 function pick(mx, my) {
   const E = O.E, k = E ? panelAt(mx, my) : -1;
-  if (k < 0) { if (O.hover) { O.hover = null; schedule(); } O.tip.style.display = 'none'; return; }
+  if (k < 0) { clearHover(); return; }
   const r = O.rects[k];
   const tx = O.x0 + (mx - r.x) / r.w * (O.x1 - O.x0);
   const pxPerT = r.w / (O.x1 - O.x0);
@@ -551,7 +539,7 @@ function pick(mx, my) {
     const dd = dx * dx + dy * dy;
     if (dd <= bd) { bd = dd; best = j; }       // ties: later = brighter
   }
-  if (best < 0) { if (O.hover) { O.hover = null; schedule(); } O.tip.style.display = 'none'; return; }
+  if (best < 0) { clearHover(); return; }
   const b = E.bundle;
   let txt;
   if (k === 0) {

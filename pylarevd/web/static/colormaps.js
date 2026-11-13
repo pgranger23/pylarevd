@@ -48,13 +48,55 @@ export function makeLutTexture(name) {
   return tex;
 }
 
+/** Refill a makeLutTexture texture with another colormap. */
 export function updateLutTexture(tex, name) {
-  const lut = getLut(name);
-  const d = tex.image.data;
-  for (let i = 0; i < 256; i++) {
-    d[4 * i] = lut[3 * i]; d[4 * i + 1] = lut[3 * i + 1]; d[4 * i + 2] = lut[3 * i + 2]; d[4 * i + 3] = 255;
-  }
+  tex.image.data.set(lutRgba(name));
   tex.needsUpdate = true;
+}
+
+/** 256*4 Uint8Array of RGBA (alpha 255) for the named colormap. */
+export function lutRgba(name) {
+  const lut = getLut(name), d = new Uint8Array(256 * 4);
+  for (let i = 0; i < 256; i++) { d[4 * i] = lut[3 * i]; d[4 * i + 1] = lut[3 * i + 1]; d[4 * i + 2] = lut[3 * i + 2]; d[4 * i + 3] = 255; }
+  return d;
+}
+
+// ---- raw WebGL2 helpers (the 2-D canvases: view2d, viewlight, viewoptical, viewtrigger) -------------
+/** A colour-table texture (LINEAR, CLAMP_TO_EDGE), left bound to TEXTURE_2D; fill it with uploadLutTexture. */
+export function createLutTexture(gl) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return tex;
+}
+
+/** Load colormap `name` into the 256x1 RGBA texture `tex` (bound on the active texture unit). */
+export function uploadLutTexture(gl, tex, name) {
+  const d = lutRgba(name);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, d);
+}
+
+/**
+ * Compile and link a program from vertex / fragment shader sources; throws with the info log.
+ * `name` prefixes the errors ("<name> shader: ...", "<name> link: ..."); `attribs` binds attribute
+ * locations 0, 1, ... before linking.
+ */
+export function createProgram(gl, vs, fs, { name = '', attribs = null } = {}) {
+  const mk = (type, src) => {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error((name ? `${name} shader: ` : '') + gl.getShaderInfoLog(s));
+    return s;
+  };
+  const p = gl.createProgram();
+  gl.attachShader(p, mk(gl.VERTEX_SHADER, vs)); gl.attachShader(p, mk(gl.FRAGMENT_SHADER, fs));
+  if (attribs) attribs.forEach((a, i) => gl.bindAttribLocation(p, i, a));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error((name ? `${name} link: ` : '') + gl.getProgramInfoLog(p));
+  return p;
 }
 
 /** CSS linear-gradient string for a colormap (used by colourbars). */

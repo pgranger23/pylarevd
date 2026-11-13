@@ -247,20 +247,6 @@ def test_flash3d_plotly_takes_height(ev):
 
 
 @needs_atmnu
-def test_app_renders_the_light_view():
-    pytest.importorskip("dash")
-    from pylario import EventFile
-    from pylarevd.app import render
-    files = {ATMNU: EventFile(ATMNU)}
-    fig, summary = render(files, ATMNU, 0, None, "integral", "auto", "light",
-                          [], light_scale="linear", light_fill="cumulative")
-    assert not summary.startswith("ERROR"), summary
-    assert len(fig.frames) > 0
-    fig, summary = render(files, ATMNU, 0, None, "integral", "auto", "flash3d", [])
-    assert not summary.startswith("ERROR"), summary
-
-
-@needs_atmnu
 def test_cli_light_mode_writes_an_animation(tmp_path):
     from pylarevd.cli import main
     out = tmp_path / "out"
@@ -300,22 +286,10 @@ def test_charge_light_frames_render_and_blit_like_a_full_draw(ev, tmp_path):
     assert blit.ndim == 3 and blit.shape[2] == 3 and blit.std() > 5
 
 
-@needs_atmnu
-def test_app_renders_charge_and_light():
-    pytest.importorskip("dash")
-    from pylario import EventFile
-    from pylarevd.app import render
-    files = {ATMNU: EventFile(ATMNU)}
-    fig, summary = render(files, ATMNU, 0, None, "integral", "auto",
-                          "chargelight", [], reco=["tracks"])
-    assert not summary.startswith("ERROR"), summary
-    assert any(d.type == "mesh3d" for d in fig.data) and len(fig.frames) > 0
-
-
 # ---- keeping the 3-D view while the time changes ------------------------------
 
 def test_keep_view_script_is_valid_and_shipped(tmp_path):
-    """The camera keeper must reach both the browser app and saved HTML.
+    """The camera keeper must be valid and reach saved HTML.
 
     Without it every animation frame put a rotated or zoomed 3-D view back to
     the camera last saved in the layout -- which plotly updates only on a
@@ -325,9 +299,6 @@ def test_keep_view_script_is_valid_and_shipped(tmp_path):
     assert "scene.plot = function" in KEEP_VIEW_JS
     assert KEEP_VIEW_JS.count("(") == KEEP_VIEW_JS.count(")")
     assert KEEP_VIEW_JS.count("{") == KEEP_VIEW_JS.count("}")
-    pytest.importorskip("dash")
-    from pylarevd.app import build_app
-    assert "__pylarevdKeepView" in build_app([]).index_string
 
 
 @needs_atmnu

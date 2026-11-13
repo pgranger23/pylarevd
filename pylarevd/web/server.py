@@ -14,13 +14,16 @@ import mimetypes
 import multiprocessing
 import os
 import re
+import signal
 import sys
 import threading
 import time
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
+
+from ._tags import tag_of
 
 STATIC_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 GZIP_LEVEL = 3
@@ -31,6 +34,10 @@ _EOS_REDIRECTORS = (("/eos/user/", "eosuser.cern.ch"),
                     ("/eos/experiment/", "eospublic.cern.ch"),
                     ("/eos/", "eospublic.cern.ch"))
 _DOT_SEGMENT = re.compile(r"(^|/)\.\.?(/|$)")
+_CACHED_EVENT = re.compile(r"(\d+)_(.+)_(.+)\.evdb$")     # cache.entry_path file names
+
+#: API routes that answer HEAD (cheap, no decoding or rendering)
+_HEAD_API = ("/api/status", "/api/files")
 
 MIME = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
         ".html": "text/html; charset=utf-8", ".json": "application/json",
@@ -40,13 +47,16 @@ MIME = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
 
 
 class HttpError(Exception):
-    def __init__(self, status: int, msg: str):
+    def __init__(self, status: int, msg: str, headers=None):
         super().__init__(msg)
         self.status = status
+        self.headers = headers
 
 
 def normalise_path(path: str) -> str:
-    """Same rule as ``pylarevd.app.normalise_path`` (copied: app imports dash)."""
+    """User input -> data path: ``~`` expanded; a bare ``/eos/...`` path becomes a
+    ``root://`` URL on its redirector when EOS is not mounted here.  URLs pass
+    through unchanged."""
     p = path.strip()
     if _SCHEME.match(p):
         return p
@@ -117,6 +127,11 @@ def _gz_path(dest: str) -> str:
     return dest + ".gz"
 
 
+def _built(dest: str) -> bool:
+    """Are the raw bundle and its gzip both in the cache?"""
+    return os.path.exists(dest) and os.path.exists(_gz_path(dest))
+
+
 def _write_gz(dest: str) -> None:
     from . import cache
     with open(dest, "rb") as fh:
@@ -176,11 +191,11 @@ class FileInfo:
                 self._tags = (self._pick_hit(), self._pick_flash())
             return self._tags
 
-    def _tag_list(self, products):
+    @staticmethod
+    def _tag_list(products):
         out = []
         for p in products:
-            parts = str(p).split("_")
-            tag = parts[1] if len(parts) > 1 else str(p)
+            tag = tag_of(p)
             if tag not in out:
                 out.append(tag)
         return out
@@ -315,8 +330,24 @@ class App:
         with self.lock:
             if self._pool is None:
                 self._pool = ProcessPoolExecutor(
-                    self.workers, mp_context=multiprocessing.get_context("forkserver"))
+                    self.workers, mp_context=multiprocessing.get_context("forkserver"),
+                    initializer=_exit_with_server, initargs=(os.getpid(),))
             return self._pool
+
+    def _drop_pool(self):
+        """Shut down a broken pool; the next ``pool()`` starts a fresh one."""
+        with self.lock:
+            pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+    def _pool_submit(self, fn, *args) -> Future:
+        """Submit to the pool, restarting it once if a worker died."""
+        try:
+            return self.pool().submit(fn, *args)
+        except BrokenProcessPool:
+            self._drop_pool()
+            return self.pool().submit(fn, *args)
 
     def shutdown(self):
         with self.lock:
@@ -337,11 +368,7 @@ class App:
         self.jobs[key] = job
         self.counters["builds"] += 1
         from .cache import _root
-        try:
-            fut = self.pool().submit(_build_job, *key, _root())
-        except BrokenProcessPool:
-            self._pool = None
-            fut = self.pool().submit(_build_job, *key, _root())
+        fut = self._pool_submit(_build_job, *key, _root())
         fut.add_done_callback(lambda f, j=job: self._done(j, f))
 
     def _done(self, job: Job, fut):
@@ -353,9 +380,9 @@ class App:
                                     "prefetch": not job.explicit})
         except BaseException as exc:
             if isinstance(exc, BrokenProcessPool):
-                with self.lock:
-                    self._pool = None
-            self.counters["errors"] += 1
+                self._drop_pool()
+            with self.lock:
+                self.counters["errors"] += 1
             job.future.set_exception(exc)
         with self.lock:
             self.jobs.pop(job.key, None)
@@ -376,8 +403,7 @@ class App:
             if pre >= max(1, limit):
                 return
             key = (self.queue or self.bg).popleft()
-            if key in self.jobs or os.path.exists(self.dest_for(key)) and \
-                    os.path.exists(self.dest_for(key) + ".gz"):
+            if key in self.jobs or _built(self.dest_for(key)):
                 continue
             self._submit(Job(key, False, self._label(key)))
 
@@ -388,9 +414,9 @@ class App:
     def ensure(self, key) -> str:
         """Return the cache path of the finished raw bundle, building if needed."""
         dest = self.dest_for(key)
-        gz = dest + ".gz"
-        if os.path.exists(dest) and os.path.exists(gz):
-            self.counters["hits"] += 1
+        if _built(dest):
+            with self.lock:
+                self.counters["hits"] += 1
             return dest
         with self.lock:
             job = self.jobs.get(key)
@@ -443,7 +469,7 @@ class App:
             cached = []
             try:
                 for n in os.listdir(cache.cache_dir(info.path)):
-                    m = re.match(r"(\d+)_(.+)_(.+)\.evdb$", n)
+                    m = _CACHED_EVENT.match(n)
                     if m:
                         cached.append(int(m.group(1)))
             except OSError:
@@ -477,6 +503,22 @@ def _tag(q, name):
     return v or None
 
 
+def _event_args(info, q, list_available: bool) -> tuple:
+    """(entry, hit_tag, flash_tag) of an event request, validated against ``info``;
+    ``list_available`` appends the file's tags to an unknown-tag error."""
+    entry = _int(q, "entry")
+    if not 0 <= entry < info.n_events:
+        raise HttpError(400, f"entry {entry} out of range (0..{info.n_events - 1})")
+    dh, df = info.default_tags()
+    hit = _tag(q, "hits") or dh
+    flash = _tag(q, "flash") or df
+    for what, tag, known in (("hit", hit, info.hit_tags()), ("flash", flash, info.flash_tags())):
+        if tag and known and tag not in known:
+            raise HttpError(400, f"no {what} product with tag {tag!r}"
+                                 + (f"; available: {', '.join(known)}" if list_available else ""))
+    return entry, hit, flash
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     app: App = None  # type: ignore
@@ -502,65 +544,83 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         self._log(status, len(body), note)
 
-    def _json(self, obj, status=200):
+    def _json(self, obj, status=200, headers=None):
         self._send(status, json.dumps(obj).encode(), "application/json",
-                   {"Cache-Control": "no-store"})
+                   {"Cache-Control": "no-store", **(headers or {})})
 
-    def _error(self, status, msg):
+    def _error(self, status, msg, headers=None):
         try:
-            self._json({"error": msg}, status)
+            self._json({"error": msg}, status, headers)
         except OSError:
             pass
 
     def do_HEAD(self):
-        self.do_GET()
+        self._handle(self._head)
 
     def do_GET(self):
-        self._t0 = time.time()
-        try:
-            u = urlsplit(self.path)
-            q = parse_qs(u.query, keep_blank_values=True)
-            route = u.path
-            if route.startswith("/api/"):
-                self._api(route, q)
-            else:
-                self._static(route)
-        except HttpError as e:
-            self._error(e.status, str(e))
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        except Exception as e:      # never a stack trace page
-            self._error(500, f"{type(e).__name__}: {e}")
+        self._handle(self._get)
 
     def do_POST(self):
+        self._handle(self._post)
+
+    def _handle(self, method):
+        """Run a request method; every failure becomes a JSON error, never a stack trace page."""
         self._t0 = time.time()
         try:
-            u = urlsplit(self.path)
-            n = int(self.headers.get("Content-Length") or 0)
-            if n > 1 << 20:
-                raise HttpError(413, "request too large")
-            raw = self.rfile.read(n) if n else b""
-            if u.path != "/api/open":
-                raise HttpError(404, "not found")
-            if not self.app.may_open():
-                raise HttpError(403, "opening files by path is disabled when bound "
-                                     "beyond localhost (use --allow-open-under DIR "
-                                     "or --allow-remote-open)")
-            try:
-                body = json.loads(raw or b"{}")
-                path = body["path"]
-                if not isinstance(path, str):
-                    raise TypeError
-            except Exception:
-                raise HttpError(400, 'expected JSON body {"path": "..."}')
-            info = self.app.open_file(path, restricted=True)
-            self._json(self._file_entry(info))
+            method()
         except HttpError as e:
-            self._error(e.status, str(e))
+            self._error(e.status, str(e), e.headers)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
             self._error(500, f"{type(e).__name__}: {e}")
+
+    def _head(self):
+        """HEAD: static files and the cheap API routes answer as GET without the
+        body; the routes that decode or render refuse rather than do the work."""
+        route = urlsplit(self.path).path
+        if route.startswith("/api/") and route not in _HEAD_API:
+            raise HttpError(405, f"HEAD is not supported on {route}; use GET",
+                            {"Allow": "GET"})
+        self._get()
+
+    def _get(self):
+        u = urlsplit(self.path)
+        q = parse_qs(u.query, keep_blank_values=True)
+        route = u.path
+        if route.startswith("/api/"):
+            self._api(route, q)
+        else:
+            self._static(route)
+
+    def _post(self):
+        u = urlsplit(self.path)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if n < 0 or n > 1 << 20:
+            # the body is left unread, so this connection cannot carry another request
+            close = {"Connection": "close"}
+            if n < 0:
+                raise HttpError(400, "bad Content-Length", close)
+            raise HttpError(413, "request too large", close)
+        raw = self.rfile.read(n) if n else b""
+        if u.path != "/api/open":
+            raise HttpError(404, "not found")
+        if not self.app.may_open():
+            raise HttpError(403, "opening files by path is disabled when bound "
+                                 "beyond localhost (use --allow-open-under DIR "
+                                 "or --allow-remote-open)")
+        try:
+            body = json.loads(raw or b"{}")
+            path = body["path"]
+            if not isinstance(path, str):
+                raise TypeError
+        except Exception:
+            raise HttpError(400, 'expected JSON body {"path": "..."}')
+        info = self.app.open_file(path, restricted=True)
+        self._json(self._file_entry(info))
 
     # -- api
     @staticmethod
@@ -585,20 +645,10 @@ class Handler(BaseHTTPRequestHandler):
             dest = app.ensure(("geometry", info.path, 0, None, None))
             return self._bundle(dest)
         if route == "/api/event":
-            entry = _int(q, "entry")
-            if not 0 <= entry < info.n_events:
-                raise HttpError(400, f"entry {entry} out of range (0..{info.n_events - 1})")
-            dh, df = info.default_tags()
-            hit = _tag(q, "hits") or dh
-            flash = _tag(q, "flash") or df
-            if hit and info.hit_tags() and hit not in info.hit_tags():
-                raise HttpError(400, f"no hit product with tag {hit!r}; "
-                                     f"available: {', '.join(info.hit_tags())}")
-            if flash and info.flash_tags() and flash not in info.flash_tags():
-                raise HttpError(400, f"no flash product with tag {flash!r}; "
-                                     f"available: {', '.join(info.flash_tags())}")
-            cached = os.path.exists(app.dest_for(("event", info.path, entry, hit, flash)) + ".gz")
-            dest = app.ensure(("event", info.path, entry, hit, flash))
+            entry, hit, flash = _event_args(info, q, list_available=True)
+            key = ("event", info.path, entry, hit, flash)
+            cached = os.path.exists(_gz_path(app.dest_for(key)))
+            dest = app.ensure(key)
             try:
                 self._bundle(dest, note=f"{'cached' if cached else 'built'} hits={hit} flash={flash}")
             finally:
@@ -609,32 +659,19 @@ class Handler(BaseHTTPRequestHandler):
     def _export(self, info, q):
         from . import render
         app = self.app
-        entry = _int(q, "entry")
-        if not 0 <= entry < info.n_events:
-            raise HttpError(400, f"entry {entry} out of range (0..{info.n_events - 1})")
-        dh, df = info.default_tags()
-        hit = _tag(q, "hits") or dh
-        flash = _tag(q, "flash") or df
-        if hit and info.hit_tags() and hit not in info.hit_tags():
-            raise HttpError(400, f"no hit product with tag {hit!r}")
-        if flash and info.flash_tags() and flash not in info.flash_tags():
-            raise HttpError(400, f"no flash product with tag {flash!r}")
+        entry, hit, flash = _event_args(info, q, list_available=False)
         flat = {k: v[0] for k, v in q.items() if v}
         try:
             p = render.parse_export(flat)
         except ValueError as exc:
             raise HttpError(400, str(exc))
-        try:
-            fut = app.pool().submit(render.render_export, info.path, entry, hit, flash, p)
-        except BrokenProcessPool:
-            app._pool = None
-            fut = app.pool().submit(render.render_export, info.path, entry, hit, flash, p)
-        app.counters["exports"] += 1
+        fut = app._pool_submit(render.render_export, info.path, entry, hit, flash, p)
+        with app.lock:
+            app.counters["exports"] += 1
         try:
             res = fut.result()
         except BrokenProcessPool:
-            with app.lock:
-                app._pool = None
+            app._drop_pool()
             raise HttpError(500, "worker process died while rendering; retry")
         if not res["ok"]:
             raise HttpError(res["status"], res["error"])
@@ -651,9 +688,10 @@ class Handler(BaseHTTPRequestHandler):
         hdr = {"Cache-Control": "no-store", "Vary": "Accept-Encoding"}
         try:
             if gz_ok:
-                if not os.path.exists(dest + ".gz"):
+                gz = _gz_path(dest)
+                if not os.path.exists(gz):
                     _write_gz(dest)
-                with open(dest + ".gz", "rb") as fh:
+                with open(gz, "rb") as fh:
                     body = fh.read()
                 hdr["Content-Encoding"] = "gzip"
             else:
@@ -669,9 +707,17 @@ class Handler(BaseHTTPRequestHandler):
         if route in ("", "/"):
             route = "/index.html"
         rel = route[len("/static/"):] if route.startswith("/static/") else route.lstrip("/")
+        try:
+            rel = unquote(rel, errors="strict")
+        except UnicodeDecodeError:
+            raise HttpError(404, "not found")
+        # no NUL, no '.'/'..' segment (encoded or not), and the resolved file must
+        # still lie inside STATIC_ROOT
+        if "\0" in rel or _DOT_SEGMENT.search(rel):
+            raise HttpError(404, "not found")
         full = os.path.realpath(os.path.join(STATIC_ROOT, rel))
         root = os.path.realpath(STATIC_ROOT)
-        if not (full == root or full.startswith(root + os.sep)) or "\0" in rel:
+        if not (full == root or full.startswith(root + os.sep)):
             raise HttpError(404, "not found")
         if not os.path.isfile(full):
             raise HttpError(404, f"not found: {route}")
@@ -691,6 +737,36 @@ class Handler(BaseHTTPRequestHandler):
         with open(full, "rb") as fh:
             body = fh.read()
         self._send(200, body, ctype, hdr)
+
+
+def _exit_with_server(server_pid: int) -> None:
+    """Pool-worker initializer: exit once the server process is gone.
+
+    A server killed outright (SIGKILL, OOM, a crash) runs no shutdown, and its
+    forkserver workers -- each holding decoded events, ~1.5 GB -- would otherwise
+    live on as orphans until someone kills them by hand.
+    """
+    def watch():
+        while True:
+            time.sleep(5)
+            try:
+                os.kill(server_pid, 0)
+            except ProcessLookupError:
+                os._exit(0)
+            except PermissionError:      # the pid was reused by another user's process
+                os._exit(0)
+    threading.Thread(target=watch, name="exit-with-server", daemon=True).start()
+
+
+def _stop_on_sigterm() -> None:
+    """Treat SIGTERM like Ctrl-C, so ``main``'s cleanup (pool shutdown) runs.
+
+    The default SIGTERM action ends the process at once and leaves every pool
+    worker behind; containers, systemd and test harnesses all stop with SIGTERM.
+    """
+    def handler(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, handler)
 
 
 def make_server(files=(), host="127.0.0.1", port=8050, workers=None, prefetch=2,
@@ -744,6 +820,7 @@ def main(argv=None) -> int:
             else "limited to " + ", ".join(a.allow_open_under) if a.allow_open_under
             else "disabled; pass --allow-open-under DIR or --allow-remote-open to enable"),
             flush=True)
+    _stop_on_sigterm()
     if a.precompute:
         for info in list(app.files.values()):
             app.precompute(info)

@@ -19,9 +19,11 @@ Two rules this module exists to enforce:
 What this module does NOT claim: that the overlay colours are separable from
 the charge colormaps by hue. Six ramps between them cover most of colour space,
 and a joint solve that also satisfies contrast and colour-vision constraints
-only returns neon. Overlays are told apart from hits by *shape and casing*
-instead -- dashed vs solid, star vs cross, and a contrasting outline drawn
-under every overlay marker and line (see ``_CASING`` in :mod:`pylarevd.display`).
+only returns neon. Overlays are told apart from hits by *shape* instead --
+dashed vs solid, star vs cross -- and by a contrasting ``axes_bg`` outline on
+the filled vertex markers and the shower-cone silhouettes (the latter drawn with
+``_casing`` in :mod:`pylarevd.display`). Track and trajectory lines carry no
+outline; they rely on colour, width and dash pattern.
 """
 
 from __future__ import annotations
