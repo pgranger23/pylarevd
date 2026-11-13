@@ -19,7 +19,6 @@ Python 3.10+, and:
 | `pylario` | reading art-ROOT files & data model (required) |
 | `matplotlib` | static images (PNG/PDF/SVG) |
 | `plotly` | interactive HTML |
-| `dash` | the browser event browser (optional) |
 | `fsspec-xrootd` + `XRootD` | reading `root://` / EOS files (optional) |
 
 Nothing else. LArSoft is needed **only** to export a new detector geometry
@@ -75,7 +74,6 @@ Pick a narrower set if you prefer — the extras are:
 | Install | Adds |
 |---|---|
 | `pip install -e .` | the display: `numpy`, `uproot`, `matplotlib`, `plotly` |
-| `pip install -e ".[app]"` | **`dash`** — the interactive browser |
 | `pip install -e ".[xrootd]"` | `fsspec-xrootd`, for `root://` and `/eos` files |
 | `pip install -e ".[test]"` | `pytest`, `pillow` |
 | `pip install -e ".[all]"` | all of the above |
@@ -138,9 +136,9 @@ Views: `display()` (2-D physical), `display(space="readout")` (channel/tick),
 
 ---
 
-## 4. The interactive browser — the main way to use this
+## 4. The web viewer — the main way to use this
 
-It is a small web app. You run it **on the machine that holds the files**, and
+It is a small web server with a WebGL page. You run it **on the machine that holds the files**, and
 view it **in the browser on your laptop** through an SSH tunnel. No data is
 copied to your laptop and nothing renders there.
 
@@ -148,10 +146,10 @@ copied to your laptop and nothing renders there.
 tunnel command for you.
 
 ```bash
-python -m pylarevd.app reco.root [more.root ...] --port 8050
+python -m pylarevd.web reco.root [more.root ...] --port 8050
 
 # or start with nothing and open files from the browser:
-python -m pylarevd.app --port 8050
+python -m pylarevd.web --port 8050
 ```
 
 **Step 2 — on your laptop, in a second terminal.** This prints nothing and does
@@ -170,17 +168,17 @@ over the network; that is why the tunnel is required rather than a convenience.
 If the port is taken, pass `--port 8051` and change *both* numbers in the tunnel
 command to match.
 
-Once it is up: step through events with ◀ ▶ or the **left/right arrow keys**,
-switch between the five views, colour hits by charge or by owning object, toggle
-truth/reco/radiological overlays, and change theme and colormap.
+Once it is up: step through events with the prev/next buttons or the
+**left/right arrow keys**, switch between the 2-D, 3-D, light, optical and
+trigger views, colour hits by charge or by owning object, toggle
+truth/reco/radiological overlays, and change theme and colormap. The README's
+[web viewer section](README.md#the-web-viewer) lists everything.
 
 Every control is mirrored into the URL, so you can paste a link to exactly what
-you are looking at. The link carries `rse=run:subrun:event`, which outranks the
-entry number — so it still lands correctly when opened against a different
-reconstruction pass of the same data.
+you are looking at.
 
-Files on the command line are **optional**. With none, the app starts empty and
-you open files from the **open by path** box — paste a full path and press
+Files on the command line are **optional**. With none, the viewer starts empty
+and you open files from the **open** box — paste a full path and press
 Enter. It joins the dropdown, so you can flip between several. A bare CERN EOS
 path works too:
 
@@ -193,7 +191,7 @@ which is rewritten to the right xrootd redirector when `/eos` is not mounted.
 > Opening files by path lets the browser read anything your account can read.
 > That is fine on localhost, which is why it is enabled there. If you bind
 > elsewhere with `--host`, the box is disabled unless you also pass
-> `--allow-remote-open`.
+> `--allow-remote-open`, or `--allow-open-under DIR` to allow one directory.
 
 ---
 
@@ -270,8 +268,6 @@ with no neutrino.
 | No truth block at all | The sample has no `simb::MCTruth` with a neutrino set — cosmic and radiological samples are like this. Expected, not a failure. |
 | Static export of a 2-D interactive figure comes out empty | `write_image` on the plotly 2-D figures needs WebGL, which a headless machine may not have. Use `.save()` (matplotlib) for static output; the interactive HTML is fine in a real browser. |
 | `no such file` for a `/eos/...` path | `/eos` is not mounted and you have no Kerberos ticket — run `kinit`. See section 5. |
-| Browser shows `ERROR — ...` in the summary band | The message is the actual exception; a stale entry number after switching files is the usual cause. |
-| `pylarevd: the interactive browser needs the 'dash' package` | `pip install "pylarevd[app]"`, or source the LCG view. Run `python -m pylarevd --check` to see everything at once. |
 | `--html` output is enormous | Each event embeds plotly.js (~18 MB). Pass `--html-cdn` to link it instead (~1 MB), at the cost of needing internet to view. |
 | Port 8050 already in use | `--port 8051`, and change **both** numbers in the `ssh -L` command to match. |
 | Browser says "unable to connect" | The tunnel is not up, or you opened the remote hostname instead of `localhost:8050`. The `ssh -N -L` terminal must stay open. |

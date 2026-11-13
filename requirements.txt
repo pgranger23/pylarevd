@@ -15,9 +15,6 @@ uproot>=5.0
 matplotlib>=3.6          # static PNG/PDF/SVG
 plotly>=5.15             # interactive figures and self-contained HTML
 
-# the interactive browser (python -m pylarevd.app)
-dash>=2.14
-
 # reading root:// and /eos files. The XRootD client itself is not pip-installed
 # here: it needs the C++ libraries and a compiler. Use the LCG view, or install
 # `xrootd` separately if you have the build dependencies.

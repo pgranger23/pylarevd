@@ -5,10 +5,11 @@ off `light-animation`.
 
 ## Why
 
-The Dash/plotly browser re-renders whole figures in Python on every control
-change and ships them as JSON (1-100 MB). Animations redraw the full figure every
-frame, which is why the 3-D camera fought the time slider. On a ProtoDUNE-SP
-event the first render takes ~10 s and anything with all truth ~100 s.
+The Dash/plotly browser (`pylarevd.app`, since removed) re-rendered whole figures
+in Python on every control change and shipped them as JSON (1-100 MB). Animations
+redrew the full figure every frame, which is why the 3-D camera fought the time
+slider. On a ProtoDUNE-SP event the first render took ~10 s and anything with
+all truth ~100 s.
 
 ## Direction (inspired by LUCiD's viewer, github.com/CIDeR-ML/LUCiD/tree/main/viewer)
 
@@ -66,8 +67,8 @@ pylarevd/web/
 ```
 
 Launch: `python -m pylarevd.web reco.root [more.root] --port 8050`, which
-prints the SSH tunnel line like the current app. Old `pylarevd.app` stays
-untouched.
+prints the SSH tunnel line like the current app. (The old Dash app,
+`pylarevd.app`, stayed untouched at first and has since been removed.)
 
 ## EVDB bundle format v1 (one file per event, one per geometry)
 

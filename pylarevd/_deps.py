@@ -38,8 +38,6 @@ DEPENDENCIES: tuple[Dep, ...] = (
     Dep("uproot", "reading art-ROOT files (via pylario)", "uproot", required=True),
     Dep("matplotlib", "static images (PNG/PDF/SVG)", "matplotlib"),
     Dep("plotly", "interactive figures and self-contained HTML", "plotly"),
-    Dep("dash", "the interactive browser (python -m pylarevd.app)",
-        "dash", extra="app"),
     Dep("fsspec_xrootd", "reading root:// and /eos files",
         "fsspec-xrootd", extra="xrootd"),
     Dep("XRootD", "the XRootD client itself", "xrootd", extra="xrootd",
