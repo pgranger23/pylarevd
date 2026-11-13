@@ -14,6 +14,7 @@ import mimetypes
 import multiprocessing
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -329,13 +330,16 @@ class App:
         with self.lock:
             if self._pool is None:
                 self._pool = ProcessPoolExecutor(
-                    self.workers, mp_context=multiprocessing.get_context("forkserver"))
+                    self.workers, mp_context=multiprocessing.get_context("forkserver"),
+                    initializer=_exit_with_server, initargs=(os.getpid(),))
             return self._pool
 
     def _drop_pool(self):
-        """Forget a broken pool; the next ``pool()`` starts a fresh one."""
+        """Shut down a broken pool; the next ``pool()`` starts a fresh one."""
         with self.lock:
-            self._pool = None
+            pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def _pool_submit(self, fn, *args) -> Future:
         """Submit to the pool, restarting it once if a worker died."""
@@ -735,6 +739,36 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, body, ctype, hdr)
 
 
+def _exit_with_server(server_pid: int) -> None:
+    """Pool-worker initializer: exit once the server process is gone.
+
+    A server killed outright (SIGKILL, OOM, a crash) runs no shutdown, and its
+    forkserver workers -- each holding decoded events, ~1.5 GB -- would otherwise
+    live on as orphans until someone kills them by hand.
+    """
+    def watch():
+        while True:
+            time.sleep(5)
+            try:
+                os.kill(server_pid, 0)
+            except ProcessLookupError:
+                os._exit(0)
+            except PermissionError:      # the pid was reused by another user's process
+                os._exit(0)
+    threading.Thread(target=watch, name="exit-with-server", daemon=True).start()
+
+
+def _stop_on_sigterm() -> None:
+    """Treat SIGTERM like Ctrl-C, so ``main``'s cleanup (pool shutdown) runs.
+
+    The default SIGTERM action ends the process at once and leaves every pool
+    worker behind; containers, systemd and test harnesses all stop with SIGTERM.
+    """
+    def handler(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, handler)
+
+
 def make_server(files=(), host="127.0.0.1", port=8050, workers=None, prefetch=2,
                 allow_remote_open=False, open_prefixes=()) -> tuple:
     loopback = host in ("127.0.0.1", "localhost", "::1")
@@ -786,6 +820,7 @@ def main(argv=None) -> int:
             else "limited to " + ", ".join(a.allow_open_under) if a.allow_open_under
             else "disabled; pass --allow-open-under DIR or --allow-remote-open to enable"),
             flush=True)
+    _stop_on_sigterm()
     if a.precompute:
         for info in list(app.files.values()):
             app.precompute(info)
