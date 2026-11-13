@@ -466,14 +466,14 @@ def frame_edges(t0: float, lo: float, hi: float, n: int, scale: str,
     of the frames), then a clock that ticks one hit quantum per frame until
     geometric growth overtakes it (see :func:`_log_clock`).
     """
+    if scale not in TIME_SCALES:
+        raise ValueError(f"time_scale={scale!r} is not one of {TIME_SCALES}")
     if n < 1:
         raise ValueError("need at least one frame")
     if hi <= lo:
         raise ValueError(f"empty time window [{lo}, {hi}]")
     if scale == "linear" or hi <= t0 + quantum:
         return np.linspace(lo, hi, n + 1)
-    if scale != "log":
-        raise ValueError(f"time_scale={scale!r} is not one of {TIME_SCALES}")
     pre = t0 - lo
     n_pre = 0 if pre <= 0 else max(1, int(round(0.1 * n)))
     n_post = n - n_pre
