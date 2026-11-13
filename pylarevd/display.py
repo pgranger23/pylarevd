@@ -1439,19 +1439,20 @@ class EventDisplay(_TruthInfo):
                                  handlelength=1.8, columnspacing=1.2,
                                  borderpad=0.4, labelspacing=0.3)
                 leg.set_zorder(10)
+        note = ""
         if sc is not None:
             cb = fig.colorbar(sc, ax=axes.ravel().tolist(), pad=0.01, fraction=0.03)
             _style_colorbar(cb, clabel, t, fonts)
         elif self.is_categorical:
-            n_obj = int(self.groups.max()) + 1 if (self.groups >= 0).any() else 0
+            # Objects present, not the largest id: cluster ids are sparse.
+            n_obj = len(np.unique(self.groups[self.groups >= 0]))
             n_orphan = int((self.groups < 0).sum())
             # Appended to the truth block below rather than drawn at the
             # opposite corner: anchored independently, the two texts printed
             # over each other whenever both were present.
-            self._extra_note = (f"coloured by {self.colour_by}: {n_obj} objects "
-                                f"(colour x marker), {n_orphan} unassociated hits")
+            note = (f"coloured by {self.colour_by}: {n_obj} objects "
+                    f"(colour x marker), {n_orphan} unassociated hits")
         truth = self._truth_block()
-        note = getattr(self, "_extra_note", "")
         head = truth.splitlines()[0] if truth else ""
         rest = truth.splitlines()[1:] if truth else []
         if note:
