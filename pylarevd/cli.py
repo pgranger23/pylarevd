@@ -27,9 +27,9 @@ def _parse_events(spec: str, n: int) -> list[int]:
         if not part:
             continue
         # a range has a '-' after its first character; a leading one is a sign
-        if "-" in part[1:]:
-            lo, _, hi = part.partition("-")
-            a, b = int(lo), int(hi)
+        cut = part.find("-", 1)
+        if cut > 0:
+            a, b = int(part[:cut]), int(part[cut + 1:])
             if a < 0 or b < 0:
                 raise ValueError(f"negative event number in range {part!r}")
             if b < a:
