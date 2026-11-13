@@ -14,6 +14,7 @@
 // geometry (file/detector), a double click, or the "reset" button.
 
 import { getLut, cmapGradientCss, hexToRgb, PDG_CLASSES, pdgClass, pdgSymbol } from './colormaps.js';
+import { CAT_KINDS, fmt, rankMap } from './util.js';
 
 const CSS = `
 .v2d-bar { position:absolute; left:6px; top:3px; z-index:6; display:flex; gap:10px; align-items:center;
@@ -301,7 +302,6 @@ function init(container, app) {
 
 // ---------------------------------------------------------------------------- data (per event)
 const HIT_NUM = ['charge', 'amplitude', 'tick', 'multiplicity'];
-const CAT_KINDS = ['track', 'shower', 'pfparticle', 'cluster', 'slice'];
 
 /** suffix of the panel grouping in use: '' (by wire orientation), '_view' or '_none'. Only the wire
  *  space is grouped, and only if the exporter shipped that set (older bundles: orientation). */
@@ -372,14 +372,11 @@ function catRanks(kind) {
   const g = S.bundle.get(`hits/group/${kind}`);
   let info = null;
   if (g) {
-    const ids = new Set();
-    for (let i = 0; i < g.length; i++) if (g[i] >= 0) ids.add(g[i]);
-    const sorted = Array.from(ids).sort((a, b) => a - b);
-    const map = new Map(sorted.map((id, r) => [id, r]));
+    const map = rankMap(g);
     const rank = new Float32Array(g.length);
     let un = 0;
     for (let i = 0; i < g.length; i++) { const r = g[i] >= 0 ? map.get(g[i]) : -1; rank[i] = r; if (r < 0) un++; }
-    info = { rank, map, nObj: sorted.length, nUn: un };
+    info = { rank, map, nObj: map.size, nUn: un };
   }
   S.cats.set(kind, info);
   return info;
@@ -1038,12 +1035,6 @@ function niceTicks(lo, hi, target) {
   const step = (nrm < 1.5 ? 1 : nrm < 3 ? 2 : nrm < 7 ? 5 : 10) * mag;
   const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-6; v += step) out.push(Math.abs(v) < step * 1e-9 ? 0 : v);
   return { ticks: out, dec: Math.min(6, Math.max(0, -Math.floor(Math.log10(step) + 1e-9))) };
-}
-
-function fmt(v) {
-  if (Math.abs(v) >= 1000 || (Math.abs(v) < 0.01 && v !== 0)) return v.toExponential(1);
-  const s = v.toPrecision(3);
-  return s.includes('.') ? s.replace(/\.?0+$/, '') : s;   // trailing zeros of the fraction only (100 stays 100)
 }
 
 function toPx(p, hx, hy) {

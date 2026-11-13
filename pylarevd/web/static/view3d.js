@@ -38,6 +38,7 @@ import {
   getLut, makeLutTexture, updateLutTexture, cmapGradientCss, hexToRgb, PDG_CLASSES, pdgClass,
 } from './colormaps.js';
 import { polylineIndex, expandRagged, percentileRange } from './data.js';
+import { CAT_KINDS, fmt, rankMap } from './util.js';
 
 THREE.ColorManagement.enabled = false;   // palette values are used as plain sRGB
 
@@ -982,12 +983,7 @@ function hitRanks(kind) {
   let m = V.catRank.get(kind);
   if (m === undefined) {
     const g = V.bundle.get(`hits/group/${kind}`);
-    m = null;
-    if (g) {
-      const ids = new Set();
-      for (let i = 0; i < g.length; i++) if (g[i] >= 0) ids.add(g[i]);
-      m = new Map(Array.from(ids).sort((a, b) => a - b).map((id, r) => [id, r]));
-    }
+    m = g ? rankMap(g) : null;
     V.catRank.set(kind, m);
   }
   return m;
@@ -1014,13 +1010,6 @@ function valAttr(name) {
   return a;
 }
 
-const CAT_KINDS = ['track', 'shower', 'pfparticle', 'cluster', 'slice'];
-
-function fmt(v) {
-  if (Math.abs(v) >= 1000 || (Math.abs(v) < 0.01 && v !== 0)) return v.toExponential(1);
-  const s = v.toPrecision(3);
-  return s.includes('.') ? s.replace(/\.?0+$/, '') : s;   // trailing zeros of the fraction only (100 stays 100)
-}
 
 function applyColors() {
   const st = V.app.state;
