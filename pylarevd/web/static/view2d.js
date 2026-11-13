@@ -559,7 +559,7 @@ function tpSet() {
   } else if (ch) pan = b.get('tp/panel' + sfx());
   if (pan) {
     const h = b.get('tp/h'), v = b.get('tp/v'), dv = b.get('tp/dvdt'), n = ch.length;
-    const slot = (i) => 2 * pan[i] + (ta[i] >= 0 ? 1 : 0);
+    const slot = (i) => 2 * pan[i] + (ta && ta[i] >= 0 ? 1 : 0);   // no tp/ta: no TP is in an activity
     const cnt = new Uint32Array(2 * np + 1);
     for (let i = 0; i < n; i++) if (pan[i] < np) cnt[slot(i) + 1]++;
     for (let k = 0; k < 2 * np; k++) cnt[k + 1] += cnt[k];
@@ -1559,7 +1559,7 @@ function tpTip(tp) {
     `ADC sum ${fmt(at('tp/adc'))}   peak ${fmt(at('tp/peak'))}`];
   if (V.space === 'wire') lines.push(`w ${hh.toFixed(1)} cm   x ${vv.toFixed(1)} cm   (${PLACE_TEXT[at('tp/place')] || ''})`);
   const ta = at('tp/ta');
-  if (ta >= 0) { const tc = b.get('ta/tc'); lines.push(`in TA ${ta}${tc && tc[ta] >= 0 ? `  ->  TC ${tc[ta]}` : ''}`); }
+  if (ta != null && ta >= 0) { const tc = b.get('ta/tc'); lines.push(`in TA ${ta}${tc && tc[ta] >= 0 ? `  ->  TC ${tc[ta]}` : ''}`); }
   else lines.push('in no activity');
   return lines;
 }
