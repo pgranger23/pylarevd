@@ -1825,13 +1825,13 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
     side = nw > 1 and min(ratio) > 0.45
     wcol = 1 if charge is None else 2
     cells = [(w + 1, wcol) for w in range(nw)]
+    c3d_title = (f"charge: {len(charge.sp):,} space points (grey: log charge) "
+                 "+ light on the anode wall" if charge is not None else "")
     if side:
         ncol = nw + wcol - 1
         row1 = ([{"type": "scene"}] if charge is not None else []) \
             + [{"type": "xy"} for _ in range(nw)]
-        row1_titles = ([f"charge: {len(charge.sp):,} space points (grey: log "
-                        "charge) + light on the photon detectors"]
-                       if charge is not None else []) + titles
+        row1_titles = ([c3d_title] if charge is not None else []) + titles
         fig = make_subplots(
             rows=2, cols=ncol,
             specs=[row1, [{"type": "xy", "colspan": ncol}] + [None] * (ncol - 1)],
@@ -1853,9 +1853,7 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
                  + [[{"type": "xy", "colspan": 2}, None]])
         order = []                    # make_subplots titles run row by row
         for w in range(nw):
-            order += ([f"charge: {len(charge.sp):,} space points "
-                       "(grey: log charge) + light on the anode wall"]
-                      if w == 0 else []) + [titles[w]]
+            order += ([c3d_title] if w == 0 else []) + [titles[w]]
         fig = make_subplots(rows=nw + 1, cols=2, specs=specs,
                             column_widths=[0.5, 0.5],
                             row_heights=wall_share + [strip_share],
