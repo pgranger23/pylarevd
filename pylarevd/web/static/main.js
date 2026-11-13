@@ -54,6 +54,7 @@ import viewtrigger from './viewtrigger.js';
 import './exports.js';
 import { initSelection } from './select.js';
 import { initTruth } from './truth.js';
+import { downloadBlob } from './util.js';
 
 const OVERLAYS = ['truth', 'dep', 'tracks', 'showers', 'pvtx', 'vtx', 'labels', 'pd', 'tp', 'ta', 'tc'];
 const OV_DEFAULT = ['truth', 'tracks', 'showers', 'pvtx', 'vtx', 'pd', 'ta', 'tc'];
@@ -461,12 +462,8 @@ function screenshot() {
   }
   if (!any) { status('nothing to capture', true); return; }
   out.toBlob((blob) => {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
     const ev = events[currentIndex()];
-    a.download = `pylarevd_${state.view.replace('+', '_')}_${ev ? `${ev.run}_${ev.subrun}_${ev.event}` : 'event'}.png`;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    downloadBlob(blob, `pylarevd_${state.view.replace('+', '_')}_${ev ? `${ev.run}_${ev.subrun}_${ev.event}` : 'event'}.png`, 5000);
   }, 'image/png');
 }
 

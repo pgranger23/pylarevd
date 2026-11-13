@@ -9,6 +9,8 @@
 // and the toolbar, injects the buttons next to #btn-shot, and reads everything from
 // app.state (plus app.views.view3d.cameraInfo?.() for the camera).
 
+import { downloadBlob } from './util.js';
+
 const GIF_VIEWS = ['3d', 'light', 'charge+light'];
 const LIGHT_KEYS = ['lclock', 'lfill', 'lframes', 'lfps', 'lpers', 'lwlo', 'lwhi', 'lt0', 'lt'];
 
@@ -79,11 +81,7 @@ async function run(kind) {
     const blob = await resp.blob();
     const name = filenameOf(resp, `pylarevd_export.${kind}`);
     const note = resp.headers.get('X-Export-Note');
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = name;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    downloadBlob(blob, name, 10000);
     app.status(`${label} saved: ${name} (${(blob.size / 1e6).toFixed(2)} MB, `
       + `${((performance.now() - t0) / 1000).toFixed(1)} s)` + (note ? ` - ${note}` : ''));
   } catch (e) {
