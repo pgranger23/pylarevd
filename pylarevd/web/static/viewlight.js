@@ -11,7 +11,7 @@
 // lwlo / lwhi (window relative to t0, us), lt0 (absolute us, '' = auto), lt (frame | 'all'), lplay 0|1.
 
 import { getLut, hexToRgb } from './colormaps.js';
-import { esc } from './util.js';
+import { esc, niceTicksCeil } from './util.js';
 
 const PE_FLOOR = 0.5, PE_OFF = 0.2, PE_SIZE_MAX = 3e5, MAX_FLASHES = 50;
 const DEF = { lclock: 'log', lfill: 'afterglow', lframes: '120', lfps: '12', lpers: '0.7',
@@ -41,16 +41,8 @@ function fmtPe(pe) {
 }
 const SUP = { '0':'\u2070','1':'\u00b9','2':'\u00b2','3':'\u00b3','4':'\u2074','5':'\u2075','6':'\u2076','7':'\u2077','8':'\u2078','9':'\u2079','-':'\u207b' };
 function pow10(e) { return e <= 3 && e >= 0 ? String(10 ** e) : '10' + String(e).replace(/./g, (c) => SUP[c]); }
-function niceTicks(lo, hi, target = 7) {
-  const span = hi - lo;
-  if (!(span > 0)) return [lo];
-  const raw = span / target, mag = 10 ** Math.floor(Math.log10(raw));
-  let step = 10 * mag;
-  for (const m of [1, 2, 5, 10]) if (m * mag >= raw) { step = m * mag; break; }
-  const out = [];
-  for (let v = Math.ceil(lo / step) * step; v <= hi + 0.5 * step; v += step) out.push(Math.abs(v) < 1e-9 * step ? 0 : v);
-  return out;
-}
+/** tick values (util.js niceTicksCeil, zeros snapped) */
+const niceTicks = (lo, hi, target = 7) => niceTicksCeil(lo, hi, target, true).ticks;
 
 // ------------------------------------------------------------------ light.py ports
 /** Smallest COMMON gap between hit times (frames finer than this repeat). */

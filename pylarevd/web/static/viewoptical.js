@@ -19,6 +19,7 @@
 //
 // Params (registerParam): owin = half-width of the default window in us, or 'all'.
 import { getLut, hexToRgb } from './colormaps.js';
+import { niceTicksCeil as niceTicks } from './util.js';
 
 const PE_RANGE = [1.0, 3e5];        // display.PE_SIZE_RANGE
 const WINDOWS = ['1', '5', '20', '50', '200', '1000', 'all'];
@@ -77,16 +78,6 @@ const O = {
 };
 
 // ----------------------------------------------------------------------------- helpers
-function niceTicks(lo, hi, target = 7) {
-  const span = hi - lo;
-  if (!(span > 0)) return { ticks: [lo], step: 1 };
-  const raw = span / target, mag = 10 ** Math.floor(Math.log10(raw));
-  let step = 10 * mag;
-  for (const m of [1, 2, 5, 10]) if (m * mag >= raw) { step = m * mag; break; }
-  const out = [];
-  for (let v = Math.ceil(lo / step) * step; v <= hi + 0.5 * step; v += step) out.push(v);
-  return { ticks: out, step };
-}
 const fmtTick = (v, step) => (Math.abs(v) < 1e-9 * step ? 0 : v).toFixed(Math.max(0, Math.min(6, Math.ceil(-Math.log10(step) - 1e-9))));
 /** index of the largest of a[0..n) (the first one on ties) */
 function argmax(a, n) { let b = 0; for (let i = 1; i < n; i++) if (a[i] > a[b]) b = i; return b; }

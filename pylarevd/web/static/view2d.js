@@ -14,7 +14,7 @@
 // geometry (file/detector), a double click, or the "reset" button.
 
 import { getLut, cmapGradientCss, hexToRgb, PDG_CLASSES, pdgClass, pdgSymbol } from './colormaps.js';
-import { CAT_KINDS, fmt, rankMap } from './util.js';
+import { CAT_KINDS, fmt, niceTicks, rankMap } from './util.js';
 
 const CSS = `
 .v2d-bar { position:absolute; left:6px; top:3px; z-index:6; display:flex; gap:10px; align-items:center;
@@ -1029,14 +1029,6 @@ function renderGL() {
 }
 
 // ---------------------------------------------------------------------------- overlay (axes etc.)
-function niceTicks(lo, hi, target) {
-  const span = hi - lo; if (!(span > 0)) return { ticks: [lo], dec: 0 };
-  const raw = span / target, mag = Math.pow(10, Math.floor(Math.log10(raw))), nrm = raw / mag;
-  const step = (nrm < 1.5 ? 1 : nrm < 3 ? 2 : nrm < 7 ? 5 : 10) * mag;
-  const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-6; v += step) out.push(Math.abs(v) < step * 1e-9 ? 0 : v);
-  return { ticks: out, dec: Math.min(6, Math.max(0, -Math.floor(Math.log10(step) + 1e-9))) };
-}
-
 function toPx(p, hx, hy) {
   const r = V.rects[p], v = V.views[vk()][p];
   return [r.px + (hx - v.cx) / (2 * v.hx) * r.pw + r.pw / 2, r.py + r.ph / 2 - (hy - v.cy) / (2 * v.hy) * r.ph];
