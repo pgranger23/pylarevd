@@ -272,7 +272,7 @@ const V = {
   lutTex: null, lutName: '',
   geometry: null, bundle: null,
   tpc: null, axes: null, pd: null, pdN: 0, pdAlpha: 0.28, pdCustom: false,
-  sp: null, spCat: new Map(), spVal: new Map(), stats: new Map(), spMode: 'value',
+  sp: null, spCat: new Map(), catRank: new Map(), spVal: new Map(), stats: new Map(), spMode: 'value',
   tracks: null, trackCat: null, showers: null, markers: null, mc: null, dep: null,
   flashes: null, flashWin: null, flashTime: null, fbox: null, rib: null, ribVer: -1,
   labels: [], labelPool: [], labelLayer: null, axisLabels: [],
@@ -564,7 +564,7 @@ function setPdColors(rgb, alpha) {
 function clearEvent() {
   for (const k of ['sp', 'tracks', 'showers', 'markers', 'mc', 'dep', 'flashes', 'rib']) { disposeObj(V[k]); V[k] = null; }
   V.ribVer = -1;
-  V.spCat.clear(); V.spVal.clear(); V.stats.clear(); V.trackCat = null;
+  V.spCat.clear(); V.catRank.clear(); V.spVal.clear(); V.stats.clear(); V.trackCat = null;
   V.selAttrs.clear(); V.pk = null; V.mcpk = null; V.showerPos = null; V.lastPickObj = null;
   V.labels = [];
   for (const l of V.labelPool) l.el.style.display = 'none';
@@ -975,11 +975,30 @@ function coordStats(axis) {
   return s;
 }
 
+/** Palette index of each group id of a kind: its rank among the ids the HITS carry (hits/group/<kind>),
+ *  as view2d's catRanks, so an object has the same colour in 2-D and 3-D. Ids no hit carries keep
+ *  their own value (view2d does the same for track outlines); null if the event has no hit grouping. */
+function hitRanks(kind) {
+  let m = V.catRank.get(kind);
+  if (m === undefined) {
+    const g = V.bundle.get(`hits/group/${kind}`);
+    m = null;
+    if (g) {
+      const ids = new Set();
+      for (let i = 0; i < g.length; i++) if (g[i] >= 0) ids.add(g[i]);
+      m = new Map(Array.from(ids).sort((a, b) => a - b).map((id, r) => [id, r]));
+    }
+    V.catRank.set(kind, m);
+  }
+  return m;
+}
+const rankOf = (m, id) => { if (id < 0 || !m) return id; const r = m.get(id); return r === undefined ? id : r; };
+
 function catAttr(kind) {
   let a = V.spCat.get(kind);
   if (a === undefined) {
-    const src = V.bundle.get(`sp/group/${kind}`);
-    a = src ? attr(Float32Array.from(src), 1) : null;
+    const src = V.bundle.get(`sp/group/${kind}`), m = hitRanks(kind);
+    a = src ? attr(Float32Array.from(src, (id) => rankOf(m, id)), 1) : null;
     V.spCat.set(kind, a);
   }
   return a;
@@ -997,7 +1016,11 @@ function valAttr(name) {
 
 const CAT_KINDS = ['track', 'shower', 'pfparticle', 'cluster', 'slice'];
 
-function fmt(v) { return Math.abs(v) >= 1000 || (Math.abs(v) < 0.01 && v !== 0) ? v.toExponential(1) : v.toPrecision(3).replace(/\.?0+$/, ''); }
+function fmt(v) {
+  if (Math.abs(v) >= 1000 || (Math.abs(v) < 0.01 && v !== 0)) return v.toExponential(1);
+  const s = v.toPrecision(3);
+  return s.includes('.') ? s.replace(/\.?0+$/, '') : s;   // trailing zeros of the fraction only (100 stays 100)
+}
 
 function applyColors() {
   const st = V.app.state;
@@ -1040,9 +1063,10 @@ function applyColors() {
     const catTracks = colour === 'track' && V.bundle.get('tracks/offsets');
     if (catTracks) {
       if (!V.trackCat) {
-        const off = V.bundle.get('tracks/offsets'), id = V.bundle.get('tracks/id');
+        // hits/group/track and the 2-D outlines index track rows (not tracks/id): colour by row rank
+        const off = V.bundle.get('tracks/offsets'), m = hitRanks('track');
         const per = new Float32Array(off.length - 1);
-        for (let i = 0; i < per.length; i++) per[i] = id ? id[i] : i;
+        for (let i = 0; i < per.length; i++) per[i] = rankOf(m, i);
         V.trackCat = attr(expandRagged(off, per), 1);
       }
       V.tracks.geometry.setAttribute('aMeta', V.trackCat);
@@ -1434,7 +1458,7 @@ function updateLabels() {
     el.style.transform = `translate(${((v.x + 1) * 0.5 * w + 4) | 0}px,${((1 - v.y) * 0.5 * h - 6) | 0}px)`;
   };
   for (const l of V.axisLabels) place(l);
-  if (V.app.state.ov.labels) for (const l of V.labels) place(l);
+  for (const l of V.labels) if (l.shown) place(l);   // shown: labels overlay on, not the flash3d view
 }
 
 function render() {

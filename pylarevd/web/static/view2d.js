@@ -559,7 +559,7 @@ function tpSet() {
   } else if (ch) pan = b.get('tp/panel' + sfx());
   if (pan) {
     const h = b.get('tp/h'), v = b.get('tp/v'), dv = b.get('tp/dvdt'), n = ch.length;
-    const slot = (i) => 2 * pan[i] + (ta[i] >= 0 ? 1 : 0);
+    const slot = (i) => 2 * pan[i] + (ta && ta[i] >= 0 ? 1 : 0);   // no tp/ta: no TP is in an activity
     const cnt = new Uint32Array(2 * np + 1);
     for (let i = 0; i < n; i++) if (pan[i] < np) cnt[slot(i) + 1]++;
     for (let k = 0; k < 2 * np; k++) cnt[k + 1] += cnt[k];
@@ -1040,7 +1040,11 @@ function niceTicks(lo, hi, target) {
   return { ticks: out, dec: Math.min(6, Math.max(0, -Math.floor(Math.log10(step) + 1e-9))) };
 }
 
-function fmt(v) { return Math.abs(v) >= 1000 || (Math.abs(v) < 0.01 && v !== 0) ? v.toExponential(1) : v.toPrecision(3).replace(/\.?0+$/, ''); }
+function fmt(v) {
+  if (Math.abs(v) >= 1000 || (Math.abs(v) < 0.01 && v !== 0)) return v.toExponential(1);
+  const s = v.toPrecision(3);
+  return s.includes('.') ? s.replace(/\.?0+$/, '') : s;   // trailing zeros of the fraction only (100 stays 100)
+}
 
 function toPx(p, hx, hy) {
   const r = V.rects[p], v = V.views[vk()][p];
@@ -1408,7 +1412,7 @@ function bindPointer() {
     if (e.shiftKey || reg === 'xaxis') fy = 1;
     if (e.altKey || reg === 'yaxis') fx = 1;
     interacting(); zoomAt(p, px, py, fx, fy);
-    V.hover = null; hideTip(); schedule(true, true);
+    V.hover = null; hideTip(); V.app.hoverObject(null); schedule(true, true);
   }, { passive: false });
   c.addEventListener('pointerdown', (e) => {
     if (!V.S || e.button !== 0) return;
@@ -1555,7 +1559,7 @@ function tpTip(tp) {
     `ADC sum ${fmt(at('tp/adc'))}   peak ${fmt(at('tp/peak'))}`];
   if (V.space === 'wire') lines.push(`w ${hh.toFixed(1)} cm   x ${vv.toFixed(1)} cm   (${PLACE_TEXT[at('tp/place')] || ''})`);
   const ta = at('tp/ta');
-  if (ta >= 0) { const tc = b.get('ta/tc'); lines.push(`in TA ${ta}${tc && tc[ta] >= 0 ? `  ->  TC ${tc[ta]}` : ''}`); }
+  if (ta != null && ta >= 0) { const tc = b.get('ta/tc'); lines.push(`in TA ${ta}${tc && tc[ta] >= 0 ? `  ->  TC ${tc[ta]}` : ''}`); }
   else lines.push('in no activity');
   return lines;
 }
@@ -1575,9 +1579,7 @@ function updateHover(px, py, e) {
     if (ml) {                         // a true trajectory (no hit under the cursor)
       const M = V.app.truth.model;
       V.app.hoverObject({ pfp: -1, slice: -1, mc: ml.row }, e.shiftKey);
-      V.tip.textContent = `true ${pdgSymbol(M.pdg[ml.row])}  (track id ${M.tid[ml.row]})`;
-      V.tip.style.display = 'block';
-      V.tip.style.left = `${Math.max(2, px + 14)}px`; V.tip.style.top = `${Math.max(2, py + 14)}px`;
+      showTip([`true ${pdgSymbol(M.pdg[ml.row])}  (track id ${M.tid[ml.row]})`], px, py);
       return;
     }
     hideTip(); V.app.hoverObject(null); return;
