@@ -2102,10 +2102,11 @@ class Display3D(_TruthInfo):
                elev: float = 18.0, azim: float = -60.0, roll: float | None = None,
                particle_symbols: bool | None = None,
                zoom: float = 1.45, pad: float = 0.20,
-               figsize: tuple[float, float] = (9.8, 8.2)):
+               figsize: tuple[float, float] | None = None):
+        """Static 3-D figure; ``figsize=None`` scales 9.8 x 8.2 in by the preset."""
         plt = _pyplot()
         t, fonts = self.theme, _fonts(self.preset)
-        fig = plt.figure(figsize=figsize or _preset_figsize(self.preset, 11.0, 7.0))
+        fig = plt.figure(figsize=figsize or _preset_figsize(self.preset, 9.8, 8.2))
         fig.patch.set_facecolor(t.fig_bg)
         ax = fig.add_subplot(111, projection="3d")
 
@@ -2262,13 +2263,19 @@ class Display3D(_TruthInfo):
 
     def rotate_gif(self, elev: float = 18.0, start_azim: float = -60.0,
                    step: int = 3, fps: int = 12,
-                   figsize: tuple[float, float] = (9.8, 8.0),
+                   figsize: tuple[float, float] | None = None,
                    zoom: float = 1.45, pad: float = 0.20,
                    marker_size: float = 3.2, alpha: float = 1.0,
                    particle_symbols: bool | None = None) -> bytes:
-        """Render a 360-degree rotating animated GIF of the 3D event."""
+        """Render a 360-degree rotating animated GIF of the 3D event.
+
+        ``figsize=None`` scales 9.8 x 8.0 in by the preset.
+        """
         import io
         from PIL import Image
+
+        if figsize is None:
+            figsize = _preset_figsize(self.preset, 9.8, 8.0)
 
         fig = self.figure(elev=elev, azim=start_azim, figsize=figsize,
                           zoom=zoom, pad=pad,
