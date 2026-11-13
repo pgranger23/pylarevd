@@ -466,14 +466,14 @@ def frame_edges(t0: float, lo: float, hi: float, n: int, scale: str,
     of the frames), then a clock that ticks one hit quantum per frame until
     geometric growth overtakes it (see :func:`_log_clock`).
     """
+    if scale not in TIME_SCALES:
+        raise ValueError(f"time_scale={scale!r} is not one of {TIME_SCALES}")
     if n < 1:
         raise ValueError("need at least one frame")
     if hi <= lo:
         raise ValueError(f"empty time window [{lo}, {hi}]")
     if scale == "linear" or hi <= t0 + quantum:
         return np.linspace(lo, hi, n + 1)
-    if scale != "log":
-        raise ValueError(f"time_scale={scale!r} is not one of {TIME_SCALES}")
     pre = t0 - lo
     n_pre = 0 if pre <= 0 else max(1, int(round(0.1 * n)))
     n_post = n - n_pre
@@ -865,8 +865,12 @@ class LightAnimation(_TruthInfo):
         span = ("log-spaced after t0" if self.time_scale == "log"
                 else "uniform")
         e = self.edges
-        k0 = int(np.searchsorted(e, self.t0, side="right"))
-        first = e[min(k0 + 1, len(e) - 1)] - e[min(k0, len(e) - 2)]
+        # The first frame after t0 is the one that starts at t0 on the log
+        # clock (t0 is an edge there), and the one t0 falls in on the linear
+        # clock; a t0 outside the window takes the nearest frame.
+        k0 = int(np.clip(np.searchsorted(e, self.t0, side="right") - 1,
+                         0, len(e) - 2))
+        first = e[k0 + 1] - e[k0]
         lines.append(
             f"  t0 = {self.t0:.3f} us "
             + ("(given)" if self._t0_arg is not None
@@ -995,13 +999,15 @@ class LightAnimation(_TruthInfo):
                  else "uniform frames")
         return f"t − t₀   ({clock};  t₀ = {self.t0:.3f} µs)"
 
-    def _wall_boxes(self, w: int) -> list[tuple[float, float, float, float]]:
-        """TPC outlines (zmin, zmax, ymin, ymax) seen from this wall."""
-        out = set()
-        for b in self.geometry.tpcs:
-            out.add((round(b.zmin, 1), round(b.zmax, 1),
-                     round(b.ymin, 1), round(b.ymax, 1)))
-        return sorted(out)
+    @cached_property
+    def _tpc_outlines(self) -> list[tuple[float, float, float, float]]:
+        """Distinct TPC outlines (zmin, zmax, ymin, ymax), projected onto (z, y).
+
+        Every wall shows all of them: a wall's panel is the (z, y) projection.
+        """
+        return sorted({(round(b.zmin, 1), round(b.zmax, 1),
+                        round(b.ymin, 1), round(b.ymax, 1))
+                       for b in self.geometry.tpcs})
 
     # ---- static / animated (matplotlib) -------------------------------
 
@@ -1250,7 +1256,7 @@ class _MplScene:
                 top = y0 - gap
             ax.set_facecolor(t.axes_bg)
             zmin, zmax, ymin, ymax = spans[w]
-            for (bz0, bz1, by0, by1) in a._wall_boxes(w):
+            for (bz0, bz1, by0, by1) in a._tpc_outlines:
                 ax.add_patch(Rectangle((bz0, by0), bz1 - bz0, by1 - by0,
                                        fill=False, edgecolor=t.grid,
                                        linewidth=0.5, alpha=0.6, zorder=1))
@@ -1662,6 +1668,8 @@ def _encode_gif(frames: list[np.ndarray], fps: float, hold: float) -> bytes:
 def _encode_mp4(frames: list[np.ndarray], fps: float, hold: float) -> bytes:
     """H.264 via an ffmpeg pipe; the held last frame is repeated."""
     import tempfile
+    if not frames:
+        raise ValueError("no frames to encode")
     h, w = frames[0].shape[:2]
     extra = [frames[-1]] * max(0, int(round(hold * fps)) - 1)
     with tempfile.TemporaryDirectory() as tmp:
@@ -1821,13 +1829,13 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
     side = nw > 1 and min(ratio) > 0.45
     wcol = 1 if charge is None else 2
     cells = [(w + 1, wcol) for w in range(nw)]
+    c3d_title = (f"charge: {len(charge.sp):,} space points (grey: log charge) "
+                 "+ light on the anode wall" if charge is not None else "")
     if side:
         ncol = nw + wcol - 1
         row1 = ([{"type": "scene"}] if charge is not None else []) \
             + [{"type": "xy"} for _ in range(nw)]
-        row1_titles = ([f"charge: {len(charge.sp):,} space points (grey: log "
-                        "charge) + light on the photon detectors"]
-                       if charge is not None else []) + titles
+        row1_titles = ([c3d_title] if charge is not None else []) + titles
         fig = make_subplots(
             rows=2, cols=ncol,
             specs=[row1, [{"type": "xy", "colspan": ncol}] + [None] * (ncol - 1)],
@@ -1849,9 +1857,7 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
                  + [[{"type": "xy", "colspan": 2}, None]])
         order = []                    # make_subplots titles run row by row
         for w in range(nw):
-            order += ([f"charge: {len(charge.sp):,} space points "
-                       "(grey: log charge) + light on the anode wall"]
-                      if w == 0 else []) + [titles[w]]
+            order += ([c3d_title] if w == 0 else []) + [titles[w]]
         fig = make_subplots(rows=nw + 1, cols=2, specs=specs,
                             column_widths=[0.5, 0.5],
                             row_heights=wall_share + [strip_share],
@@ -1890,7 +1896,7 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
         cur["col"] = wc
         m = np.flatnonzero(W.wall == w)
         bx, by = [], []
-        for (z0, z1, y0, y1) in a._wall_boxes(w):
+        for (z0, z1, y0, y1) in a._tpc_outlines:
             bx += [z0, z1, z1, z0, z0, None]
             by += [y0, y0, y1, y1, y0, None]
         add(dict(type="scatter", x=bx, y=by, mode="lines", hoverinfo="skip",
