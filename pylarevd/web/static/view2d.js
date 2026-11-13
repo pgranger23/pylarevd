@@ -13,7 +13,9 @@
 // Zoom/pan per panel persists across state changes and event steps; it is reset by a new
 // geometry (file/detector), a double click, or the "reset" button.
 
-import { getLut, cmapGradientCss, hexToRgb, PDG_CLASSES, pdgClass, pdgSymbol } from './colormaps.js';
+import {
+  cmapGradientCss, hexToRgb, PDG_CLASSES, pdgClass, pdgSymbol, createProgram, createLutTexture, uploadLutTexture,
+} from './colormaps.js';
 import { CAT_KINDS, fmt, niceTicks, rankMap } from './util.js';
 
 const CSS = `
@@ -181,16 +183,7 @@ void main() { o = vec4(uColor, vSelF < -0.5 ? uAlpha * min(1.0, uDim * 1.33) : (
 
 class Prog {
   constructor(gl, vs, fs, attribs) {
-    const mk = (type, src) => {
-      const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
-      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error('view2d shader: ' + gl.getShaderInfoLog(s));
-      return s;
-    };
-    this.gl = gl; this.p = gl.createProgram();
-    gl.attachShader(this.p, mk(gl.VERTEX_SHADER, vs)); gl.attachShader(this.p, mk(gl.FRAGMENT_SHADER, fs));
-    attribs.forEach((a, i) => gl.bindAttribLocation(this.p, i, a));
-    gl.linkProgram(this.p);
-    if (!gl.getProgramParameter(this.p, gl.LINK_STATUS)) throw new Error('view2d link: ' + gl.getProgramInfoLog(this.p));
+    this.gl = gl; this.p = createProgram(gl, vs, fs, { name: 'view2d', attribs });
     this.u = {};
   }
   use() { this.gl.useProgram(this.p); return this; }
@@ -242,9 +235,7 @@ function initGL() {
   V.progs.point = new Prog(gl, POINT_VS, POINT_FS, ['aPos', 'aVal', 'aCat', 'aFlag', 'aSel', 'aMc']);
   V.progs.line = new Prog(gl, LINE_VS, LINE_FS, ['aPos', 'aExtra', 'aSel', 'aMc']);
   V.progs.fill = new Prog(gl, FILL_VS, FILL_FS, ['aPos', 'aSel']);
-  V.lutTex = gl.createTexture(); V.lutName = null;
-  gl.bindTexture(gl.TEXTURE_2D, V.lutTex);
-  texParams(gl, gl.LINEAR);
+  V.lutTex = createLutTexture(gl); V.lutName = null;
   gl.enable(gl.BLEND);
   gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   gl.depthFunc(gl.LEQUAL);
@@ -253,11 +244,8 @@ function initGL() {
 function uploadLut() {
   const st = V.app.state;
   if (V.lutName === st.cmap || !V.gl) return;
-  const lut = getLut(st.cmap), d = new Uint8Array(256 * 4);
-  for (let i = 0; i < 256; i++) { d[4 * i] = lut[3 * i]; d[4 * i + 1] = lut[3 * i + 1]; d[4 * i + 2] = lut[3 * i + 2]; d[4 * i + 3] = 255; }
   const gl = V.gl;
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, V.lutTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, d);
+  gl.activeTexture(gl.TEXTURE0); uploadLutTexture(gl, V.lutTex, st.cmap);
   V.lutName = st.cmap;
 }
 

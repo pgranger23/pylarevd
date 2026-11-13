@@ -10,7 +10,7 @@
 // URL params (registered): lclock log|linear, lfill afterglow|cumulative, lframes, lfps, lpers,
 // lwlo / lwhi (window relative to t0, us), lt0 (absolute us, '' = auto), lt (frame | 'all'), lplay 0|1.
 
-import { getLut, hexToRgb } from './colormaps.js';
+import { getLut, hexToRgb, createProgram } from './colormaps.js';
 import { esc, niceTicksCeil } from './util.js';
 
 const PE_FLOOR = 0.5, PE_OFF = 0.2, PE_SIZE_MAX = 3e5, MAX_FLASHES = 50;
@@ -239,12 +239,7 @@ void main(){ vec2 d=(1.-abs(vQ))*vHalfPx; float e=min(d.x,d.y); vec3 c=vCol.rgb;
 function initGL(canvas) {
   const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false, preserveDrawingBuffer: false });
   if (!gl) return null;
-  const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
-  const p = gl.createProgram();
-  gl.attachShader(p, sh(gl.VERTEX_SHADER, VS)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, FS));
-  gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const p = createProgram(gl, VS, FS);
   const G = { gl, p, loc: {}, geoBuf: gl.createBuffer(), colBuf: gl.createBuffer(), cornerBuf: gl.createBuffer(), nInst: 0 };
   for (const a of ['aCorner', 'aGeo', 'aCol']) G.loc[a] = gl.getAttribLocation(p, a);
   for (const u of ['uC', 'uH', 'uPx', 'uFg', 'uEdge']) G.loc[u] = gl.getUniformLocation(p, u);

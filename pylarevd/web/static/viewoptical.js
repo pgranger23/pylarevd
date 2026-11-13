@@ -18,7 +18,7 @@
 // meta.tpcs, meta.truth.vertex.
 //
 // Params (registerParam): owin = half-width of the default window in us, or 'all'.
-import { getLut, hexToRgb } from './colormaps.js';
+import { getLut, hexToRgb, createProgram, createLutTexture, uploadLutTexture } from './colormaps.js';
 import { niceTicksCeil as niceTicks } from './util.js';
 
 const PE_RANGE = [1.0, 3e5];        // display.PE_SIZE_RANGE
@@ -130,31 +130,17 @@ function showMsg(t) { O.msg.textContent = t; O.msg.style.display = t ? 'flex' : 
 
 function buildGL() {
   const gl = O.gl;
-  const mk = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
-  const p = gl.createProgram();
-  gl.attachShader(p, mk(gl.VERTEX_SHADER, VS)); gl.attachShader(p, mk(gl.FRAGMENT_SHADER, FS));
-  gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const p = createProgram(gl, VS, FS);
   O.prog = p; O.loc = {}; O.glRes = [];
   for (const n of ['aT', 'aY', 'aV', 'aS']) O.loc[n] = gl.getAttribLocation(p, n);
   for (const n of ['uX', 'uY', 'uCLog', 'uCLo', 'uCHi', 'uCmapLo', 'uCmapHi', 'uSizeMode', 'uSize', 'uPx', 'uLut', 'uAlpha']) O.loc[n] = gl.getUniformLocation(p, n);
-  O.lutTex = gl.createTexture(); O.lutName = '';
-  gl.bindTexture(gl.TEXTURE_2D, O.lutTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  O.lutTex = createLutTexture(gl); O.lutName = '';
 }
 
 function uploadLut() {
   const name = O.app.state.cmap;
   if (O.lutName === name) return;
-  const lut = getLut(name), d = new Uint8Array(256 * 4);
-  for (let i = 0; i < 256; i++) { d[4 * i] = lut[3 * i]; d[4 * i + 1] = lut[3 * i + 1]; d[4 * i + 2] = lut[3 * i + 2]; d[4 * i + 3] = 255; }
-  const gl = O.gl;
-  gl.bindTexture(gl.TEXTURE_2D, O.lutTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, d);
+  uploadLutTexture(O.gl, O.lutTex, name);
   O.lutName = name;
 }
 

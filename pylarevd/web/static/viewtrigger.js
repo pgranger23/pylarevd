@@ -24,7 +24,7 @@
 //
 // Keys (view visible, no form field focused): n / p next / previous candidate (activity when
 // the event has no candidate), z zoom to the selection, Escape clears it.
-import { getLut, hexToRgb, cmapGradientCss } from './colormaps.js';
+import { hexToRgb, cmapGradientCss, createProgram, createLutTexture, uploadLutTexture } from './colormaps.js';
 import { esc, niceTicks } from './util.js';
 
 const LAYOUTS = [['timeline', 'timeline + planes'], ['grid', 'detector-unit grid'],
@@ -193,22 +193,12 @@ function showMsg(t) { T.msg.textContent = t || ''; T.msg.style.display = t ? 'fl
 
 function buildGL() {
   const gl = T.gl;
-  const mk = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error('viewtrigger shader: ' + gl.getShaderInfoLog(s)); return s; };
-  const p = gl.createProgram();
-  gl.attachShader(p, mk(gl.VERTEX_SHADER, VS)); gl.attachShader(p, mk(gl.FRAGMENT_SHADER, FS));
-  gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error('viewtrigger link: ' + gl.getProgramInfoLog(p));
+  const p = createProgram(gl, VS, FS, { name: 'viewtrigger' });
   T.prog = p; T.loc = {};
   for (const n of INST_ATTRS) T.loc[n] = gl.getAttribLocation(p, n);
   for (const n of ['uX', 'uY', 'uPass', 'uMode', 'uLog', 'uLo', 'uHi', 'uCmapLo', 'uCmapHi', 'uSize', 'uDim', 'uAlpha', 'uLut', 'uPal[0]', 'uGrey', 'uUni', 'uHi3'])
     T.loc[n] = gl.getUniformLocation(p, n);
-  T.lutTex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, T.lutTex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  T.lutTex = createLutTexture(gl);
   T.buf = {};
   gl.enable(gl.BLEND);
   gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -217,11 +207,8 @@ function buildGL() {
 function uploadLut() {
   const name = T.app.state.cmap;
   if (T.lutName === name || !T.gl) return;
-  const lut = getLut(name), d = new Uint8Array(256 * 4);
-  for (let i = 0; i < 256; i++) { d[4 * i] = lut[3 * i]; d[4 * i + 1] = lut[3 * i + 1]; d[4 * i + 2] = lut[3 * i + 2]; d[4 * i + 3] = 255; }
   const gl = T.gl;
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T.lutTex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, d);
+  gl.activeTexture(gl.TEXTURE0); uploadLutTexture(gl, T.lutTex, name);
   T.lutName = name;
 }
 
