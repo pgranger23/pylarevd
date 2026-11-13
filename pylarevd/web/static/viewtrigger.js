@@ -789,7 +789,7 @@ function drawTimeline(g, th, C, s, selTas) {
     if (on) { g.strokeStyle = th.fg; g.lineWidth = 1.5; g.strokeRect(xa, ly, Math.max(2, xb - xa), bar); }
     const bx = E.taBox[a][0];
     g.fillStyle = th.fg; g.textAlign = 'left';
-    g.fillText(`TA ${a}${bx && T.R ? ' · ' + T.R.units[bx.unit] + ' ' + VIEWS[bx.view] : ''}`, Math.max(xa, r.x) + 3, ly + bar / 2);
+    g.fillText(`TA ${a}${bx && T.R ? ' · ' + unitName(bx.unit) + ' ' + VIEWS[bx.view] : ''}`, Math.max(xa, r.x) + 3, ly + bar / 2);
   }
   y += Math.max(1, TL.lanes.n) * (bar + gap);
   // TP rate: per pixel column bin, stacked by plane; activity TPs as a line
