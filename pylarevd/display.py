@@ -504,6 +504,10 @@ def _panels(hits, geometry, *, min_hits: int = 1, merge: str = "orientation"
     """
     out: list[PanelSpec] = []
     finite = np.isfinite(hits.w) & np.isfinite(hits.x)
+    # A panel needs at least one drawable hit whatever min_hits says: an empty
+    # one (merge="none", a panel whose hits all lack geometry) has no view to
+    # name and no range to summarise.
+    min_hits = max(min_hits, 1)
 
     if merge == "none":
         for key in np.unique(hits.panel):
