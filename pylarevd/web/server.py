@@ -35,6 +35,9 @@ _EOS_REDIRECTORS = (("/eos/user/", "eosuser.cern.ch"),
 _DOT_SEGMENT = re.compile(r"(^|/)\.\.?(/|$)")
 _CACHED_EVENT = re.compile(r"(\d+)_(.+)_(.+)\.evdb$")     # cache.entry_path file names
 
+#: API routes that answer HEAD (cheap, no decoding or rendering)
+_HEAD_API = ("/api/status", "/api/files")
+
 MIME = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
         ".html": "text/html; charset=utf-8", ".json": "application/json",
         ".evdb": "application/octet-stream", ".svg": "image/svg+xml",
@@ -43,13 +46,16 @@ MIME = {".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css",
 
 
 class HttpError(Exception):
-    def __init__(self, status: int, msg: str):
+    def __init__(self, status: int, msg: str, headers=None):
         super().__init__(msg)
         self.status = status
+        self.headers = headers
 
 
 def normalise_path(path: str) -> str:
-    """Same rule as ``pylarevd.app.normalise_path`` (copied: app imports dash)."""
+    """User input -> data path: ``~`` expanded; a bare ``/eos/...`` path becomes a
+    ``root://`` URL on its redirector when EOS is not mounted here.  URLs pass
+    through unchanged."""
     p = path.strip()
     if _SCHEME.match(p):
         return p
@@ -371,7 +377,8 @@ class App:
         except BaseException as exc:
             if isinstance(exc, BrokenProcessPool):
                 self._drop_pool()
-            self.counters["errors"] += 1
+            with self.lock:
+                self.counters["errors"] += 1
             job.future.set_exception(exc)
         with self.lock:
             self.jobs.pop(job.key, None)
@@ -404,7 +411,8 @@ class App:
         """Return the cache path of the finished raw bundle, building if needed."""
         dest = self.dest_for(key)
         if _built(dest):
-            self.counters["hits"] += 1
+            with self.lock:
+                self.counters["hits"] += 1
             return dest
         with self.lock:
             job = self.jobs.get(key)
@@ -532,18 +540,18 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         self._log(status, len(body), note)
 
-    def _json(self, obj, status=200):
+    def _json(self, obj, status=200, headers=None):
         self._send(status, json.dumps(obj).encode(), "application/json",
-                   {"Cache-Control": "no-store"})
+                   {"Cache-Control": "no-store", **(headers or {})})
 
-    def _error(self, status, msg):
+    def _error(self, status, msg, headers=None):
         try:
-            self._json({"error": msg}, status)
+            self._json({"error": msg}, status, headers)
         except OSError:
             pass
 
     def do_HEAD(self):
-        self.do_GET()
+        self._handle(self._head)
 
     def do_GET(self):
         self._handle(self._get)
@@ -557,11 +565,20 @@ class Handler(BaseHTTPRequestHandler):
         try:
             method()
         except HttpError as e:
-            self._error(e.status, str(e))
+            self._error(e.status, str(e), e.headers)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
             self._error(500, f"{type(e).__name__}: {e}")
+
+    def _head(self):
+        """HEAD: static files and the cheap API routes answer as GET without the
+        body; the routes that decode or render refuse rather than do the work."""
+        route = urlsplit(self.path).path
+        if route.startswith("/api/") and route not in _HEAD_API:
+            raise HttpError(405, f"HEAD is not supported on {route}; use GET",
+                            {"Allow": "GET"})
+        self._get()
 
     def _get(self):
         u = urlsplit(self.path)
@@ -574,9 +591,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def _post(self):
         u = urlsplit(self.path)
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > 1 << 20:
-            raise HttpError(413, "request too large")
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if n < 0 or n > 1 << 20:
+            # the body is left unread, so this connection cannot carry another request
+            close = {"Connection": "close"}
+            if n < 0:
+                raise HttpError(400, "bad Content-Length", close)
+            raise HttpError(413, "request too large", close)
         raw = self.rfile.read(n) if n else b""
         if u.path != "/api/open":
             raise HttpError(404, "not found")
@@ -638,7 +662,8 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             raise HttpError(400, str(exc))
         fut = app._pool_submit(render.render_export, info.path, entry, hit, flash, p)
-        app.counters["exports"] += 1
+        with app.lock:
+            app.counters["exports"] += 1
         try:
             res = fut.result()
         except BrokenProcessPool:
@@ -678,9 +703,17 @@ class Handler(BaseHTTPRequestHandler):
         if route in ("", "/"):
             route = "/index.html"
         rel = route[len("/static/"):] if route.startswith("/static/") else route.lstrip("/")
+        try:
+            rel = unquote(rel, errors="strict")
+        except UnicodeDecodeError:
+            raise HttpError(404, "not found")
+        # no NUL, no '.'/'..' segment (encoded or not), and the resolved file must
+        # still lie inside STATIC_ROOT
+        if "\0" in rel or _DOT_SEGMENT.search(rel):
+            raise HttpError(404, "not found")
         full = os.path.realpath(os.path.join(STATIC_ROOT, rel))
         root = os.path.realpath(STATIC_ROOT)
-        if not (full == root or full.startswith(root + os.sep)) or "\0" in rel:
+        if not (full == root or full.startswith(root + os.sep)):
             raise HttpError(404, "not found")
         if not os.path.isfile(full):
             raise HttpError(404, f"not found: {route}")
