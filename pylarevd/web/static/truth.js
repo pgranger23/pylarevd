@@ -31,6 +31,7 @@
 
 import { PDG_CLASSES, pdgClass, pdgSymbol } from './colormaps.js';
 import { polylineLength } from './data.js';
+import { esc } from './util.js';
 
 const N_SP = PDG_CLASSES.length;
 const TEX_W = 2048;
@@ -44,7 +45,6 @@ const ALIAS = {
   '-14': 'neutrino antineutrino', '-16': 'neutrino antineutrino',
 };
 
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const fmtN = (n) => Number(n).toLocaleString('en-US');
 
 function parseList(s) { return String(s || '').split(',').map((x) => x.trim()).filter(Boolean); }

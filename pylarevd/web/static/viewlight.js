@@ -11,6 +11,7 @@
 // lwlo / lwhi (window relative to t0, us), lt0 (absolute us, '' = auto), lt (frame | 'all'), lplay 0|1.
 
 import { getLut, hexToRgb } from './colormaps.js';
+import { esc } from './util.js';
 
 const PE_FLOOR = 0.5, PE_OFF = 0.2, PE_SIZE_MAX = 3e5, MAX_FLASHES = 50;
 const DEF = { lclock: 'log', lfill: 'afterglow', lframes: '120', lfps: '12', lpers: '0.7',
@@ -1027,7 +1028,6 @@ function updateEmpty() {
 function updateNotes() {
   const A = V.A, d = V.data, R = V.R;
   if (!A || !d) { R.notes.innerHTML = ''; return; }
-  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
   const e = A.edges;
   const k0 = lowerBound(e, A.t0 + 1e-12);
   const first = e[Math.min(k0 + 1, e.length - 1)] - e[Math.min(k0, e.length - 2)];

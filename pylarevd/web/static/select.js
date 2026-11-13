@@ -28,13 +28,13 @@
 
 import { pdgSymbol } from './colormaps.js';
 import { polylineLength } from './data.js';
+import { esc } from './util.js';
 
 const HOVER_MS = 30, CLEAR_MS = 120;
 const CARD_VIEWS = new Set(['2d', '3d', '2d+3d', 'charge+light']);
 const PLANES = ['U', 'V', 'Z'];
 export { pdgSymbol };
 
-const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 /** ` <i>+N more</i>` when a list of `n` items is cut to `limit`. */
 const moreTag = (n, limit) => (n > limit ? ` <i>+${n - limit} more</i>` : '');
 /** The `.`-next / `,`-previous entry of the cyclic list `sib` from `id` (-1 if `id` has no sibling). */

@@ -25,6 +25,7 @@
 // Keys (view visible, no form field focused): n / p next / previous candidate (activity when
 // the event has no candidate), z zoom to the selection, Escape clears it.
 import { getLut, hexToRgb, cmapGradientCss } from './colormaps.js';
+import { esc } from './util.js';
 
 const LAYOUTS = [['timeline', 'timeline + planes'], ['grid', 'detector-unit grid'],
   ['explorer', 'hierarchy explorer'], ['reco', 'trigger vs reco']];
@@ -103,7 +104,6 @@ const T = {
 };
 
 // ----------------------------------------------------------------------------- helpers
-const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 function niceTicks(lo, hi, target) {
   const span = hi - lo; if (!(span > 0)) return { ticks: [lo], step: 1 };
   const raw = span / Math.max(1, target), mag = 10 ** Math.floor(Math.log10(raw)), n = raw / mag;
