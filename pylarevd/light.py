@@ -865,8 +865,12 @@ class LightAnimation(_TruthInfo):
         span = ("log-spaced after t0" if self.time_scale == "log"
                 else "uniform")
         e = self.edges
-        k0 = int(np.searchsorted(e, self.t0, side="right"))
-        first = e[min(k0 + 1, len(e) - 1)] - e[min(k0, len(e) - 2)]
+        # The first frame after t0 is the one that starts at t0 on the log
+        # clock (t0 is an edge there), and the one t0 falls in on the linear
+        # clock; a t0 outside the window takes the nearest frame.
+        k0 = int(np.clip(np.searchsorted(e, self.t0, side="right") - 1,
+                         0, len(e) - 2))
+        first = e[k0 + 1] - e[k0]
         lines.append(
             f"  t0 = {self.t0:.3f} us "
             + ("(given)" if self._t0_arg is not None
