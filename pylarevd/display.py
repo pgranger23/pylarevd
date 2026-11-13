@@ -378,6 +378,14 @@ def _style_colorbar(cb, label: str, t: Theme, fonts: dict) -> None:
         lbl.set_color(t.fg_muted)
 
 
+def _check_options(*options) -> None:
+    """Raise ValueError naming the first (name, value, allowed) not allowed."""
+    for name, value, allowed in options:
+        if value not in allowed:
+            raise ValueError(
+                f"{name}={value!r} is not one of {', '.join(allowed)}")
+
+
 def _vertex_roles(event, n: int) -> tuple[list, list, list]:
     """(secondary, primary-daughter, interaction) indices into *n* vertices."""
     roles = getattr(event, "vertex_roles",
@@ -852,13 +860,10 @@ class EventDisplay(_TruthInfo):
                  radiologicals: bool = True,
                  theme: str = "dark", colormap: str = DEFAULT_COLORMAP,
                  preset: str = DEFAULT_PRESET):
-        for name, value, allowed in (("merge", merge, self.MERGES),
-                                     ("space", space, self.SPACES),
-                                     ("colour_by", colour_by, self.COLOUR_BY),
-                                     ("colour_scale", colour_scale, self.SCALES)):
-            if value not in allowed:
-                raise ValueError(
-                    f"{name}={value!r} is not one of {', '.join(allowed)}")
+        _check_options(("merge", merge, self.MERGES),
+                       ("space", space, self.SPACES),
+                       ("colour_by", colour_by, self.COLOUR_BY),
+                       ("colour_scale", colour_scale, self.SCALES))
         self.event = event
         self.radiologicals = radiologicals
         self.hits = hits if hits is not None else event.hits()
@@ -879,9 +884,7 @@ class EventDisplay(_TruthInfo):
         self.theme = resolve_theme(theme)
         resolve_colormap(colormap)
         self.colormap = colormap
-        if preset not in PRESETS:
-            raise ValueError(
-                f"preset={preset!r} is not one of {', '.join(PRESETS)}")
+        _check_options(("preset", preset, PRESETS))
         self.preset = preset
         self.panels = (_readout_panels(self.hits, self.geometry,
                                        min_hits=min_hits_per_panel)
@@ -1767,11 +1770,9 @@ class Display3D(_TruthInfo):
                  colormap: str = DEFAULT_COLORMAP, preset: str = DEFAULT_PRESET,
                  particle_symbols: bool = False):
         self.radiologicals = radiologicals
-        if focus not in self.FOCUS:
-            raise ValueError(f"focus={focus!r} is not one of {', '.join(self.FOCUS)}")
-        if colour_by not in self.COLOUR_BY:
-            raise ValueError(
-                f"colour_by={colour_by!r} is not one of {', '.join(self.COLOUR_BY)}")
+        _check_options(("focus", focus, self.FOCUS),
+                       ("colour_by", colour_by, self.COLOUR_BY),
+                       ("colour_scale", colour_scale, self.SCALES))
         self.event = event
         self.sp = spacepoints if spacepoints is not None else event.spacepoints()
         self.truth = truth
@@ -1792,6 +1793,7 @@ class Display3D(_TruthInfo):
         self.theme = resolve_theme(theme)
         resolve_colormap(colormap)
         self.colormap = colormap
+        _check_options(("preset", preset, PRESETS))
         self.preset = preset
         self.particle_symbols = particle_symbols
 
@@ -2352,6 +2354,7 @@ class FlashDisplay3D(_TruthInfo):
         self.theme = resolve_theme(theme)
         resolve_colormap(colormap)
         self.colormap = colormap
+        _check_options(("preset", preset, PRESETS))
         self.preset = preset
 
     @property
@@ -2659,6 +2662,7 @@ class OpticalDisplay(_TruthInfo):
         self.theme = resolve_theme(theme)
         resolve_colormap(colormap)
         self.colormap = colormap
+        _check_options(("preset", preset, PRESETS))
         self.preset = preset
 
     @property
