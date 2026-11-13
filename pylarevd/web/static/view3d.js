@@ -1438,7 +1438,7 @@ function updateLabels() {
     el.style.transform = `translate(${((v.x + 1) * 0.5 * w + 4) | 0}px,${((1 - v.y) * 0.5 * h - 6) | 0}px)`;
   };
   for (const l of V.axisLabels) place(l);
-  if (V.app.state.ov.labels) for (const l of V.labels) place(l);
+  for (const l of V.labels) if (l.shown) place(l);   // shown: labels overlay on, not the flash3d view
 }
 
 function render() {
