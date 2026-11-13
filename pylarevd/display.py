@@ -359,6 +359,17 @@ def _style_legend(ax, t: Theme, **kwargs):
                      labelcolor=t.fg, framealpha=0.9, **kwargs)
 
 
+def _legend_entries(axes) -> tuple[list, list]:
+    """Legend (handles, labels) of several axes, first appearance per label."""
+    handles, labels = [], []
+    for ax in axes:
+        for h, lab in zip(*ax.get_legend_handles_labels()):
+            if lab not in labels:
+                handles.append(h)
+                labels.append(lab)
+    return handles, labels
+
+
 def _style_colorbar(cb, label: str, t: Theme, fonts: dict) -> None:
     cb.set_label(label, color=t.fg_muted, fontsize=fonts["label"])
     cb.ax.yaxis.set_tick_params(color=t.fg_muted, labelsize=fonts["tick"])
@@ -1396,8 +1407,10 @@ class EventDisplay(_TruthInfo):
                 or self.mc is not None or self.showers is not None
                 or self.neutrino is not None):
             # one figure-level entry: a per-panel legend would appear only on
-            # the panels that happen to contain truth, which reads as an error
-            handles, labels = axes.flat[0].get_legend_handles_labels()
+            # the panels that happen to contain truth, which reads as an error.
+            # Gathered from every panel: an overlay absent from the first one
+            # (a track that crosses only the collection view) still draws.
+            handles, labels = _legend_entries(axes.flat[:n])
             if handles:
                 # markerscale has to stay modest: the legend now mixes lines,
                 # a filled patch and a star marker, and a large scale blows the
