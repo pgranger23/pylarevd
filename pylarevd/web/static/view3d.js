@@ -997,7 +997,11 @@ function valAttr(name) {
 
 const CAT_KINDS = ['track', 'shower', 'pfparticle', 'cluster', 'slice'];
 
-function fmt(v) { return Math.abs(v) >= 1000 || (Math.abs(v) < 0.01 && v !== 0) ? v.toExponential(1) : v.toPrecision(3).replace(/\.?0+$/, ''); }
+function fmt(v) {
+  if (Math.abs(v) >= 1000 || (Math.abs(v) < 0.01 && v !== 0)) return v.toExponential(1);
+  const s = v.toPrecision(3);
+  return s.includes('.') ? s.replace(/\.?0+$/, '') : s;   // trailing zeros of the fraction only (100 stays 100)
+}
 
 function applyColors() {
   const st = V.app.state;
