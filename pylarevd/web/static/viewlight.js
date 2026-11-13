@@ -934,6 +934,14 @@ function play(on) {
   if (!on) requestFrame();
 }
 
+/**
+ * Publish the play state as lplay. app.setState only notifies on a change, so app.state.lplay is
+ * first put back to the last value this view published (V.committedPlay): the patch then always
+ * fires when it differs from that. This matters on a load with lplay=1 in the URL: state.lplay is
+ * already '1' but committedPlay is still '0', and the forced update writes the URL (with the
+ * frame setK(0) stored silently) and tells the other views. onState keeps committedPlay in step
+ * with lplay changes coming from elsewhere, so they do not bounce back here.
+ */
 function setPlayState(on) {
   const s = V.app.state;
   s.lplay = V.committedPlay;
@@ -962,7 +970,8 @@ function tick(now) {
   V.raf = requestAnimationFrame(tick);
 }
 
-/** Set the frame (k = -1: whole window). Silent in the URL until commit(). */
+/** Set the frame (k = -1: whole window). Written to app.state.lt silently (no URL update, no
+ *  notification) so playback and scrubbing stay cheap; commit() publishes it. */
 function setK(k) {
   V.k = V.A ? clamp(k, -1, V.A.n - 1) : -1;
   V.app.state.lt = V.k < 0 ? 'all' : String(V.k);
@@ -970,6 +979,8 @@ function setK(k) {
 }
 
 let commitTimer = 0;
+/** Publish the current frame as lt. Like setPlayState: app.state.lt holds the silently written
+ *  frame, so it is first put back to the last published value (V.committedLt) to make the patch fire. */
 function commit() {
   clearTimeout(commitTimer);
   const cur = V.k < 0 ? 'all' : String(V.k);
