@@ -1412,7 +1412,7 @@ function bindPointer() {
     if (e.shiftKey || reg === 'xaxis') fy = 1;
     if (e.altKey || reg === 'yaxis') fx = 1;
     interacting(); zoomAt(p, px, py, fx, fy);
-    V.hover = null; hideTip(); schedule(true, true);
+    V.hover = null; hideTip(); V.app.hoverObject(null); schedule(true, true);
   }, { passive: false });
   c.addEventListener('pointerdown', (e) => {
     if (!V.S || e.button !== 0) return;
