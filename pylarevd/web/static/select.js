@@ -169,7 +169,7 @@ export function initSelection(app) {
   }
 
   /** Drop a pending hover and a pending clear. */
-  function cancelTimers() { clearTimeout(hoverTimer); clearTimeout(clearTimer); pendKey = ''; }
+  function cancelTimers() { clearTimeout(hoverTimer); clearTimeout(clearTimer); clearTimer = 0; pendKey = ''; }
   /** Clear a transient (unpinned) selection CLEAR_MS from now. */
   function scheduleClear() {
     clearTimer = setTimeout(() => { clearTimer = 0; if (!state.sel || !state.sel.pinned) apply(null, { silentUrl: true }); }, CLEAR_MS);
@@ -228,7 +228,7 @@ export function initSelection(app) {
   };
 
   function clickTarget(t) {
-    cancelTimers(); clearTimer = 0;
+    cancelTimers();
     if (!t) { if (anySelection()) apply(null); return; }
     const s = state.sel;
     if (s && s.pinned && s.kind === t.kind && s.id === t.id) { apply(null); return; }
@@ -250,7 +250,7 @@ export function initSelection(app) {
   // Called by main.js after app.bundle changed and BEFORE the views' setEvent.
   app.resetSelection = (bundle) => {
     T = buildTables(bundle);
-    cancelTimers(); clearTimer = 0;
+    cancelTimers();
     let sel = null;
     if (firstEvent && T && !selOff()) {
       const pf = parseInt(state.pfp, 10), sl = parseInt(state.slice, 10);
