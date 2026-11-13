@@ -2628,9 +2628,13 @@ class FlashDisplay3D(_TruthInfo):
         return fig
 
     def save_html(self, path: str, *, bundle_plotlyjs: bool = True, **kwargs) -> str:
-        # kwargs are accepted for a uniform signature but, unlike the other
-        # displays, neither forwarded nor given _PLOTLY_CONFIG.
-        return _write_html(self.plotly_figure(), path, bundle_plotlyjs)
+        """Write an interactive HTML page (see :meth:`EventDisplay.save_html`)."""
+        return _write_html(self.plotly_figure(**kwargs), path, bundle_plotlyjs,
+                           config=_PLOTLY_CONFIG)
+
+    def show(self, **kwargs) -> None:
+        """Open the interactive figure (browser, or inline in a notebook)."""
+        self.plotly_figure(**kwargs).show(config=_PLOTLY_CONFIG)
 
     def __repr__(self) -> str:
         return f"<FlashDisplay3D {self.event!r} flashes={len(self.flashes)}>"
