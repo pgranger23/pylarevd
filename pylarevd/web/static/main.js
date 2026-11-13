@@ -86,6 +86,7 @@ export const app = {
   views: { view3d, view2d, viewlight, viewoptical, viewtrigger },
   get theme() { return THEMES[state.theme] || THEMES.dark; },
   setState, registerParam, status, requestLayout,
+  /** Call every `type` listener in order; one that throws is logged and does not stop the others. */
   emit(type, ...args) {
     for (const fn of (listeners[type] || []).slice()) { try { fn(...args); } catch (e) { console.error(`listener ${type}:`, e); } }
   },
@@ -155,12 +156,7 @@ function afterChange(changed) {
   writeUrl();
   syncControls();
   eachView('onState', state, changed);
-  notify('state', state, changed);
-}
-
-/** Call fn(...args) of every listener of `type`; unlike app.emit, a throwing listener propagates. */
-function notify(type, ...args) {
-  for (const fn of listeners[type].slice()) fn(...args);
+  app.emit('state', state, changed);
 }
 
 /** Call the optional method `fn` of every view module (errors are logged, see guard). */
@@ -321,6 +317,10 @@ let files = [];
 let events = [];
 let loadToken = 0;
 let abortCtl = null;
+// a link to a file that could not be opened falls back to another file: the hit / flash tags of the link,
+// kept if that file has them (set by boot, used by the first event load)
+let fallbackTags = null;
+let loadNotice = '';   // error shown instead of the load timings once the event is drawn (boot: link fallback)
 
 /** Abort the request in flight (file or event) and return the signal of a new one. */
 function newSignal() {
@@ -365,7 +365,7 @@ async function openFile(path, entry) {
     // changing file resets the per-file selections
     const fileChanged = !!state.file && state.file !== path;
     setState({ file: path, entry: e ? e.entry : 0, ...(fileChanged && entry === 0 ? { hits: '', flash: '' } : {}) });
-    notify('geometry', geo);
+    app.emit('geometry', geo);
     eachView('setGeometry', geo);
     updateEventLabel();
     await loadEvent();
@@ -383,6 +383,13 @@ async function loadEvent() {
   try {
     const bundle = await api.event(state.file, state.entry, state.hits, state.flash, sig);
     if (tok !== loadToken) return;
+    if (fallbackTags) {
+      const want = fallbackTags, meta = bundle.meta, patch = {};
+      fallbackTags = null;
+      if (want.hits && want.hits !== meta.hit_tag && (meta.hit_tags || []).includes(want.hits)) patch.hits = want.hits;
+      if (want.flash && want.flash !== meta.flash_tag && (meta.flash_tags || []).includes(want.flash)) patch.flash = want.flash;
+      if (Object.keys(patch).length) { setState(patch); return loadEvent(); }
+    }
     const t1 = performance.now();
     app.bundle = bundle;
     guard(app, 'resetTruth', bundle);           // truth.js: filter model of the new event (before the selection)
@@ -400,14 +407,16 @@ async function loadEvent() {
     $('trig-group').hidden = !(meta.available && meta.available.trigger);
     const t2 = performance.now();
     eachView('setEvent', bundle, app.geometry);
-    notify('event', bundle, app.geometry);
+    app.emit('event', bundle, app.geometry);
     const t3 = performance.now();
+    const notice = loadNotice;
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const t4 = performance.now();
       const tm = window.__evdTiming = {
         fetch: bundle.timing ? bundle.timing.fetch : t1 - t0, parse: bundle.timing ? bundle.timing.parse : 0,
         setEvent: t3 - t2, firstPaintAfterLoad: t4 - t1, MB: bundle.byteLength / 1e6,
       };
+      if (notice) { status(notice, true); return; }
       status(`entry ${state.entry}: fetch ${tm.fetch.toFixed(0)} ms, parse ${tm.parse.toFixed(0)} ms, ` +
         `build ${tm.setEvent.toFixed(0)} ms, paint ${tm.firstPaintAfterLoad.toFixed(0)} ms (${tm.MB.toFixed(1)} MB)`);
     }));
@@ -491,8 +500,11 @@ async function boot() {
     if (!files.length) { status(linkErr || 'no files available', true); return; }
     const f = files.find((x) => x.path === state.file) || files[0];
     $('sel-file').value = f.path;
+    if (linkErr && f.path !== state.file) fallbackTags = { hits: state.hits, flash: state.flash };
+    // the load timings would overwrite a plain status() here: the load shows it once the event is drawn
+    loadNotice = linkErr ? `could not open the linked file (${linkErr}); showing ${f.name || f.path}` : '';
     await openFile(f.path, f.path === state.file ? state.entry : 0);
-    if (linkErr) status(`could not open the linked file (${linkErr}); showing ${f.name || f.path}`, true);
+    fallbackTags = null; loadNotice = '';
   } catch (e) {
     console.error(e); status(String(e.message || e), true);
   }
