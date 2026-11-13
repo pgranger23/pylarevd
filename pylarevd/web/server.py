@@ -283,7 +283,11 @@ class App:
         try:
             info = FileInfo(path)
         except Exception as exc:
-            raise HttpError(400, f"could not open {os.path.basename(path)}: {exc}")
+            # EOS refusing the service identity is a permission problem, not a bad request
+            denied = re.search(r"permi|not allowed|unauthori[sz]ed|\[3010\]|\b3010\b", str(exc), re.I)
+            raise HttpError(403 if denied else 400,
+                            f"could not open {os.path.basename(path)}: {exc}"
+                            + ("  (is its folder shared with the server's account?)" if denied else ""))
         with self.lock:
             self.files.setdefault(path, info)
             self.by_name.setdefault(info.name, path)

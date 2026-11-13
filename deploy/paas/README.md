@@ -41,11 +41,18 @@ Who may log in is set on the Application Portal (link in the project's
 every CERN and eduGAIN account; restrict it to an e-group there. `route.public` in
 `sso-values.yaml` decides whether the site is reachable from outside the CERN network.
 
+To also admit people without a CERN or eduGAIN account, `sso-guest-login.yaml` adds a shared
+username/password next to the CERN button on the sign-in page (bcrypt htpasswd in a secret; the
+commands and the undo are at the top of the file).
+
 ## Data
 
 The `args` of the viewer container in `app.yaml` list what it serves: files or directories,
 local or `root://` URLs (a URL ending in `/` stands for the `.root` files inside it).
-`--allow-open-under` limits what the "open" box can reach.
+`--allow-open-under` limits what the "open" box and links can reach: a link to a file the server
+has not listed is opened on demand. Giving every EOS instance's `/eos/` tree (as the hosted
+instance does) leaves the decision to EOS: whatever is shared with the service account opens,
+anything else is refused with a 403. Local paths in the pod stay out of reach.
 
 Files are read from EOS over xrootd, with the Kerberos ticket of a *service* account (never a
 personal one) that can read them, e.g. a CERNBox read-only share of the data folders. Store its

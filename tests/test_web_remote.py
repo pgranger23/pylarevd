@@ -86,6 +86,22 @@ def test_open_limited_to_prefixes(cache_env, tmp_path):
         s.close()
 
 
+def test_eos_refusal_is_a_403(cache_env, monkeypatch):
+    """With all of EOS allowed, EOS's own ACLs decide: a refusal reads as "not permitted"."""
+    import pylarevd.web.server as server
+
+    def refuse(path):
+        raise OSError("[ERROR] Server responded with an error: [3010] Unable to open file; "
+                      "Operation not permitted")
+    monkeypatch.setattr(server, "FileInfo", refuse)
+    s = Srv([], host="0.0.0.0", workers=1, prefetch=0, open_prefixes=["root://eosuser.cern.ch//eos/"])
+    try:
+        st, _, b = post_open(s.base, "root://eosuser.cern.ch//eos/user/x/someone/private.root")
+        assert st == 403 and "shared" in json.loads(b)["error"]
+        assert post_open(s.base, "root://eosuser.cern.ch//etc/passwd")[0] == 403
+    finally:
+        s.close()
+
 def test_open_unrestricted_on_loopback_reports_no_prefixes(cache_env):
     s = Srv([], workers=1, prefetch=0, open_prefixes=["/somewhere"])
     try:

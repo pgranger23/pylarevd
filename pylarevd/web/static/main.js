@@ -250,19 +250,24 @@ function openMsg(text, isError) {
   el.hidden = !text;
 }
 
+/** Ask the server to open a file that is not in its list (POST /api/open) -> {ok, status, body, msg}. */
+async function requestOpen(path) {
+  const r = await fetch('/api/open', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }),
+  });
+  let body = null;
+  try { body = await r.json(); } catch (e) { /* not JSON */ }
+  return { ok: r.ok, status: r.status, body, msg: r.ok ? '' : ((body && body.error) || `HTTP ${r.status}`) };
+}
+
 async function openByPath() {
   const path = $('inp-open').value.trim();
   if (!path || $('btn-open').disabled) return;
   openMsg('opening ...', false);
   try {
-    const r = await fetch('/api/open', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }),
-    });
-    let body = null;
-    try { body = await r.json(); } catch (e) { /* not JSON */ }
-    if (!r.ok) {
-      const msg = (body && body.error) || `HTTP ${r.status}`;
-      if (r.status === 403) setOpenAllowed(false, msg);
+    const { ok, status: code, body, msg } = await requestOpen(path);
+    if (!ok) {
+      if (code === 403 && !/permitted|permission|denied/i.test(msg)) setOpenAllowed(false, msg);
       openMsg(msg, true);
       return;
     }
@@ -460,11 +465,20 @@ async function boot() {
   for (const v of Object.values(app.views)) guard(v, 'onState', state, all);
   try {
     files = await api.files();
+    // a link to a file the server has not opened yet: ask it to (EOS permissions decide)
+    let linkErr = '';
+    if (state.file && !sampleName && !files.some((x) => x.path === state.file)) {
+      try {
+        const res = await requestOpen(state.file);
+        if (res.ok) { files = await api.files(); state.file = res.body.path; } else linkErr = res.msg;
+      } catch (e) { linkErr = String(e.message || e); }
+    }
     fillSelect($('sel-file'), files.map((f) => [f.path, f.name || f.path]), '');
-    if (!files.length) { status('no files available', true); return; }
+    if (!files.length) { status(linkErr || 'no files available', true); return; }
     const f = files.find((x) => x.path === state.file) || files[0];
     $('sel-file').value = f.path;
     await openFile(f.path, f.path === state.file ? state.entry : 0);
+    if (linkErr) status(`could not open the linked file (${linkErr}); showing ${f.name || f.path}`, true);
   } catch (e) {
     console.error(e); status(String(e.message || e), true);
   }
