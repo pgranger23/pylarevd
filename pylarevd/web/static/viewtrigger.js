@@ -372,6 +372,9 @@ function uploadEvent() {
   glBuf('row', f(E.row));
   glBuf('cat', f(E.ta));
   glBuf('emph', new Float32Array(n));
+  // colour values: a placeholder sized for THIS event ('activity' colouring never reads it, but the
+  // instanced draw must not run past its end); renderGL uploads the real values for other modes
+  glBuf('val', new Float32Array(n));
   E.valMode = null;
   if (E.hits) {
     glBuf('ht', E.hits.t); glBuf('hr', E.hits.r);
@@ -620,7 +623,7 @@ function renderGL() {
     const cv = colourValues(st.tcol);
     if (E.valMode !== st.tcol) { glBuf('val', cv.v); E.valMode = st.tcol; }
     gl.uniform1f(P.uLog, cv.log ? 1 : 0); gl.uniform1f(P.uLo, cv.lo); gl.uniform1f(P.uHi, cv.hi);
-  } else if (!T.buf.val) glBuf('val', new Float32Array(E.n));
+  }
   const selOn = !!T.selKey;
   gl.enable(gl.SCISSOR_TEST);
   const dpr = T.dpr;
