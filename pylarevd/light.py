@@ -999,13 +999,15 @@ class LightAnimation(_TruthInfo):
                  else "uniform frames")
         return f"t − t₀   ({clock};  t₀ = {self.t0:.3f} µs)"
 
-    def _wall_boxes(self, w: int) -> list[tuple[float, float, float, float]]:
-        """TPC outlines (zmin, zmax, ymin, ymax) seen from this wall."""
-        out = set()
-        for b in self.geometry.tpcs:
-            out.add((round(b.zmin, 1), round(b.zmax, 1),
-                     round(b.ymin, 1), round(b.ymax, 1)))
-        return sorted(out)
+    @cached_property
+    def _tpc_outlines(self) -> list[tuple[float, float, float, float]]:
+        """Distinct TPC outlines (zmin, zmax, ymin, ymax), projected onto (z, y).
+
+        Every wall shows all of them: a wall's panel is the (z, y) projection.
+        """
+        return sorted({(round(b.zmin, 1), round(b.zmax, 1),
+                        round(b.ymin, 1), round(b.ymax, 1))
+                       for b in self.geometry.tpcs})
 
     # ---- static / animated (matplotlib) -------------------------------
 
@@ -1254,7 +1256,7 @@ class _MplScene:
                 top = y0 - gap
             ax.set_facecolor(t.axes_bg)
             zmin, zmax, ymin, ymax = spans[w]
-            for (bz0, bz1, by0, by1) in a._wall_boxes(w):
+            for (bz0, bz1, by0, by1) in a._tpc_outlines:
                 ax.add_patch(Rectangle((bz0, by0), bz1 - bz0, by1 - by0,
                                        fill=False, edgecolor=t.grid,
                                        linewidth=0.5, alpha=0.6, zorder=1))
@@ -1892,7 +1894,7 @@ def _plotly_animation(a: LightAnimation, *, height: int | None, fps: float):
         cur["col"] = wc
         m = np.flatnonzero(W.wall == w)
         bx, by = [], []
-        for (z0, z1, y0, y1) in a._wall_boxes(w):
+        for (z0, z1, y0, y1) in a._tpc_outlines:
             bx += [z0, z1, z1, z0, z0, None]
             by += [y0, y0, y1, y1, y0, None]
         add(dict(type="scatter", x=bx, y=by, mode="lines", hoverinfo="skip",
