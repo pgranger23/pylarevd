@@ -1141,7 +1141,7 @@ function bindInteraction() {
 
   // controls
   R.play.addEventListener('click', () => play(!V.playing));
-  R.prev.addEventListener('click', () => { play(false); setK((V.k < 0 ? V.A.n : V.k) - 1); commit(); });
+  R.prev.addEventListener('click', () => { if (!V.A) return; play(false); setK((V.k < 0 ? V.A.n : V.k) - 1); commit(); });
   R.next.addEventListener('click', () => { play(false); setK(V.k + 1); commit(); });
   R.all.addEventListener('click', () => { play(false); setK(V.k < 0 ? 0 : -1); commit(); });
   R.slider.addEventListener('input', () => { if (V.playing) play(false); setK(parseInt(R.slider.value, 10)); commitSoon(); });
