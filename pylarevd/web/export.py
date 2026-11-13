@@ -19,6 +19,7 @@ import time
 
 import numpy as np
 
+from ._tags import tag_of as _tag_of
 from .bundle import bundle_bytes
 
 #: spacepoint/hit group kinds exported as ``hits/group/<kind>``
@@ -188,11 +189,6 @@ def _add_projected(arrays, prefix, key_name, d, polys, panels):
     arrays[f"{prefix}/offsets"] = off.astype(np.uint32)
     arrays[f"{prefix}/panel"] = _stack(pan, (), np.uint8)
     arrays[f"{prefix}/{key_name}"] = _stack(own, (), np.int32)
-
-
-def _tag_of(product: str) -> str:
-    parts = str(product).split("_")
-    return parts[1] if len(parts) > 1 else str(product)
 
 
 def _fmt_exc(exc) -> str:
@@ -711,6 +707,15 @@ def _plane_counts(group, chan_view, n, n_planes=3):
     return out
 
 
+def _slice_of_pfp(group, pfp_slice) -> np.ndarray:
+    """int32 slice of each PFParticle group id; -1 for ids outside ``pfp_slice``."""
+    g = np.asarray(group, np.int64)
+    out = np.full(len(g), -1, np.int64)
+    ok = (g >= 0) & (g < len(pfp_slice))
+    out[ok] = pfp_slice[g[ok]]
+    return out.astype(np.int32)
+
+
 def _export_reco_objects(ev, hits, tracks, showers, spacepoints, vertices, mc,
                          arrays, meta, avail, notes, section):
     """Per-PFParticle (``pfp/*``) and per-slice (``slice/*``) tables and ``sp/group/*``.
@@ -792,9 +797,7 @@ def _export_reco_objects(ev, hits, tracks, showers, spacepoints, vertices, mc,
 
     # hits: fill a missing slice grouping from the PFParticle one
     if hg["slice"] is None and hg["pfparticle"] is not None and n_slice and pfp is not None:
-        g = hg["pfparticle"].astype(np.int64)
-        gs = np.where((g >= 0) & (g < n_pfp), pfp_slice[np.clip(g, 0, max(n_pfp - 1, 0))], -1)
-        arrays["hits/group/slice"] = gs.astype(np.int32)
+        arrays["hits/group/slice"] = _slice_of_pfp(hg["pfparticle"], pfp_slice)
         hg["slice"] = arrays["hits/group/slice"]
         meta["groups"]["slice"] = int(n_slice)
         notes.append("hits/group/slice derived from the PFParticle->Slice association")
@@ -825,8 +828,7 @@ def _export_reco_objects(ev, hits, tracks, showers, spacepoints, vertices, mc,
                 cur = sp_group.get("pfparticle")
                 sp_group["pfparticle"] = direct if cur is None else np.where(cur >= 0, cur, direct)
             if "pfparticle" in sp_group and "slice" not in sp_group and n_slice:
-                g = sp_group["pfparticle"].astype(np.int64)
-                sp_group["slice"] = np.where(g >= 0, pfp_slice[np.clip(g, 0, n_pfp - 1)], -1).astype(np.int32)
+                sp_group["slice"] = _slice_of_pfp(sp_group["pfparticle"], pfp_slice)
         for kind, g in sp_group.items():
             arrays[f"sp/group/{kind}"] = g
 

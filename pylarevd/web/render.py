@@ -144,17 +144,26 @@ def parse_export(q: dict, default_flash=None) -> dict:
 
 # ---------------------------------------------------------------- worker side
 
-_FILES: dict = {}
-
-
 def _event(path, entry):
-    from pylario import EventFile
-    ef = _FILES.get(path)
-    if ef is None:
-        ef = _FILES[path] = EventFile(path)
+    """The decoded event, from the worker's EventFile that the bundle cache also uses."""
+    from .cache import _open
+    ef = _open(path)
     if not 0 <= entry < len(ef):
         raise ValueError(f"entry {entry} out of range")
     return ef[entry]
+
+
+def _release(path, entry):
+    """Drop the decoded event again (see cache.get_or_build_event): an export is a
+    one-off, and keeping every rendered event would grow the worker without bound."""
+    from .cache import _EVENT_FILES, canonical
+    ef = _EVENT_FILES.get(canonical(path))
+    release = getattr(ef, "release", None)
+    if release is not None:
+        try:
+            release(int(entry))
+        except Exception:
+            pass
 
 
 def _camera(ev, p):
@@ -293,3 +302,5 @@ def render_export(path, entry, hit_tag, flash_tag, p) -> dict:
                 "error": f"{type(exc).__name__}: {exc}"}
     except Exception as exc:
         return {"ok": False, "status": 500, "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        _release(path, entry)
