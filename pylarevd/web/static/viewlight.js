@@ -322,7 +322,8 @@ function setEvent(bundle, geometry) {
     for (let i = 0; i < d.n; i++) if (d.flash[i] >= 0) { d.hasLinks = true; break; }
     d.quantum = o.quantum > 0 ? o.quantum : hitTimeQuantum(d.t);
     d.nf = bundle.has('flash/time') ? bundle.get('flash/time').length : 0;
-    d.nws = d.nf ? bundle.get('flash/wall_share').length / d.nf : 1;
+    // walls per flash in flash/wall_share; 0 = no share array: every flash is drawn on every wall
+    d.nws = d.nf && bundle.has('flash/wall_share') ? bundle.get('flash/wall_share').length / d.nf : 0;
     V.data = d;
   }
   V.pushed3d = false;
@@ -444,13 +445,13 @@ function rebuild() {
   for (let j = 0; j < d.nf; j++) { const k = frameOf(fT[j]); if (k >= 0) cand.push([j, k]); }
   cand.sort((a, b) => fPe[b[0]] - fPe[a[0]]);
   cand = cand.slice(0, MAX_FLASHES);
+  const width = (a, j) => (a && Number.isFinite(a[j]) && a[j] > 0 ? a[j] : 30);   // missing: 30 cm, as the exporter
   const flashes = cand.map(([j, k]) => {
-    const yw = Number.isFinite(fYw[j]) && fYw[j] > 0 ? fYw[j] : 30;
-    const zw = Number.isFinite(fZw[j]) && fZw[j] > 0 ? fZw[j] : 30;
+    const yw = width(fYw, j), zw = width(fZw, j);
     const on = [];
     for (let w = 0; w < g.nw; w++) on.push(d.nws === g.nw ? fSh[j * d.nws + w] >= 0.2 : true);
     const f = clamp(Math.log10(clamp(fPe[j], 1, PE_SIZE_MAX)) / Math.log10(PE_SIZE_MAX), 0, 1);
-    return { j, k, time: fT[j], pe: fPe[j], y: fY[j], z: fZ[j], yw, zw, on, lw: 0.8 + 2.4 * f };
+    return { j, k, time: fT[j], pe: fPe[j], y: fY ? fY[j] : NaN, z: fZ ? fZ[j] : NaN, yw, zw, on, lw: 0.8 + 2.4 * f };
   });
   const cum = new Float64Array(n);
   let s = 0;
@@ -934,6 +935,14 @@ function play(on) {
   if (!on) requestFrame();
 }
 
+/**
+ * Publish the play state as lplay. app.setState only notifies on a change, so app.state.lplay is
+ * first put back to the last value this view published (V.committedPlay): the patch then always
+ * fires when it differs from that. This matters on a load with lplay=1 in the URL: state.lplay is
+ * already '1' but committedPlay is still '0', and the forced update writes the URL (with the
+ * frame setK(0) stored silently) and tells the other views. onState keeps committedPlay in step
+ * with lplay changes coming from elsewhere, so they do not bounce back here.
+ */
 function setPlayState(on) {
   const s = V.app.state;
   s.lplay = V.committedPlay;
@@ -962,7 +971,8 @@ function tick(now) {
   V.raf = requestAnimationFrame(tick);
 }
 
-/** Set the frame (k = -1: whole window). Silent in the URL until commit(). */
+/** Set the frame (k = -1: whole window). Written to app.state.lt silently (no URL update, no
+ *  notification) so playback and scrubbing stay cheap; commit() publishes it. */
 function setK(k) {
   V.k = V.A ? clamp(k, -1, V.A.n - 1) : -1;
   V.app.state.lt = V.k < 0 ? 'all' : String(V.k);
@@ -970,6 +980,8 @@ function setK(k) {
 }
 
 let commitTimer = 0;
+/** Publish the current frame as lt. Like setPlayState: app.state.lt holds the silently written
+ *  frame, so it is first put back to the last published value (V.committedLt) to make the patch fire. */
 function commit() {
   clearTimeout(commitTimer);
   const cur = V.k < 0 ? 'all' : String(V.k);
@@ -1130,7 +1142,7 @@ function bindInteraction() {
 
   // controls
   R.play.addEventListener('click', () => play(!V.playing));
-  R.prev.addEventListener('click', () => { play(false); setK((V.k < 0 ? V.A.n : V.k) - 1); commit(); });
+  R.prev.addEventListener('click', () => { if (!V.A) return; play(false); setK((V.k < 0 ? V.A.n : V.k) - 1); commit(); });
   R.next.addEventListener('click', () => { play(false); setK(V.k + 1); commit(); });
   R.all.addEventListener('click', () => { play(false); setK(V.k < 0 ? 0 : -1); commit(); });
   R.slider.addEventListener('input', () => { if (V.playing) play(false); setK(parseInt(R.slider.value, 10)); commitSoon(); });

@@ -170,16 +170,22 @@ function uploadLut() {
 // ----------------------------------------------------------------------------- event data
 function setGeometry() { /* tile positions are read from the geometry passed to setEvent */ }
 
+/** blank the header (window span, notes, hover title) when there is no event to describe */
+function clearHead() {
+  O.span.textContent = ''; O.note.textContent = ''; O.head.title = '';
+  layoutStage();
+}
+
 function setEvent(bundle, geometry) {
   O.E = null; O.hover = null;
-  if (!bundle) { schedule(); return; }
+  if (!bundle) { clearHead(); schedule(); return; }
   const meta = bundle.meta, opm = meta.optical || {};
   const time = bundle.get('oph/time'), pe = bundle.get('oph/pe');
   const ftime = bundle.get('flash/time');
   const nh = time ? time.length : 0, nf = ftime ? ftime.length : 0;
   if (!nh && !nf) {
     showMsg('No optical data in this event' + ((meta.notes || []).length ? ': ' + meta.notes.filter((n) => /optical|flash|ophit/i.test(n)).join('; ') : ''));
-    O.note.textContent = ''; schedule(); return;
+    clearHead(); schedule(); return;
   }
   showMsg('');
   const E = { nh, nf, bundle, meta, opm, geometry };
@@ -521,7 +527,7 @@ function onWheel(e) {
 }
 function onDown(e) {
   const [mx, my] = mouse(e);
-  if (panelAt(mx, my) < 0 && mx < O.rects[0].x) return;
+  if (!O.rects.length || (panelAt(mx, my) < 0 && mx < O.rects[0].x)) return;   // before the first layout
   O.drag = { mx, x0: O.x0, x1: O.x1 };
   O.ovc.setPointerCapture(e.pointerId);
 }
@@ -530,7 +536,7 @@ function onMove(e) {
   if (O.drag) {
     const r = O.rects[0], dt = (mx - O.drag.mx) / r.w * (O.drag.x1 - O.drag.x0);
     setX(O.drag.x0 - dt, O.drag.x1 - dt);
-    O.tip.style.display = 'none';
+    clearHover();          // the ring would stay put while the points pan under it
     return;
   }
   pick(mx, my);
