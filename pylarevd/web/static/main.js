@@ -317,6 +317,9 @@ let files = [];
 let events = [];
 let loadToken = 0;
 let abortCtl = null;
+// a link to a file that could not be opened falls back to another file: the hit / flash tags of the link,
+// kept if that file has them (set by boot, used by the first event load)
+let fallbackTags = null;
 
 /** Abort the request in flight (file or event) and return the signal of a new one. */
 function newSignal() {
@@ -379,6 +382,13 @@ async function loadEvent() {
   try {
     const bundle = await api.event(state.file, state.entry, state.hits, state.flash, sig);
     if (tok !== loadToken) return;
+    if (fallbackTags) {
+      const want = fallbackTags, meta = bundle.meta, patch = {};
+      fallbackTags = null;
+      if (want.hits && want.hits !== meta.hit_tag && (meta.hit_tags || []).includes(want.hits)) patch.hits = want.hits;
+      if (want.flash && want.flash !== meta.flash_tag && (meta.flash_tags || []).includes(want.flash)) patch.flash = want.flash;
+      if (Object.keys(patch).length) { setState(patch); return loadEvent(); }
+    }
     const t1 = performance.now();
     app.bundle = bundle;
     guard(app, 'resetTruth', bundle);           // truth.js: filter model of the new event (before the selection)
@@ -487,7 +497,9 @@ async function boot() {
     if (!files.length) { status(linkErr || 'no files available', true); return; }
     const f = files.find((x) => x.path === state.file) || files[0];
     $('sel-file').value = f.path;
+    if (linkErr && f.path !== state.file) fallbackTags = { hits: state.hits, flash: state.flash };
     await openFile(f.path, f.path === state.file ? state.entry : 0);
+    fallbackTags = null;
     if (linkErr) status(`could not open the linked file (${linkErr}); showing ${f.name || f.path}`, true);
   } catch (e) {
     console.error(e); status(String(e.message || e), true);
