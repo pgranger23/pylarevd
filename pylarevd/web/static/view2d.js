@@ -1579,9 +1579,7 @@ function updateHover(px, py, e) {
     if (ml) {                         // a true trajectory (no hit under the cursor)
       const M = V.app.truth.model;
       V.app.hoverObject({ pfp: -1, slice: -1, mc: ml.row }, e.shiftKey);
-      V.tip.textContent = `true ${pdgSymbol(M.pdg[ml.row])}  (track id ${M.tid[ml.row]})`;
-      V.tip.style.display = 'block';
-      V.tip.style.left = `${Math.max(2, px + 14)}px`; V.tip.style.top = `${Math.max(2, py + 14)}px`;
+      showTip([`true ${pdgSymbol(M.pdg[ml.row])}  (track id ${M.tid[ml.row]})`], px, py);
       return;
     }
     hideTip(); V.app.hoverObject(null); return;
