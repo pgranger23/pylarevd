@@ -15,6 +15,8 @@ import re
 import tempfile
 import time
 
+from .bundle import MAGIC
+
 _EVENT_FILES: dict = {}     # per-process: path -> EventFile (workers reuse it)
 
 _SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
@@ -124,7 +126,7 @@ def _read(dest: str):
     try:
         with open(dest, "rb") as fh:
             data = fh.read()
-        return data if data[:4] == b"EVDB" else None
+        return data if data[:4] == MAGIC else None
     except OSError:
         return None
 
