@@ -170,16 +170,22 @@ function uploadLut() {
 // ----------------------------------------------------------------------------- event data
 function setGeometry() { /* tile positions are read from the geometry passed to setEvent */ }
 
+/** blank the header (window span, notes, hover title) when there is no event to describe */
+function clearHead() {
+  O.span.textContent = ''; O.note.textContent = ''; O.head.title = '';
+  layoutStage();
+}
+
 function setEvent(bundle, geometry) {
   O.E = null; O.hover = null;
-  if (!bundle) { schedule(); return; }
+  if (!bundle) { clearHead(); schedule(); return; }
   const meta = bundle.meta, opm = meta.optical || {};
   const time = bundle.get('oph/time'), pe = bundle.get('oph/pe');
   const ftime = bundle.get('flash/time');
   const nh = time ? time.length : 0, nf = ftime ? ftime.length : 0;
   if (!nh && !nf) {
     showMsg('No optical data in this event' + ((meta.notes || []).length ? ': ' + meta.notes.filter((n) => /optical|flash|ophit/i.test(n)).join('; ') : ''));
-    O.note.textContent = ''; schedule(); return;
+    clearHead(); schedule(); return;
   }
   showMsg('');
   const E = { nh, nf, bundle, meta, opm, geometry };
