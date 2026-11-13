@@ -359,12 +359,31 @@ def _style_legend(ax, t: Theme, **kwargs):
                      labelcolor=t.fg, framealpha=0.9, **kwargs)
 
 
+def _legend_entries(axes) -> tuple[list, list]:
+    """Legend (handles, labels) of several axes, first appearance per label."""
+    handles, labels = [], []
+    for ax in axes:
+        for h, lab in zip(*ax.get_legend_handles_labels()):
+            if lab not in labels:
+                handles.append(h)
+                labels.append(lab)
+    return handles, labels
+
+
 def _style_colorbar(cb, label: str, t: Theme, fonts: dict) -> None:
     cb.set_label(label, color=t.fg_muted, fontsize=fonts["label"])
     cb.ax.yaxis.set_tick_params(color=t.fg_muted, labelsize=fonts["tick"])
     cb.outline.set_edgecolor(t.grid)
     for lbl in cb.ax.get_yticklabels():
         lbl.set_color(t.fg_muted)
+
+
+def _check_options(*options) -> None:
+    """Raise ValueError naming the first (name, value, allowed) not allowed."""
+    for name, value, allowed in options:
+        if value not in allowed:
+            raise ValueError(
+                f"{name}={value!r} is not one of {', '.join(allowed)}")
 
 
 def _vertex_roles(event, n: int) -> tuple[list, list, list]:
@@ -485,6 +504,10 @@ def _panels(hits, geometry, *, min_hits: int = 1, merge: str = "orientation"
     """
     out: list[PanelSpec] = []
     finite = np.isfinite(hits.w) & np.isfinite(hits.x)
+    # A panel needs at least one drawable hit whatever min_hits says: an empty
+    # one (merge="none", a panel whose hits all lack geometry) has no view to
+    # name and no range to summarise.
+    min_hits = max(min_hits, 1)
 
     if merge == "none":
         for key in np.unique(hits.panel):
@@ -841,13 +864,10 @@ class EventDisplay(_TruthInfo):
                  radiologicals: bool = True,
                  theme: str = "dark", colormap: str = DEFAULT_COLORMAP,
                  preset: str = DEFAULT_PRESET):
-        for name, value, allowed in (("merge", merge, self.MERGES),
-                                     ("space", space, self.SPACES),
-                                     ("colour_by", colour_by, self.COLOUR_BY),
-                                     ("colour_scale", colour_scale, self.SCALES)):
-            if value not in allowed:
-                raise ValueError(
-                    f"{name}={value!r} is not one of {', '.join(allowed)}")
+        _check_options(("merge", merge, self.MERGES),
+                       ("space", space, self.SPACES),
+                       ("colour_by", colour_by, self.COLOUR_BY),
+                       ("colour_scale", colour_scale, self.SCALES))
         self.event = event
         self.radiologicals = radiologicals
         self.hits = hits if hits is not None else event.hits()
@@ -868,9 +888,7 @@ class EventDisplay(_TruthInfo):
         self.theme = resolve_theme(theme)
         resolve_colormap(colormap)
         self.colormap = colormap
-        if preset not in PRESETS:
-            raise ValueError(
-                f"preset={preset!r} is not one of {', '.join(PRESETS)}")
+        _check_options(("preset", preset, PRESETS))
         self.preset = preset
         self.panels = (_readout_panels(self.hits, self.geometry,
                                        min_hits=min_hits_per_panel)
@@ -1396,8 +1414,10 @@ class EventDisplay(_TruthInfo):
                 or self.mc is not None or self.showers is not None
                 or self.neutrino is not None):
             # one figure-level entry: a per-panel legend would appear only on
-            # the panels that happen to contain truth, which reads as an error
-            handles, labels = axes.flat[0].get_legend_handles_labels()
+            # the panels that happen to contain truth, which reads as an error.
+            # Gathered from every panel: an overlay absent from the first one
+            # (a track that crosses only the collection view) still draws.
+            handles, labels = _legend_entries(axes.flat[:n])
             if handles:
                 # markerscale has to stay modest: the legend now mixes lines,
                 # a filled patch and a star marker, and a large scale blows the
@@ -1426,19 +1446,20 @@ class EventDisplay(_TruthInfo):
                                  handlelength=1.8, columnspacing=1.2,
                                  borderpad=0.4, labelspacing=0.3)
                 leg.set_zorder(10)
+        note = ""
         if sc is not None:
             cb = fig.colorbar(sc, ax=axes.ravel().tolist(), pad=0.01, fraction=0.03)
             _style_colorbar(cb, clabel, t, fonts)
         elif self.is_categorical:
-            n_obj = int(self.groups.max()) + 1 if (self.groups >= 0).any() else 0
+            # Objects present, not the largest id: cluster ids are sparse.
+            n_obj = len(np.unique(self.groups[self.groups >= 0]))
             n_orphan = int((self.groups < 0).sum())
             # Appended to the truth block below rather than drawn at the
             # opposite corner: anchored independently, the two texts printed
             # over each other whenever both were present.
-            self._extra_note = (f"coloured by {self.colour_by}: {n_obj} objects "
-                                f"(colour x marker), {n_orphan} unassociated hits")
+            note = (f"coloured by {self.colour_by}: {n_obj} objects "
+                    f"(colour x marker), {n_orphan} unassociated hits")
         truth = self._truth_block()
-        note = getattr(self, "_extra_note", "")
         head = truth.splitlines()[0] if truth else ""
         rest = truth.splitlines()[1:] if truth else []
         if note:
@@ -1753,11 +1774,9 @@ class Display3D(_TruthInfo):
                  colormap: str = DEFAULT_COLORMAP, preset: str = DEFAULT_PRESET,
                  particle_symbols: bool = False):
         self.radiologicals = radiologicals
-        if focus not in self.FOCUS:
-            raise ValueError(f"focus={focus!r} is not one of {', '.join(self.FOCUS)}")
-        if colour_by not in self.COLOUR_BY:
-            raise ValueError(
-                f"colour_by={colour_by!r} is not one of {', '.join(self.COLOUR_BY)}")
+        _check_options(("focus", focus, self.FOCUS),
+                       ("colour_by", colour_by, self.COLOUR_BY),
+                       ("colour_scale", colour_scale, self.SCALES))
         self.event = event
         self.sp = spacepoints if spacepoints is not None else event.spacepoints()
         self.truth = truth
@@ -1778,6 +1797,7 @@ class Display3D(_TruthInfo):
         self.theme = resolve_theme(theme)
         resolve_colormap(colormap)
         self.colormap = colormap
+        _check_options(("preset", preset, PRESETS))
         self.preset = preset
         self.particle_symbols = particle_symbols
 
@@ -2089,10 +2109,11 @@ class Display3D(_TruthInfo):
                elev: float = 18.0, azim: float = -60.0, roll: float | None = None,
                particle_symbols: bool | None = None,
                zoom: float = 1.45, pad: float = 0.20,
-               figsize: tuple[float, float] = (9.8, 8.2)):
+               figsize: tuple[float, float] | None = None):
+        """Static 3-D figure; ``figsize=None`` scales 9.8 x 8.2 in by the preset."""
         plt = _pyplot()
         t, fonts = self.theme, _fonts(self.preset)
-        fig = plt.figure(figsize=figsize or _preset_figsize(self.preset, 11.0, 7.0))
+        fig = plt.figure(figsize=figsize or _preset_figsize(self.preset, 9.8, 8.2))
         fig.patch.set_facecolor(t.fig_bg)
         ax = fig.add_subplot(111, projection="3d")
 
@@ -2249,13 +2270,19 @@ class Display3D(_TruthInfo):
 
     def rotate_gif(self, elev: float = 18.0, start_azim: float = -60.0,
                    step: int = 3, fps: int = 12,
-                   figsize: tuple[float, float] = (9.8, 8.0),
+                   figsize: tuple[float, float] | None = None,
                    zoom: float = 1.45, pad: float = 0.20,
                    marker_size: float = 3.2, alpha: float = 1.0,
                    particle_symbols: bool | None = None) -> bytes:
-        """Render a 360-degree rotating animated GIF of the 3D event."""
+        """Render a 360-degree rotating animated GIF of the 3D event.
+
+        ``figsize=None`` scales 9.8 x 8.0 in by the preset.
+        """
         import io
         from PIL import Image
+
+        if figsize is None:
+            figsize = _preset_figsize(self.preset, 9.8, 8.0)
 
         fig = self.figure(elev=elev, azim=start_azim, figsize=figsize,
                           zoom=zoom, pad=pad,
@@ -2331,6 +2358,7 @@ class FlashDisplay3D(_TruthInfo):
         self.theme = resolve_theme(theme)
         resolve_colormap(colormap)
         self.colormap = colormap
+        _check_options(("preset", preset, PRESETS))
         self.preset = preset
 
     @property
@@ -2607,9 +2635,13 @@ class FlashDisplay3D(_TruthInfo):
         return fig
 
     def save_html(self, path: str, *, bundle_plotlyjs: bool = True, **kwargs) -> str:
-        # kwargs are accepted for a uniform signature but, unlike the other
-        # displays, neither forwarded nor given _PLOTLY_CONFIG.
-        return _write_html(self.plotly_figure(), path, bundle_plotlyjs)
+        """Write an interactive HTML page (see :meth:`EventDisplay.save_html`)."""
+        return _write_html(self.plotly_figure(**kwargs), path, bundle_plotlyjs,
+                           config=_PLOTLY_CONFIG)
+
+    def show(self, **kwargs) -> None:
+        """Open the interactive figure (browser, or inline in a notebook)."""
+        self.plotly_figure(**kwargs).show(config=_PLOTLY_CONFIG)
 
     def __repr__(self) -> str:
         return f"<FlashDisplay3D {self.event!r} flashes={len(self.flashes)}>"
@@ -2634,6 +2666,7 @@ class OpticalDisplay(_TruthInfo):
         self.theme = resolve_theme(theme)
         resolve_colormap(colormap)
         self.colormap = colormap
+        _check_options(("preset", preset, PRESETS))
         self.preset = preset
 
     @property
