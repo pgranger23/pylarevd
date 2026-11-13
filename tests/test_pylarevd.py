@@ -1254,11 +1254,6 @@ def test_best_match_keeps_each_pfparticle_exactly_once():
 
 
 @needs_data
-@pytest.mark.xfail(strict=True, reason=(
-    "pylario bug: pfp_track_scores() keeps Pandora's TrackScore = -1 "
-    "('not characterised', set with no MVA features) as a real score, so a "
-    "PFParticle Pandora calls a track (PDG 13) scores as a shower; atmnu "
-    "entry 0, PFParticle 2"))
 def test_track_score_agrees_with_pandoras_own_pdg_code():
     """TrackScore > 0.5 must reproduce Pandora's 13-vs-11 assignment.
 
