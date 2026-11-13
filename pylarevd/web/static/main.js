@@ -86,6 +86,7 @@ export const app = {
   views: { view3d, view2d, viewlight, viewoptical, viewtrigger },
   get theme() { return THEMES[state.theme] || THEMES.dark; },
   setState, registerParam, status, requestLayout,
+  /** Call every `type` listener in order; one that throws is logged and does not stop the others. */
   emit(type, ...args) {
     for (const fn of (listeners[type] || []).slice()) { try { fn(...args); } catch (e) { console.error(`listener ${type}:`, e); } }
   },
@@ -155,12 +156,7 @@ function afterChange(changed) {
   writeUrl();
   syncControls();
   eachView('onState', state, changed);
-  notify('state', state, changed);
-}
-
-/** Call fn(...args) of every listener of `type`; unlike app.emit, a throwing listener propagates. */
-function notify(type, ...args) {
-  for (const fn of listeners[type].slice()) fn(...args);
+  app.emit('state', state, changed);
 }
 
 /** Call the optional method `fn` of every view module (errors are logged, see guard). */
@@ -365,7 +361,7 @@ async function openFile(path, entry) {
     // changing file resets the per-file selections
     const fileChanged = !!state.file && state.file !== path;
     setState({ file: path, entry: e ? e.entry : 0, ...(fileChanged && entry === 0 ? { hits: '', flash: '' } : {}) });
-    notify('geometry', geo);
+    app.emit('geometry', geo);
     eachView('setGeometry', geo);
     updateEventLabel();
     await loadEvent();
@@ -400,7 +396,7 @@ async function loadEvent() {
     $('trig-group').hidden = !(meta.available && meta.available.trigger);
     const t2 = performance.now();
     eachView('setEvent', bundle, app.geometry);
-    notify('event', bundle, app.geometry);
+    app.emit('event', bundle, app.geometry);
     const t3 = performance.now();
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const t4 = performance.now();
